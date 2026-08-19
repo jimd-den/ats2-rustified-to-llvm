@@ -1,0 +1,5 @@
+adder(10)(5)   = 15
+scaler(3)(7)   = 21
+countdown(4)(0)= 4
+twice(add10,1) = 21
+plus(3)(4)     = 7

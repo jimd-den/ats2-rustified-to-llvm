@@ -1,0 +1,10 @@
+[package]
+name = "ats2-infrastructure"
+description = "Concrete implementations of the ports: lexer, parser, LLVM IR emitter, CLI adapters."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ats2-domain = { path = "../domain" }
+ats2-application = { path = "../application" }

@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/domain",
+    "crates/application",
+    "crates/infrastructure",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+# ---------------------------------------------------------------------------
+#  ATS2 -> LLVM compiler, Rustified.
+#
+#  This workspace is organised as a *screaming architecture*: four crates,
+#  one per Clean Architecture layer, so that the dependency rule is enforced
+#  by the compiler itself rather than by convention:
+#
+#      ats2-domain ................ pure domain data (Tokens, AST, Errors)
+#      ats2-application ........... use cases + ports (traits, test doubles)
+#      ats2-infrastructure ........ lexer, parser, LLVM-IR emitter, adapters
+#      ats2-cli ................... the `ats2llvm` binary (a thin controller)
+#
+#  Zero external dependencies: pure, standard-library Rust only.  LLVM IR is
+#  emitted as canonical textual IR, which clang/llc can lower to a binary.
+# ---------------------------------------------------------------------------

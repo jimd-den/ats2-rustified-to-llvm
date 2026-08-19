@@ -1,0 +1,5 @@
+ident<int>(42)      = 42
+ident<string>("hi") = hi
+ident<bool>(true)   = true
+thrice<int>(7)      = 7
+count_down<string>  = 4

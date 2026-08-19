@@ -1,0 +1,9 @@
+[package]
+name = "ats2-application"
+description = "ATS2 use cases and ports (abstract traits). Depends on the domain layer only."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ats2-domain = { path = "../domain" }

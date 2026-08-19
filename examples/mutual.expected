@@ -1,0 +1,3 @@
+even(10) = true
+odd(10)  = false
+collatz_steps(27) = 111

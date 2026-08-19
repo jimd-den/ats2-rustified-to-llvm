@@ -1,0 +1,13 @@
+[package]
+name = "ats2-cli"
+description = "The ats2llvm binary: a thin controller wiring the application use cases to infrastructure."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ats2llvm"
+path = "src/main.rs"
+
+[dependencies]
+ats2-infrastructure = { path = "../infrastructure" }

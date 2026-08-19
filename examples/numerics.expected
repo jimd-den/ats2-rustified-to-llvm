@@ -1,0 +1,7 @@
+gfact<int>(12)    = 479001600
+gfact<double>(12) = 479001600.000000
+area(2.0)         = 12.566360
+2.5 > 1.5         = true
+length            = 3
+is_nil            = false
+first isnot empty = true

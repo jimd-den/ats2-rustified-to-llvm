@@ -1,0 +1,10 @@
+[package]
+name = "ats2-domain"
+description = "Pure ATS2 domain data: tokens, AST, errors. Zero knowledge of files, CLI, or targets."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The domain layer deliberately imports NOTHING.  This is what makes the
+# data "imputrescible": it cannot rot because it has no dependencies.
