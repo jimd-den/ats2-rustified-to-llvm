@@ -43,6 +43,186 @@ extern fun{a:t@ype} list0_length (xs: list0(a)): int
 implement{a} list0_length (xs) =
   case xs of | list0_nil() => 0 | list0_cons(_, r) => 1 + list0_length(r)
 
+// --- lists -------------------------------------------------------
+//
+// The list library, in ATS.  Every function here is a template over an
+// element type it never inspects, which is exactly what makes writing
+// them in the language rather than in the emitter worth doing: a shim
+// would have to be written once per element type, and these are written
+// once.
+//
+// Nothing here costs a program that does not use it: the prelude is
+// filtered down to the names a program mentions, and a template with no
+// instantiation is never emitted.
+
+extern fun{a:t@ype} list_length (xs: list0(a)): int
+implement{a} list_length (xs) =
+  case+ xs of
+  | list0_nil () => 0
+  | list0_cons (_, r) => 1 + list_length<a> (r)
+
+extern fun{a:t@ype} list_append (xs: list0(a), ys: list0(a)): list0(a)
+implement{a} list_append (xs, ys) =
+  case+ xs of
+  | list0_nil () => ys
+  | list0_cons (x, r) => list0_cons (x, list_append<a> (r, ys))
+
+// Reversing is the accumulating loop, not append-in-a-loop: the naive
+// spelling walks the whole list again for every element.
+extern fun{a:t@ype} list_reverse_append (xs: list0(a), acc: list0(a)): list0(a)
+implement{a} list_reverse_append (xs, acc) =
+  case+ xs of
+  | list0_nil () => acc
+  | list0_cons (x, r) => list_reverse_append<a> (r, list0_cons (x, acc))
+
+extern fun{a:t@ype} list_reverse (xs: list0(a)): list0(a)
+implement{a} list_reverse (xs) = list_reverse_append<a> (xs, list0_nil ())
+
+extern fun{a:t@ype} list_nth (xs: list0(a), n: int): a
+implement{a} list_nth (xs, n) =
+  case+ xs of
+  | list0_cons (x, r) => if n = 0 then x else list_nth<a> (r, n-1)
+  | list0_nil () => $raise ListSubscriptExn
+
+extern fun{a:t@ype} list_last (xs: list0(a)): a
+implement{a} list_last (xs) =
+  case+ xs of
+  | list0_cons (x, r) =>
+      (case+ r of list0_nil () => x | list0_cons (_, _) => list_last<a> (r))
+  | list0_nil () => $raise ListSubscriptExn
+
+extern fun{a:t@ype} list_head (xs: list0(a)): a
+implement{a} list_head (xs) =
+  case+ xs of
+  | list0_cons (x, _) => x
+  | list0_nil () => $raise ListSubscriptExn
+
+extern fun{a:t@ype} list_tail (xs: list0(a)): list0(a)
+implement{a} list_tail (xs) =
+  case+ xs of
+  | list0_cons (_, r) => r
+  | list0_nil () => $raise ListSubscriptExn
+
+extern fun{a:t@ype} list_take (xs: list0(a), n: int): list0(a)
+implement{a} list_take (xs, n) =
+  if n <= 0 then list0_nil ()
+  else
+    case+ xs of
+    | list0_nil () => list0_nil ()
+    | list0_cons (x, r) => list0_cons (x, list_take<a> (r, n-1))
+
+extern fun{a:t@ype} list_drop (xs: list0(a), n: int): list0(a)
+implement{a} list_drop (xs, n) =
+  if n <= 0 then xs
+  else
+    case+ xs of
+    | list0_nil () => list0_nil ()
+    | list0_cons (_, r) => list_drop<a> (r, n-1)
+
+// `list_make_intrange (m, n)` is [m, m+1, ..., n-1] — half-open, as
+// every range in ATS is.
+extern fun list_make_intrange (m: int, n: int): list0(int)
+implement list_make_intrange (m, n) =
+  if m >= n then list0_nil () else list0_cons (m, list_make_intrange (m+1, n))
+
+extern fun{a:t@ype} list_concat (xss: list0(list0(a))): list0(a)
+implement{a} list_concat (xss) =
+  case+ xss of
+  | list0_nil () => list0_nil ()
+  | list0_cons (xs, r) => list_append<a> (xs, list_concat<a> (r))
+
+// --- the higher-order half ---------------------------------------
+//
+// ATS gives each of these two spellings: one taking a closure, and one
+// with a `$`-hole the caller fills in.  The closure form is the one
+// that can be written in ATS, so it is the one written here.
+
+extern fun{a:t@ype}{b:t@ype}
+list_map_cloref (xs: list0(a), f: (a) -> b): list0(b)
+implement{a}{b} list_map_cloref (xs, f) =
+  case+ xs of
+  | list0_nil () => list0_nil ()
+  | list0_cons (x, r) => list0_cons (f (x), list_map_cloref<a><b> (r, f))
+
+extern fun{a:t@ype}
+list_filter_cloref (xs: list0(a), p: (a) -> bool): list0(a)
+implement{a} list_filter_cloref (xs, p) =
+  case+ xs of
+  | list0_nil () => list0_nil ()
+  | list0_cons (x, r) =>
+      if p (x)
+        then list0_cons (x, list_filter_cloref<a> (r, p))
+        else list_filter_cloref<a> (r, p)
+
+extern fun{a:t@ype}{b:t@ype}
+list_foldleft_cloref (xs: list0(a), init: b, f: (b, a) -> b): b
+implement{a}{b} list_foldleft_cloref (xs, init, f) =
+  case+ xs of
+  | list0_nil () => init
+  | list0_cons (x, r) => list_foldleft_cloref<a><b> (r, f (init, x), f)
+
+extern fun{a:t@ype}{b:t@ype}
+list_foldright_cloref (xs: list0(a), f: (a, b) -> b, init: b): b
+implement{a}{b} list_foldright_cloref (xs, f, init) =
+  case+ xs of
+  | list0_nil () => init
+  | list0_cons (x, r) => f (x, list_foldright_cloref<a><b> (r, f, init))
+
+extern fun{a:t@ype} list_foreach_cloref (xs: list0(a), f: (a) -> void): void
+implement{a} list_foreach_cloref (xs, f) =
+  case+ xs of
+  | list0_nil () => ()
+  | list0_cons (x, r) => let val () = f (x) in list_foreach_cloref<a> (r, f) end
+
+extern fun{a:t@ype} list_exists_cloref (xs: list0(a), p: (a) -> bool): bool
+implement{a} list_exists_cloref (xs, p) =
+  case+ xs of
+  | list0_nil () => false
+  | list0_cons (x, r) => if p (x) then true else list_exists_cloref<a> (r, p)
+
+extern fun{a:t@ype} list_forall_cloref (xs: list0(a), p: (a) -> bool): bool
+implement{a} list_forall_cloref (xs, p) =
+  case+ xs of
+  | list0_nil () => true
+  | list0_cons (x, r) => if p (x) then list_forall_cloref<a> (r, p) else false
+
+extern fun{a:t@ype} list_tabulate_cloref (n: int, f: (int) -> a): list0(a)
+extern fun{a:t@ype} list_tabulate_from (i: int, n: int, f: (int) -> a): list0(a)
+implement{a} list_tabulate_cloref (n, f) = list_tabulate_from<a> (0, n, f)
+implement{a} list_tabulate_from (i, n, f) =
+  if i >= n then list0_nil ()
+  else list0_cons (f (i), list_tabulate_from<a> (i+1, n, f))
+
+// --- taking a list apart at an index -----------------------------
+
+// The element at `i` is written back through `x`, and what is returned
+// is the list without it.  ATS spells the out-parameter `&a`, and here
+// it is the assignment in the body that makes it one.
+extern fun{a:t@ype}
+list_takeout_at (xs: list0(a), i: int, x: &a): list0(a)
+implement{a} list_takeout_at (xs, i, x) =
+  case+ xs of
+  | list0_nil () => list0_nil ()
+  | list0_cons (y, r) =>
+      if i = 0
+        then let val () = x := y in r end
+        else list0_cons (y, list_takeout_at<a> (r, i-1, x))
+
+extern fun{a:t@ype} list_insert_at (xs: list0(a), i: int, x: a): list0(a)
+implement{a} list_insert_at (xs, i, x) =
+  if i <= 0 then list0_cons (x, xs)
+  else
+    case+ xs of
+    | list0_nil () => list0_cons (x, list0_nil ())
+    | list0_cons (y, r) => list0_cons (y, list_insert_at<a> (r, i-1, x))
+
+extern fun{a:t@ype} list_remove_at (xs: list0(a), i: int): list0(a)
+implement{a} list_remove_at (xs, i) =
+  case+ xs of
+  | list0_nil () => list0_nil ()
+  | list0_cons (y, r) =>
+      if i = 0 then r else list0_cons (y, list_remove_at<a> (r, i-1))
+
 // --- printing ----------------------------------------------------
 //
 // ATS prints through a *protocol*: `fprint_val<t>` says how a `t` is

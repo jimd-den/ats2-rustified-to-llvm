@@ -199,6 +199,23 @@ impl InferCtx {
                     if let Some(inst) = self.instantiation_for(name, &args, env) {
                         return Expr::Call(Box::new(inst), args);
                     }
+                    // `list0_cons ("a", list0_nil ())` builds a list of
+                    // strings, and the argument is the only thing that
+                    // says so.  Naming the instance here keeps the
+                    // emitter from reporting an ambiguity in a program
+                    // that was never ambiguous — the same job
+                    // `instantiation_for` does for a template call, for
+                    // the same reason.
+                    if let Some(shape) = self.ctors.get(name) {
+                        if !shape.ty_params.is_empty() {
+                            if let Some(Ty::App(_, ty_args)) = self.ctor_result(shape, &args, env) {
+                                return Expr::Call(
+                                    Box::new(Expr::Inst(name.clone(), ty_args)),
+                                    args,
+                                );
+                            }
+                        }
+                    }
                 }
                 Expr::Call(Box::new(self.walk(callee, env)), args)
             }
@@ -488,6 +505,24 @@ mod tests {
     fn resolve(src: &str) -> Program {
         let p = Parser::parse(src).expect("parse");
         Inferencer::resolve(&p).expect("resolve")
+    }
+
+    #[test]
+    fn a_constructor_call_is_instantiated_from_its_arguments() {
+        // `list0_cons (\"a\", list0_nil ())` can only be building a list
+        // of strings, and nothing but the argument says so — there is no
+        // annotation on the binding and no context around it.  Leaving
+        // it for the emitter means an ambiguity report for a program
+        // that was never ambiguous.
+        let p = resolve(concat!(
+            "datatype list0(a) = list0_nil of () | list0_cons of (a, list0(a))\n",
+            "implement main0 () = { val xs = list0_cons (\"a\", list0_nil ()) }\n",
+        ));
+        let rendered = format!("{:?}", &p.defs()[1]);
+        assert!(
+            rendered.contains("Inst(\"list0_cons\", [Name(\"string\")])"),
+            "the constructor was not instantiated:\n{rendered}"
+        );
     }
 
     #[test]

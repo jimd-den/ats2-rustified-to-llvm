@@ -1,0 +1,21 @@
+xs           = 0, 1, 2, 3, 4
+length       = 5
+reverse      = 4, 3, 2, 1, 0
+append       = 0, 1, 2, 3, 4, 0, 1, 2, 3, 4
+take 3       = 0, 1, 2
+drop 3       = 3, 4
+nth 2        = 2
+last         = 4
+map (*2)     = 0, 2, 4, 6, 8
+filter odd   = 1, 3
+foldl (+)    = 10
+exists >3    = true
+forall >=0   = true
+foreach      = 0 1 2 3 4 
+tabulate sq  = 0, 1, 4, 9, 16
+concat       = 0, 1, 2, 3, 4, 0, 1, 2
+takeout 2    = 2 rest 0, 1, 3, 4
+insert 9 @1  = 0, 9, 1, 2, 3, 4
+remove @1    = 0, 2, 3, 4
+strings      = a, b
+mapped       = 1, 1
