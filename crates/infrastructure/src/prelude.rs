@@ -418,6 +418,38 @@ implement{a} randgen_arrayptr_fill (A, i, n) =
     randgen_arrayptr_fill<a> (A, i+1, n)
   end
 
+// `length` is what ATS programs actually write; `list_length` is what the
+// library calls it.
+extern fun{a:t@ype} length (xs: list0(a)): int
+implement{a} length (xs) = list_length<a> (xs)
+
+// The linear spellings.  A linear list differs from this one in who may
+// keep it and for how long, which is a question for the type checker and
+// not for the machine, so each is the other under a different name.
+extern fun{a:t@ype} list_vt_length (xs: list0(a)): int
+implement{a} list_vt_length (xs) = list_length<a> (xs)
+
+extern fun{a:t@ype} list_vt_concat (xss: list0(list0(a))): list0(a)
+implement{a} list_vt_concat (xss) = list_concat<a> (xss)
+
+extern fun{a:t@ype} list_vt_append (xs: list0(a), ys: list0(a)): list0(a)
+implement{a} list_vt_append (xs, ys) = list_append<a> (xs, ys)
+
+extern fun{a:t@ype} list_vt_reverse (xs: list0(a)): list0(a)
+implement{a} list_vt_reverse (xs) = list_reverse<a> (xs)
+
+extern fun{a:t@ype} list_vt_free (xs: list0(a)): void
+implement{a} list_vt_free (xs) = ()
+
+// `list_tabulate (n)` is the list [f 0, ..., f (n-1)], where `f` is the
+// `$fopr` the caller fills in.  It is *not* here: a routine built around
+// a `$`-hole cannot be written in ATS by this compiler, because a hole
+// is inlined into the caller\'s scope rather than called, and its body
+// reads the caller\'s own bindings.  Writing it in ATS would turn the
+// inlining into a call and lose exactly that.  It is a shim; the
+// closure-taking `list_tabulate_cloref` above is the half that *can* be
+// written here, and is the one to prefer.
+
 // --- printing ----------------------------------------------------
 //
 // ATS prints through a *protocol*: `fprint_val<t>` says how a `t` is
@@ -644,6 +676,10 @@ pub const CTOR_ALIASES: &[(&str, &str)] = &[
     ("list_nil", "list0_nil"),
     ("list_cons", "list0_cons"),
     ("nil0", "list0_nil"),
+    ("nil_vt", "list0_nil"),
+    ("cons_vt", "list0_cons"),
+    ("list_vt_nil", "list0_nil"),
+    ("list_vt_cons", "list0_cons"),
     ("cons0", "list0_cons"),
     ("list_vt_nil", "list0_nil"),
     ("list_vt_cons", "list0_cons"),
@@ -663,8 +699,8 @@ pub const CTOR_ALIASES: &[(&str, &str)] = &[
 /// `list0_nil`/`list0_cons` are what the datatype declares.
 pub fn canonical_ctor(name: &str) -> Option<&'static str> {
     match name {
-        "nil" | "list_nil" | "nil0" | "list_vt_nil" => Some("list0_nil"),
-        "cons" | "list_cons" | "cons0" | "list_vt_cons" => Some("list0_cons"),
+        "nil" | "list_nil" | "nil0" | "list_vt_nil" | "nil_vt" => Some("list0_nil"),
+        "cons" | "list_cons" | "cons0" | "list_vt_cons" | "cons_vt" => Some("list0_cons"),
         "None" | "None_vt" | "option_none" => Some("option0_none"),
         "Some" | "Some_vt" | "option_some" => Some("option0_some"),
         "stream_vt_nil" => Some("stream_nil"),

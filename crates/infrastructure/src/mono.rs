@@ -99,7 +99,14 @@ impl Monomorphiser {
                     // do: the compiler already knows how to print an
                     // int, and the program is adding a case, not
                     // replacing every case.
-                    if !im.instance.is_empty() && im.instance.len() == t.ty_params.len() {
+                    // `implement(a) f<a> (...)` names the instance `<a>`,
+                    // which is the implementation's own parameter — that
+                    // is the generic case written the long way round, not
+                    // an instance.
+                    let generic = im.instance.iter().all(
+                        |t| matches!(t, Ty::Name(n) if im.ty_params.contains(n)),
+                    );
+                    if !generic && !im.instance.is_empty() && im.instance.len() == t.ty_params.len() {
                         let key = instance_key(&im.instance);
                         t.instances.insert(key, (im.params.clone(), im.body.clone()));
                     } else {

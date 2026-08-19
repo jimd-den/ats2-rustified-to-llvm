@@ -56,7 +56,8 @@ impl Lifter {
             })
             .collect();
 
-        let mut ctx = LiftCtx { globals, lifted: Vec::new(), used: HashSet::new() };
+        let mut ctx =
+            LiftCtx { globals, lifted: Vec::new(), used: HashSet::new(), hole_rewrites: Vec::new() };
         for def in &program.defs {
             if let Def::Fun(f) = def {
                 ctx.used.insert(f.name.clone());
@@ -79,6 +80,21 @@ impl Lifter {
                 other => defs.push(other.clone()),
             }
         }
+        // Catch the holes up with every rewrite lifting made.  A hole
+        // whose body mentions none of those names is left exactly as it
+        // was, so applying them all costs nothing and asks nothing about
+        // which scope a hole came from — which is as well, because by
+        // now that is no longer written down anywhere.
+        for def in &mut defs {
+            let Def::Implement(im) = def else { continue };
+            if !im.name.contains('$') {
+                continue;
+            }
+            for (renames, captured) in &ctx.hole_rewrites {
+                im.body = rewrite_calls(&im.body, renames, captured);
+            }
+        }
+
         // Lifted functions are prepended so they precede their callers;
         // order is cosmetic (the emitter registers signatures up front),
         // but reading the output is easier this way.
@@ -99,6 +115,17 @@ struct LiftCtx {
     globals: HashSet<String>,
     lifted: Vec<Def>,
     used: HashSet<String>,
+    /// Every rewrite lifting applied to a call, kept so that template
+    /// *holes* can be given the same treatment.
+    ///
+    /// A hole is inlined into the scope it was written in, so its body
+    /// may call a nested function of that scope — and lifting has just
+    /// given that function extra parameters for what it captured.  The
+    /// hole's call is the same call in the same place and must gain the
+    /// same arguments.  But a hole is hoisted to the top level as it is
+    /// parsed, so it is no longer inside the body being rewritten when
+    /// the rewrite happens; it is caught up with afterwards instead.
+    hole_rewrites: Vec<(HashMap<String, String>, BTreeSet<String>)>,
 }
 
 impl LiftCtx {
@@ -231,6 +258,7 @@ impl LiftCtx {
             }));
         }
 
+        self.hole_rewrites.push((renames.clone(), captured.clone()));
         let body = self.walk(body, scope)?;
         Ok(rewrite_calls(&body, &renames, &captured))
     }

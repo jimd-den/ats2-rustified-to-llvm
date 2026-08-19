@@ -939,11 +939,17 @@ impl ParseCtx<'_> {
         }
         ty_params.extend(self.parse_template_params());
         let name = self.parse_qualified_ident("expected a function name")?;
+        // The implementation's own type parameters are in scope for the
+        // instance it names, so `implement(res) f<res>` is the *generic*
+        // implementation even where a `typedef res` is also in scope: a
+        // binder shadows an outer name.
+        let scope = self.push_type_vars(&ty_params);
         // `implement array_foreach$fwork<a><env> (x, e) = ...` — the
         // arguments say which instance is being filled in.  With one
         // instance per hole in practice, which one is not yet tracked;
         // the arguments are read so the parameter list can be found.
         let instance = self.parse_instance_arguments()?;
+        self.pop_type_vars(scope);
         self.skip_static_annotations();
         // The implement's own parameters are in scope for its signature
         // and body, exactly as the declaration's were for it.
@@ -1648,8 +1654,12 @@ impl ParseCtx<'_> {
         } else {
             Ty::Name(name)
         };
+        // A name bound as a type variable is that variable, whatever an
+        // alias of the same name says elsewhere.
         let atom = match &atom {
-            Ty::Name(n) => self.typedefs.get(n).cloned().unwrap_or(atom),
+            Ty::Name(n) if !self.type_vars.iter().any(|v| v == n) => {
+                self.typedefs.get(n).cloned().unwrap_or(atom)
+            }
             _ => atom,
         };
         // `int n`, `size_t i`, `string n` — a type applied to *static*
@@ -1687,8 +1697,14 @@ impl ParseCtx<'_> {
                         let w = w.clone();
                         self.advance();
                         // An alias means what it was declared to mean,
-                        // here as everywhere else a type name is read.
-                        ty_args.push(self.typedefs.get(&w).cloned().unwrap_or(Ty::Name(w)));
+                        // unless a type variable of that name is in
+                        // scope, which shadows it.
+                        let bound = self.type_vars.iter().any(|v| *v == w);
+                        ty_args.push(if bound {
+                            Ty::Name(w)
+                        } else {
+                            self.typedefs.get(&w).cloned().unwrap_or(Ty::Name(w))
+                        });
                         continue;
                     }
                 }
@@ -4329,6 +4345,22 @@ mod tests {
             d.params[0].ty,
             Ty::Fun(vec![Ty::Name("int".into())], Box::new(Ty::Name("bool".into())))
         );
+    }
+
+    #[test]
+    fn a_template_parameter_shadows_a_typedef_of_the_same_name() {
+        // `implement(res) f<res> (...)` binds `res` as the
+        // implementation's own type parameter.  A `typedef res` in scope
+        // is an outer name, and a binder shadows one — expanding it here
+        // would turn the generic implementation into an instance of
+        // whatever the alias happened to mean.
+        let p = Parser::parse(
+            "typedef res = int\nimplement(res) f<res> (x: res): res = x",
+        )
+        .expect("parse");
+        let Def::Implement(i) = &p.defs()[0] else { panic!("expected an implement") };
+        assert_eq!(i.ty_params, vec!["res".to_string()]);
+        assert_eq!(i.instance, vec![Ty::Name("res".into())]);
     }
 
     #[test]

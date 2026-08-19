@@ -2574,6 +2574,94 @@ impl LlvmIrEmitter {
                 Ok(Some(FnValue { reg: ptr, ty: LlvmType::Array(registry.intern_array(elem)) }))
             }
             // `arrayptr_foreach_env<a><env>(A, n, env)` — run the hole
+            // `list_tabulate<a> (n)` — the list [f 0, ..., f (n-1)],
+            // where `f` is the `$fopr` the caller filled in.
+            //
+            // A shim rather than ATS, because a hole is *inlined* into
+            // the caller's scope rather than called: `list_tabulate$fopr`
+            // in `listpermute` reads two of the enclosing function's own
+            // bindings, and an ATS-level `list_tabulate` would have had
+            // to call it and lose them.
+            //
+            // Counting down rather than up: consing builds a list back
+            // to front, so starting at the last index puts the elements
+            // in order in one pass instead of two.
+            "list_tabulate" | "list_vt_tabulate" | "list_tabulate_vt" => {
+                let [count] = args else {
+                    return Err(CompileError::emit(format!("`{name}` takes a length")));
+                };
+                let n = self.emit_expr(count, fb, registry, module)?;
+                self.require(n.ty, LlvmType::I64, "a list length")?;
+                let elem = match ty_args.first() {
+                    Some(t) => llvm_type_in(t, registry)?,
+                    None => {
+                        return Err(CompileError::emit(format!(
+                            "`{name}` must say what it builds a list of, as in `{name}<int>(n)`"
+                        )))
+                    }
+                };
+                let (nil, cons) = self.list_constructors(elem, registry).ok_or_else(|| {
+                    CompileError::emit(format!(
+                        "`{name}` builds a list of {}, and nothing in this program uses one",
+                        llvm_ty_str(elem)
+                    ))
+                })?;
+                let hole = self.require_hole("list_tabulate$fopr", registry)?;
+
+                let list_ty = LlvmType::Data(nil.datatype);
+                let acc = fb.alloca(&format!("tabulate.acc.{}", fb.block_ids), list_ty);
+                let empty = self.emit_ctor_from_values(&nil, &[], fb, module);
+                fb.line(format!("store ptr {}, ptr {acc}", empty.reg));
+
+                let id = fb.fresh_block_id();
+                let (head, body, done) = (
+                    format!("tabulate.head.{id}"),
+                    format!("tabulate.body.{id}"),
+                    format!("tabulate.done.{id}"),
+                );
+                let index = fb.alloca(&format!("tabulate.i.{id}"), LlvmType::I64);
+                let last = fb.fresh_temp();
+                fb.line(format!("{last} = sub i64 {}, 1", n.reg));
+                fb.line(format!("store i64 {last}, ptr {index}"));
+                fb.line(format!("br label %{head}"));
+
+                fb.label(&head);
+                let i = fb.fresh_temp();
+                let more = fb.fresh_temp();
+                fb.line(format!("{i} = load i64, ptr {index}"));
+                fb.line(format!("{more} = icmp sge i64 {i}, 0"));
+                fb.line(format!("br i1 {more}, label %{body}, label %{done}"));
+
+                fb.label(&body);
+                let x = self.inline_hole(
+                    &hole,
+                    &[FnValue { reg: i.clone(), ty: LlvmType::I64 }],
+                    None,
+                    fb,
+                    registry,
+                    module,
+                )?;
+                let tail = fb.fresh_temp();
+                fb.line(format!("{tail} = load ptr, ptr {acc}"));
+                let cell = self.emit_ctor_from_values(
+                    &cons,
+                    &[x, FnValue { reg: tail, ty: list_ty }],
+                    fb,
+                    module,
+                );
+                fb.line(format!("store ptr {}, ptr {acc}", cell.reg));
+                let prev = fb.fresh_temp();
+                let now = fb.fresh_temp();
+                fb.line(format!("{prev} = load i64, ptr {index}"));
+                fb.line(format!("{now} = sub i64 {prev}, 1"));
+                fb.line(format!("store i64 {now}, ptr {index}"));
+                fb.line(format!("br label %{head}"));
+
+                fb.label(&done);
+                let out = fb.fresh_temp();
+                fb.line(format!("{out} = load ptr, ptr {acc}"));
+                Ok(Some(FnValue { reg: out, ty: list_ty }))
+            }
             // `array_foreach$fwork` over every cell.
             "arrayptr_foreach_env" | "array_foreach_env" | "arrayref_foreach_env"
             | "arrayptr_foreach" | "array_foreach" | "arrayref_foreach" => {
@@ -2789,7 +2877,14 @@ impl LlvmIrEmitter {
                     return Err(CompileError::emit(format!("`{name}` takes one value")));
                 };
                 let v = self.emit_expr(x, fb, registry, module)?;
-                match ty_args.first().map(|t| llvm_type_in(t, registry)).transpose()? {
+                // A target type that cannot be named here is still a
+                // cast that moves no bits.  This happens inside a
+                // template *hole*, whose body is inlined rather than
+                // monomorphised and so may still mention the enclosing
+                // template's type variables; the value's own type is
+                // then the honest answer, and it is the right one,
+                // because the cast never changed it.
+                match ty_args.first().and_then(|t| llvm_type_in(t, registry).ok()) {
                     Some(want) if want != v.ty => {
                         let reinterpreted = FnValue { reg: v.reg.clone(), ty: want };
                         // A numeric conversion is a real instruction; a
@@ -2937,6 +3032,12 @@ impl LlvmIrEmitter {
                 self.require(v.ty, LlvmType::I64, name)?;
                 let ptr = self.emit_alloc_bytes(&v.reg, fb, module);
                 Ok(Some(FnValue { reg: ptr, ty: LlvmType::I8Ptr }))
+            }
+            // Lemmas are proofs.  They say something the type checker
+            // needed to hear and nothing the machine does.
+            "lemma_list_param" | "lemma_list_vt_param" | "lemma_array_param"
+            | "lemma_g1uint_param" | "lemma_g1int_param" => {
+                Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Void }))
             }
             "mfree_gc" | "free_gc" | "mfree" => {
                 for a in args {
@@ -3192,7 +3293,8 @@ impl LlvmIrEmitter {
             // back, are proof steps: the value does not move.
             "arrayptr_takeout_viewptr" | "arrayptr_takeout" | "arrayptr2ptr"
             | "arrayptr_refize" | "ptr2arrayptr" | "ptrcast" | "arrayptr_addback"
-            | "list_vt2t" | "list_t2vt" | "unsafe_cast" | "ignoret" => {
+            | "list_vt2t" | "list_t2vt" | "unsafe_cast" | "ignoret" | "g0ofg1_list"
+            | "list2list_vt" | "list_vt2list" => {
                 let v = self.emit_expr(&args[0], fb, registry, module)?;
                 Ok(Some(v))
             }
@@ -3668,13 +3770,23 @@ impl LlvmIrEmitter {
             }
             values.push(v);
         }
+        Ok(self.emit_ctor_from_values(info, &values, fb, module))
+    }
+
+    /// Build a datatype value from field values already in registers.
+    ///
+    /// Split out of `emit_ctor` so that a shim standing in for a library
+    /// routine can build one too: it has the fields as values rather
+    /// than as expressions, and there is nothing else different about
+    /// the record it needs.
+    fn emit_ctor_from_values(&self, info: &CtorInfo, values: &[FnValue], fb: &mut FnBuilder, module: &mut ModuleBuilder) -> FnValue {
         let ptr = self.emit_alloc(WORD * (1 + info.width), fb, module);
         fb.line(format!("store i64 {}, ptr {ptr}", info.tag));
         for (i, v) in values.iter().enumerate() {
             let addr = self.emit_field_address(&ptr, i, fb);
             fb.line(format!("store {} {}, ptr {addr}", llvm_ty_str(v.ty), v.reg));
         }
-        Ok(FnValue { reg: ptr, ty: LlvmType::Data(info.datatype) })
+        FnValue { reg: ptr, ty: LlvmType::Data(info.datatype) }
     }
 
     /// The address of field `i` of a datatype value: past the tag, then
@@ -4324,6 +4436,28 @@ impl LlvmIrEmitter {
                 llvm_ty_str(other)
             ))),
         }
+    }
+
+    /// The nil and cons of the prelude list whose elements are `elem`.
+    ///
+    /// Found by the element type rather than by name, because the name
+    /// is the mangled one monomorphisation invented and only the type is
+    /// stable.  `None` when no such instance exists — nothing in the
+    /// program built that list, so there is nothing to build one with.
+    fn list_constructors(&self, elem: LlvmType, registry: &Registry) -> Option<(CtorInfo, CtorInfo)> {
+        let cons = registry
+            .ctors
+            .get("list0_cons")?
+            .iter()
+            .find(|c| c.fields.first() == Some(&elem))?
+            .clone();
+        let nil = registry
+            .ctors
+            .get("list0_nil")?
+            .iter()
+            .find(|c| c.datatype == cons.datatype)?
+            .clone();
+        Some((nil, cons))
     }
 
     /// What a list of this datatype holds, if it is a list at all.
@@ -6316,6 +6450,24 @@ mod tests {
              implement main0() = show<bool> (true)",
         );
         assert!(err.message().contains("show"), "{err}");
+    }
+
+    #[test]
+    fn a_hole_sees_the_lifted_form_of_a_function_it_calls() {
+        // A `$`-hole is inlined into the scope it was written in, so its
+        // body may call a nested function of that scope.  Lifting gives
+        // such a function extra parameters for what it captured, and the
+        // hole's call has to gain those arguments too — it is the same
+        // call, written in the same place.
+        let ir = emit(
+            "fun run (xs: list0(int)): list0(int) = let\n\
+               fn pick (i: int): int = list_nth<int> (xs, i)\n\
+               implement list_tabulate$fopr<int> (i) = pick (i)\n\
+             in list_tabulate<int> (3) end\n\
+             implement main0() = println!(run(list_make_intrange(0, 5)))",
+        )
+        .expect("emit");
+        assert!(ir.contains("tabulate.head"), "no tabulate loop:\n{ir}");
     }
 
     #[test]
