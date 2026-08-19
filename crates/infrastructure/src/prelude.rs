@@ -223,6 +223,136 @@ implement{a} list_remove_at (xs, i) =
   | list0_cons (y, r) =>
       if i = 0 then r else list0_cons (y, list_remove_at<a> (r, i-1))
 
+// --- sorting -----------------------------------------------------
+//
+// A merge sort, in ATS.  The ordering arrives as a closure rather than
+// as a `$`-hole because a closure is what the language can express, and
+// `<=` on the caller's own type is the one thing the library cannot
+// know.  Merge sort rather than quicksort: it is stable, and its worst
+// case is its average case, which matters more in a library than the
+// constant factor does.
+
+extern fun{a:t@ype}
+list_merge_cloref (xs: list0(a), ys: list0(a), le: (a, a) -> bool): list0(a)
+implement{a} list_merge_cloref (xs, ys, le) =
+  case+ xs of
+  | list0_nil () => ys
+  | list0_cons (x, xr) =>
+    (
+      case+ ys of
+      | list0_nil () => xs
+      | list0_cons (y, yr) =>
+          // `le` rather than `lt`, and the left side taken when they are
+          // equal: that is what makes the sort stable.
+          if le (x, y)
+            then list0_cons (x, list_merge_cloref<a> (xr, ys, le))
+            else list0_cons (y, list_merge_cloref<a> (xs, yr, le))
+    )
+
+extern fun{a:t@ype}
+list_mergesort_cloref (xs: list0(a), le: (a, a) -> bool): list0(a)
+implement{a} list_mergesort_cloref (xs, le) = let
+  val n = list_length<a> (xs)
+in
+  if n <= 1 then xs
+  else let
+    val half = n / 2
+  in
+    list_merge_cloref<a> (
+      list_mergesort_cloref<a> (list_take<a> (xs, half), le)
+    , list_mergesort_cloref<a> (list_drop<a> (xs, half), le)
+    , le
+    )
+  end
+end
+
+extern fun{a:t@ype} list_min_cloref (xs: list0(a), le: (a, a) -> bool): a
+implement{a} list_min_cloref (xs, le) =
+  case+ xs of
+  | list0_nil () => $raise ListEmptyExn
+  | list0_cons (x, r) =>
+    (
+      case+ r of
+      | list0_nil () => x
+      | list0_cons (_, _) => let
+          val rest = list_min_cloref<a> (r, le)
+        in
+          if le (x, rest) then x else rest
+        end
+    )
+
+extern fun{a:t@ype} list_max_cloref (xs: list0(a), le: (a, a) -> bool): a
+implement{a} list_max_cloref (xs, le) =
+  list_min_cloref<a> (xs, lam (p, q) => le (q, p))
+
+// --- pairing and searching ---------------------------------------
+
+extern fun{a:t@ype}{b:t@ype}{c:t@ype}
+list_zip_with_cloref (xs: list0(a), ys: list0(b), f: (a, b) -> c): list0(c)
+implement{a,b}{c} list_zip_with_cloref (xs, ys, f) =
+  case+ xs of
+  | list0_nil () => list0_nil ()
+  | list0_cons (x, xr) =>
+    (
+      case+ ys of
+      | list0_nil () => list0_nil ()
+      | list0_cons (y, yr) =>
+          list0_cons (f (x, y), list_zip_with_cloref<a,b><c> (xr, yr, f))
+    )
+
+// The position of the first element satisfying `p`, or -1.  ATS returns
+// an option from `find` and an index from `index`; both are here,
+// because a caller that wants the position gains nothing from being
+// handed the element.
+extern fun{a:t@ype} list_index_cloref (xs: list0(a), p: (a) -> bool): int
+extern fun{a:t@ype} list_index_from (xs: list0(a), i: int, p: (a) -> bool): int
+implement{a} list_index_cloref (xs, p) = list_index_from<a> (xs, 0, p)
+implement{a} list_index_from (xs, i, p) =
+  case+ xs of
+  | list0_nil () => ~1
+  | list0_cons (x, r) => if p (x) then i else list_index_from<a> (r, i+1, p)
+
+// --- option ------------------------------------------------------
+//
+// The answer to \"there may not be one\".  A datatype rather than a
+// sentinel, so that `None` is a value the type system can see and a
+// caller cannot forget to check.
+
+datatype option0(a) = option0_none of () | option0_some of (a)
+
+extern fun{a:t@ype} option_is_some (o: option0(a)): bool
+implement{a} option_is_some (o) =
+  case+ o of option0_some (_) => true | option0_none () => false
+
+extern fun{a:t@ype} option_is_none (o: option0(a)): bool
+implement{a} option_is_none (o) =
+  case+ o of option0_some (_) => false | option0_none () => true
+
+extern fun{a:t@ype} option_unwrap_or (o: option0(a), fallback: a): a
+implement{a} option_unwrap_or (o, fallback) =
+  case+ o of option0_some (x) => x | option0_none () => fallback
+
+extern fun{a:t@ype} option_unwrap_exn (o: option0(a)): a
+implement{a} option_unwrap_exn (o) =
+  case+ o of
+  | option0_some (x) => x
+  | option0_none () => $raise OptionNoneExn
+
+extern fun{a:t@ype}{b:t@ype}
+option_map_cloref (o: option0(a), f: (a) -> b): option0(b)
+implement{a}{b} option_map_cloref (o, f) =
+  case+ o of
+  | option0_some (x) => option0_some (f (x))
+  | option0_none () => option0_none ()
+
+extern fun{a:t@ype}
+list_find_cloref (xs: list0(a), p: (a) -> bool): option0(a)
+implement{a} list_find_cloref (xs, p) =
+  case+ xs of
+  | list0_nil () => option0_none ()
+  | list0_cons (x, r) =>
+      if p (x) then option0_some (x) else list_find_cloref<a> (r, p)
+
 // --- printing ----------------------------------------------------
 //
 // ATS prints through a *protocol*: `fprint_val<t>` says how a `t` is
@@ -349,7 +479,7 @@ fun fileref_get_lines_stringlst (f: FILEref): list0(string) =
 "#;
 
 /// The datatypes the prelude declares.
-pub const PRELUDE_DATATYPES: &[&str] = &["list0", "stream_con"];
+pub const PRELUDE_DATATYPES: &[&str] = &["list0", "stream_con", "option0"];
 
 /// Resolve a type name to the one the prelude actually declares, together
 /// with how many of its arguments are *types* rather than static indices.
@@ -365,6 +495,14 @@ pub fn canonical_type(name: &str) -> Option<(&'static str, usize)> {
         // the library that declares it differs in who owns the nodes,
         // which is a question of views and not of representation.
         "Sllist" | "sllist" | "sllist_vt" | "List1" | "list1" => Some(("list0", 1)),
+        // ATS spells the option several ways, and the linear one differs
+        // only in who may keep it.  `opt` is deliberately not among them:
+        // it is a name a program is as likely to want for itself, and an
+        // alias here would rename the program's own datatype out from
+        // under it.
+        "option" | "Option" | "option0" | "option_vt" | "Option_vt" => {
+            Some(("option0", 1))
+        }
         // A linear stream differs from a lazy one in who may force it
         // and how often — a question for the type checker.  Both are a
         // thunk and the cell that remembers what it produced, so they
@@ -404,6 +542,12 @@ pub const CTOR_ALIASES: &[(&str, &str)] = &[
     ("cons0", "list0_cons"),
     ("list_vt_nil", "list0_nil"),
     ("list_vt_cons", "list0_cons"),
+    ("None", "option0_none"),
+    ("Some", "option0_some"),
+    ("None_vt", "option0_none"),
+    ("Some_vt", "option0_some"),
+    ("option_none", "option0_none"),
+    ("option_some", "option0_some"),
     ("stream_vt_nil", "stream_nil"),
     ("stream_vt_cons", "stream_cons"),
 ];
@@ -416,6 +560,8 @@ pub fn canonical_ctor(name: &str) -> Option<&'static str> {
     match name {
         "nil" | "list_nil" | "nil0" | "list_vt_nil" => Some("list0_nil"),
         "cons" | "list_cons" | "cons0" | "list_vt_cons" => Some("list0_cons"),
+        "None" | "None_vt" | "option_none" => Some("option0_none"),
+        "Some" | "Some_vt" | "option_some" => Some("option0_some"),
         "stream_vt_nil" => Some("stream_nil"),
         "stream_vt_cons" => Some("stream_cons"),
         _ => None,
