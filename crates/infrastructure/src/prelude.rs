@@ -353,6 +353,71 @@ implement{a} list_find_cloref (xs, p) =
   | list0_cons (x, r) =>
       if p (x) then option0_some (x) else list_find_cloref<a> (r, p)
 
+// --- arrays ------------------------------------------------------
+//
+// The array primitives — allocating one, taking the pointer out of one —
+// are shims, because they are about storage and storage is the
+// emitter's business.  Everything built *on* them is here, in ATS, for
+// the same reason the list library is.
+
+extern fun{a:t@ype} array_copy (dst: arrayptr(a), src: arrayptr(a), n: int): void
+extern fun{a:t@ype} array_copy_from (dst: arrayptr(a), src: arrayptr(a), i: int, n: int): void
+implement{a} array_copy (dst, src, n) = array_copy_from<a> (dst, src, 0, n)
+implement{a} array_copy_from (dst, src, i, n) =
+  if i >= n then ()
+  else let
+    val () = dst.[i] := src.[i]
+  in
+    array_copy_from<a> (dst, src, i+1, n)
+  end
+
+// --- generic printing --------------------------------------------
+//
+// The `gprint` family writes a value without saying what it is; which
+// one it is comes from `fprint_val`, the same protocol the list printer
+// uses.
+
+extern fun gprint_string (s: string): void
+implement gprint_string (s) = print! (s)
+
+extern fun gprint_newline (): void
+implement gprint_newline () = print_newline ()
+
+extern fun{a:t@ype} gprint_arrayptr (A: arrayptr(a), n: int): void
+extern fun{a:t@ype} gprint_arrayptr_from (A: arrayptr(a), i: int, n: int): void
+implement{a} gprint_arrayptr (A, n) = gprint_arrayptr_from<a> (A, 0, n)
+implement{a} gprint_arrayptr_from (A, i, n) =
+  if i >= n then ()
+  else let
+    val () = if i > 0 then print! (", ")
+    val () = print_val<a> (A.[i])
+  in
+    gprint_arrayptr_from<a> (A, i+1, n)
+  end
+
+// --- random values -----------------------------------------------
+//
+// `randgen_val` is a protocol, not a function: the library cannot know
+// what a random value of the caller's type looks like, so the caller
+// says.  Only the array-filling half can be written here.
+
+extern fun{a:t@ype} randgen_val (): a
+extern fun{a:t@ype} randgen_arrayptr (n: int): arrayptr(a)
+extern fun{a:t@ype} randgen_arrayptr_fill (A: arrayptr(a), i: int, n: int): void
+
+implement{a} randgen_arrayptr (n) = let
+  val A = arrayptr_make_elt<a> (n, randgen_val<a> ())
+in
+  let val () = randgen_arrayptr_fill<a> (A, 0, n) in A end
+end
+implement{a} randgen_arrayptr_fill (A, i, n) =
+  if i >= n then ()
+  else let
+    val () = A.[i] := randgen_val<a> ()
+  in
+    randgen_arrayptr_fill<a> (A, i+1, n)
+  end
+
 // --- printing ----------------------------------------------------
 //
 // ATS prints through a *protocol*: `fprint_val<t>` says how a `t` is
@@ -495,6 +560,15 @@ pub fn canonical_type(name: &str) -> Option<(&'static str, usize)> {
         // the library that declares it differs in who owns the nodes,
         // which is a question of views and not of representation.
         "Sllist" | "sllist" | "sllist_vt" | "List1" | "list1" => Some(("list0", 1)),
+        // `array`, `arrayptr` and `arrayref` differ in who owns the
+        // cells and who may free them — views, all of it, and all erased
+        // before anything runs.  One name here is what lets a function
+        // declared over `&array(a, n)` be matched against an argument
+        // whose type says `arrayptr(a)`.  The length is a static index,
+        // so only the element type survives.
+        "array" | "arrayptr" | "arrayref" | "arrszref" | "Array" | "Arrayptr" => {
+            Some(("array", 1))
+        }
         // ATS spells the option several ways, and the linear one differs
         // only in who may keep it.  `opt` is deliberately not among them:
         // it is a name a program is as likely to want for itself, and an
@@ -510,6 +584,37 @@ pub fn canonical_type(name: &str) -> Option<(&'static str, usize)> {
         "stream_con" | "stream_vt_con" | "lazy_con" => Some(("stream_con", 1)),
         _ => None,
     }
+}
+
+/// Whether a call hands its argument straight back, unchanged.
+///
+/// These are the casts and re-viewings ATS writes between types that
+/// share one machine representation: `ptrcast` turns an `arrayptr` into
+/// a `ptr`, `arrayptr_takeout` hands out the array inside one.  Each
+/// moves no bits, and in ATS what it *does* move — which type the value
+/// may now be read at — travels separately, in a proof.
+///
+/// Proofs are erased here, so a cast that inference could not see
+/// through would take the element type with it and never give it back.
+/// Treating these as transparent is what keeps `revarr (!p, n)` able to
+/// say which instance it means, and it is honest: they are transparent
+/// to the machine as well.
+pub fn preserves_its_argument_type(name: &str) -> bool {
+    matches!(
+        name,
+        "ptrcast"
+            | "arrayptr2ptr"
+            | "ptr2arrayptr"
+            | "arrayptr_takeout"
+            | "arrayptr_takeout_viewptr"
+            | "arrayptr_refize"
+            | "g0ofg1"
+            | "g1ofg0"
+            | "list_vt2t"
+            | "list_t2vt"
+            | "g0ofg1_list"
+            | "unsafe_cast"
+    )
 }
 
 /// Whether a type former names a suspended value — one that `!` forces.

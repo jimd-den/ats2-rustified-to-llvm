@@ -638,6 +638,16 @@ struct Registry {
     /// types around it, so all the candidates are kept and the choice is
     /// made at the use site.
     ctors: HashMap<String, Vec<CtorInfo>>,
+    /// The functions this program actually defines, as opposed to merely
+    /// declaring.
+    ///
+    /// An `extern fun ... = "ext#"` says the definition lives outside
+    /// ATS — often in the `%{ ... %}` block of C this compiler skips.
+    /// Declaring it must not stop the compiler answering it with a shim,
+    /// and when nothing answers it, a C declaration is what lets the
+    /// program call out at all.  Either way, a declaration alone is not
+    /// a definition to call.
+    defined: std::collections::HashSet<String>,
     /// Which of a function's parameters it writes back through.
     ///
     /// `r: &int` where the body says `r := 7` is an *out* parameter: the
@@ -775,6 +785,7 @@ fn registry_of(program: &Program) -> Result<Registry, CompileError> {
                 };
                 let ret = llvm_type_in(&declared, &registry)?;
                 registry.by_ref.insert(f.name.clone(), assigned_parameters(&f.params, &f.body));
+                registry.defined.insert(f.name.clone());
                 registry.fns.insert(f.name.clone(), FnSig { params, ret });
             }
             // A template hole fills a name the *library* declared, not
@@ -802,6 +813,10 @@ fn registry_of(program: &Program) -> Result<Registry, CompileError> {
                         im.params.len()
                     )));
                 }
+                registry.defined.insert(im.name.clone());
+                registry
+                    .by_ref
+                    .insert(im.name.clone(), assigned_parameters(&im.params, &im.body));
             }
             Def::Implement(im) => {
                 // ATS has two entry points: `main0`, whose result is
@@ -2195,7 +2210,12 @@ impl LlvmIrEmitter {
         // A prelude shim shadows nothing: ATS programs `staload` these
         // from the prelude, which this compiler skips, so a definition of
         // the same name in the program itself wins.
-        if !registry.fns.contains_key(name) {
+        //
+        // A *declaration* is not a definition.  `extern fun f (): void =
+        // "ext#"` says the body lives outside ATS — often in the C block
+        // this compiler skips — so the shim must still get its turn, or
+        // the program links against a symbol nobody ever defined.
+        if !registry.defined.contains(name) {
             if let Some(v) = self.emit_shim(name, &ty_args, args, fb, registry, module)? {
                 return Ok(v);
             }
@@ -2218,6 +2238,15 @@ impl LlvmIrEmitter {
             }
         }
         let sig = registry.fns.get(name).ok_or_else(|| CompileError::emit(format!("unknown function `{name}`")))?;
+        // Declared here, defined nowhere and answered by no shim: it is
+        // C's, and a declaration is what lets the call reach it.
+        if !registry.defined.contains(name) {
+            let ps: Vec<&str> = sig.params.iter().map(|p| llvm_ty_str(*p)).collect();
+            module.externs.insert(Box::leak(
+                format!("declare {} @{}({})", llvm_ty_str(sig.ret), sanitize(name), ps.join(", "))
+                    .into_boxed_str(),
+            ));
+        }
         if args.len() != sig.params.len() {
             return Err(CompileError::emit(format!("function `{name}` expects {} argument(s), got {}", sig.params.len(), args.len())));
         }
@@ -2946,6 +2975,48 @@ impl LlvmIrEmitter {
                 self.emit_printf(stream, "%s", &[format!("ptr {}", sv.reg)], fb, module);
                 Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Void }))
             }
+            // The libc random numbers ATS reaches for.  Seeding from the
+            // clock is one call in C and three here, which is why ATS
+            // programs write it as a `%{ ... %}` block — and why that
+            // block, being C this compiler never sees, has to be
+            // answered by name.
+            "drand48" | "srand48_with_time" | "srand48" | "rand" | "srand" | "random" => {
+                for a in args {
+                    self.emit_expr(a, fb, registry, module)?;
+                }
+                match name {
+                    "drand48" => {
+                        module.externs.insert("declare double @drand48()");
+                        let reg = fb.fresh_temp();
+                        fb.line(format!("{reg} = call double @drand48()"));
+                        Ok(Some(FnValue { reg, ty: LlvmType::F64 }))
+                    }
+                    "rand" | "random" => {
+                        module.externs.insert("declare i32 @rand()");
+                        let raw = fb.fresh_temp();
+                        let reg = fb.fresh_temp();
+                        fb.line(format!("{raw} = call i32 @rand()"));
+                        fb.line(format!("{reg} = sext i32 {raw} to i64"));
+                        Ok(Some(FnValue { reg, ty: LlvmType::I64 }))
+                    }
+                    // Seeded from the clock: `srand48(time(0))`.
+                    _ => {
+                        module.externs.insert("declare i64 @time(ptr)");
+                        module.externs.insert("declare void @srand48(i64)");
+                        module.externs.insert("declare void @srand(i32)");
+                        let now = fb.fresh_temp();
+                        fb.line(format!("{now} = call i64 @time(ptr null)"));
+                        if name == "srand" {
+                            let narrowed = fb.fresh_temp();
+                            fb.line(format!("{narrowed} = trunc i64 {now} to i32"));
+                            fb.line(format!("call void @srand(i32 {narrowed})"));
+                        } else {
+                            fb.line(format!("call void @srand48(i64 {now})"));
+                        }
+                        Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Void }))
+                    }
+                }
+            }
             // `compare (x, y)` — the *sign* of the ordering, as an int.
             // Subtracting would overflow; two comparisons cannot.
             "compare" | "g0int_compare" | "g1int_compare" | "gcompare_val_val" => {
@@ -3120,7 +3191,8 @@ impl LlvmIrEmitter {
             // Handing out the pointer inside an `arrayptr`, and taking it
             // back, are proof steps: the value does not move.
             "arrayptr_takeout_viewptr" | "arrayptr_takeout" | "arrayptr2ptr"
-            | "arrayptr_refize" | "ptr2arrayptr" => {
+            | "arrayptr_refize" | "ptr2arrayptr" | "ptrcast" | "arrayptr_addback"
+            | "list_vt2t" | "list_t2vt" | "unsafe_cast" | "ignoret" => {
                 let v = self.emit_expr(&args[0], fb, registry, module)?;
                 Ok(Some(v))
             }
@@ -6244,6 +6316,34 @@ mod tests {
              implement main0() = show<bool> (true)",
         );
         assert!(err.message().contains("show"), "{err}");
+    }
+
+    #[test]
+    fn a_declared_function_with_no_definition_falls_to_the_shim() {
+        // `extern fun srand48_with_time (): void = \"ext#\"` says the
+        // definition lives outside ATS — in the `%{ ... %}` block this
+        // compiler skips, because it emits LLVM IR and never runs a C
+        // compiler.  Declaring it must therefore not stop the compiler
+        // answering it, or the program links against a symbol nobody
+        // ever defined.
+        let ir = emit(
+            "extern fun srand48_with_time (): void\nimplement main0() = srand48_with_time()",
+        )
+        .expect("emit");
+        assert!(ir.contains("@srand48("), "the shim did not answer:\n{ir}");
+        assert!(!ir.contains("call void @srand48_with_time"), "called a symbol nobody defines:\n{ir}");
+    }
+
+    #[test]
+    fn a_declared_function_with_no_definition_or_shim_is_declared_to_c() {
+        // Nothing here knows `my_c_helper`, and `ext#` says it is C's.
+        // Emitting a declaration for it is what makes an ATS program
+        // able to call out at all.
+        let ir = emit(
+            "extern fun my_c_helper (x: int): int\nimplement main0() = println!(my_c_helper(1))",
+        )
+        .expect("emit");
+        assert!(ir.contains("declare i64 @my_c_helper(i64)"), "no C declaration:\n{ir}");
     }
 
     #[test]

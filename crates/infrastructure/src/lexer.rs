@@ -107,6 +107,16 @@ impl<'a> Scanner<'a> {
             '0'..='9' => self.scan_number(start),
             '"' => self.scan_string(start),
             '(' if self.peek2() == Some('*') => self.skip_block_comment(start),
+            // `%{ ... %}` — a block of C, which ATS hands straight to
+            // the C compiler.  This compiler emits LLVM IR and never
+            // runs one, so there is nothing to do with the block; the
+            // point of recognising it here is that it must not be
+            // *lexed* either.  Its braces, quotes and `/*` are C's, and
+            // reading them as ATS turns a well-formed program into a
+            // syntax error.  The opener has several spellings — `%{^`
+            // puts the code above the output, `%{$` below — and all of
+            // them end at `%}`.
+            '%' if self.peek2() == Some('{') => self.skip_inline_c(start),
             '-' if self.peek2() == Some('>') => {
                 self.bump();
                 self.bump();
@@ -226,6 +236,32 @@ impl<'a> Scanner<'a> {
                 return;
             }
             self.bump();
+        }
+    }
+
+    /// Consume a `%{ ... %}` block of foreign code.
+    ///
+    /// Unterminated is an error rather than a silent run to end of file:
+    /// swallowing the rest of the program would report itself as some
+    /// unrelated thing missing, hundreds of lines away.
+    fn skip_inline_c(&mut self, start: Pos) {
+        self.bump();
+        self.bump(); // eat "%{"
+        loop {
+            match self.peek() {
+                None => {
+                    self.error(self.span_from(start), "unterminated `%{` block (no `%}`)");
+                    return;
+                }
+                Some('%') if self.peek2() == Some('}') => {
+                    self.bump();
+                    self.bump();
+                    return;
+                }
+                Some(_) => {
+                    self.bump();
+                }
+            }
         }
     }
 
@@ -497,6 +533,18 @@ mod tests {
 
     fn kinds(source: &str) -> Vec<TokenKind> {
         Lexer::lex(source).expect("lex").into_iter().map(|t| t.kind).collect()
+    }
+
+    #[test]
+    fn inline_c_is_skipped_whole() {
+        // `%{^ ... %}` is a block of C that ATS passes straight through
+        // to the C compiler.  This compiler emits LLVM IR and never runs
+        // a C compiler, so there is nothing it could do with the block —
+        // but it must not try to *lex* it either, or a stray brace or
+        // quote inside becomes a syntax error in a program that is
+        // perfectly well-formed ATS.
+        let k = kinds("%{^\nint f (void) { return 1 ; }\n%}\nfun g (): int = 1");
+        assert_eq!(k[0], TokenKind::Fun);
     }
 
     #[test]

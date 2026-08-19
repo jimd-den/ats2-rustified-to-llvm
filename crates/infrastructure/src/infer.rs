@@ -350,6 +350,11 @@ impl InferCtx {
                     Some(Ty::App("stream_con".into(), args))
                 }
                 Ty::App(n, args) if n == "ref" => args.into_iter().next(),
+                // `!p` on an array *views* the cells rather than loading
+                // one: there is no single element it could mean.  So the
+                // type is unchanged, which is also what the emitter does
+                // with it.
+                Ty::App(n, args) if n == "array" => Some(Ty::App(n, args)),
                 _ => None,
             },
             Expr::IfThenElse(_, t, e) => self.type_of(t, env).or_else(|| self.type_of(e, env)),
@@ -380,6 +385,10 @@ impl InferCtx {
                 Expr::Var(name) => {
                     if let Some(shape) = self.ctors.get(name) {
                         return self.ctor_result(shape, args, env);
+                    }
+                    // A cast that moves no bits moves no type either.
+                    if crate::prelude::preserves_its_argument_type(name) {
+                        return self.type_of(args.first()?, env);
                     }
                     let sig = self.signatures.get(name)?;
                     if sig.ty_params.is_empty() {
@@ -505,6 +514,25 @@ mod tests {
     fn resolve(src: &str) -> Program {
         let p = Parser::parse(src).expect("parse");
         Inferencer::resolve(&p).expect("resolve")
+    }
+
+    #[test]
+    fn a_cast_that_moves_no_bits_moves_no_type_either() {
+        // `ptrcast (A)` drops what ATS knows about `A` into a bare
+        // `ptr`, and the proof it hands back separately is what puts it
+        // there again.  Proofs are erased here, so the only way the
+        // element type survives the cast is for the cast to be
+        // transparent to inference — which is honest, because it is
+        // transparent to the machine too.
+        let p = resolve(concat!(
+            "extern fun{a:t@ype} rev (xs: list0(a)): void\n",
+            "fun f (ys: list0(int)): void = rev (ptrcast (ys))\n",
+        ));
+        let rendered = format!("{:?}", &p.defs()[1]);
+        assert!(
+            rendered.contains("Inst(\"rev\", [Name(\"int\")])"),
+            "the cast lost the element type:\n{rendered}"
+        );
     }
 
     #[test]
