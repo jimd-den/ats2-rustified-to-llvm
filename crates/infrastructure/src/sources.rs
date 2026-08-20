@@ -31,7 +31,13 @@ use ats2_application::ports::{SourceLoaderPort, Unit};
 /// Real ATS resolves these against `$PATSHOME`.  Here they are simply
 /// recognised and declined: the declarations they would have provided
 /// are already in [`crate::prelude`].
-const DISTRIBUTION: [&str; 4] = ["prelude/", "libats/", "share/", "contrib/"];
+const DISTRIBUTION: [&str; 5] = [
+    "prelude/",
+    "libats/",
+    "libc/",
+    "share/",
+    "contrib/",
+];
 
 /// Reads `staload`ed units from the file system.
 pub struct FileSources {
@@ -149,6 +155,19 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn a_libc_staload_is_a_library_path_and_is_declined() {
+        // `staload "libc/SATS/stdio.sats"` names ATS's own libc binding,
+        // which lives under `libats/` in the distribution.  It is not a
+        // file the program owns, so it is recognised and declined — the
+        // prelude answers it — rather than reported as missing.
+        let s = Sandbox::new("libc");
+        let main = s.write("main.dats", "");
+        let loader = FileSources::at(&main);
+        let result = loader.load("libc/SATS/stdio.sats", &main).expect("no error");
+        assert!(result.is_none(), "a distribution path should be declined");
     }
 
     #[test]
