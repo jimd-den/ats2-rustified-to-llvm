@@ -2029,7 +2029,17 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
     /// `[r:int]` — the existential quantifier on a result type.
     fn parse_existentials(&mut self) -> Vec<Quant> {
         let mut out = Vec::new();
-        while self.at(&TokenKind::LBracket) {
+        loop {
+            // `#[n:nat] t` — ATS writes an existential type with a hash
+            // before the bracket, its marker for "exists".  It binds the
+            // same way the bare `[n:nat] t` form does, so the `#` is read
+            // and dropped and the bracket is read as usual.
+            if self.at(&TokenKind::Hash) {
+                self.advance();
+            }
+            if !self.at(&TokenKind::LBracket) {
+                return out;
+            }
             let save = self.pos;
             match self.parse_one_quantifier(&TokenKind::RBracket) {
                 Some(q) => out.push(q),
@@ -2039,7 +2049,6 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
                 }
             }
         }
-        out
     }
 
     fn skip_static_annotations(&mut self) {
@@ -2048,6 +2057,17 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
                 TokenKind::LBrace => self.skip_balanced(&TokenKind::LBrace, &TokenKind::RBrace),
                 TokenKind::LBracket => {
                     self.skip_balanced(&TokenKind::LBracket, &TokenKind::RBracket)
+                }
+                // `#[n:nat]` — an existential type, read and dropped the
+                // way its bracket-alone form is.
+                TokenKind::Hash
+                    if self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|t| t.kind == TokenKind::LBracket) =>
+                {
+                    self.advance(); // `#`
+                    self.skip_balanced(&TokenKind::LBracket, &TokenKind::RBracket);
                 }
                 // `.<>.` — an empty metric.  The lexer reads `<>` as the
                 // not-equal token, so this arrives as three tokens and
@@ -7192,6 +7212,20 @@ mod tests {
             panic!("a value implement is not a val")
         };
         assert_eq!(v.name, "x0");
+    }
+
+    #[test]
+    fn an_existential_return_type_written_with_a_hash_is_read() {
+        // `fun f (n: int): #[n1:nat | n1 >= n] int` — the hash is ATS's
+        // "exists" marker on the return type.  It was not read, so a
+        // signature that promised an existential witness stopped at the
+        // return type.
+        let p = Parser::parse("fun f (n: int): #[n1:nat | n1 >= n] int = n\n").expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else {
+            panic!("expected a fun")
+        };
+        assert_eq!(f.ret, Ty::Name("int".into()));
+        assert!(!f.existentials.is_empty(), "an existential type was recorded");
     }
 
     #[test]
