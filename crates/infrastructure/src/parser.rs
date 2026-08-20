@@ -95,6 +95,29 @@ fn is_skippable_directive(word: &str) -> bool {
             | "nonfix"
             | "classdec"
             | "exception"
+            | "primplmnt"
+            | "primplement"
+            | "abst@ype"
+            | "absview"
+            | "absviewtype"
+            | "absprop"
+            | "viewtypedef"
+            | "viewtype"
+            | "vtype"
+            | "dataviewtype"
+            | "symelim"
+            | "symload"
+            | "castfn"
+            | "tkindef"
+            | "sexpdef"
+            | "vwtpdef"
+            | "irregular"
+            | "withprop"
+            | "withtype"
+            | "withview"
+            | "withviewtype"
+            | "withvtype"
+            | "reassume"
     )
 }
 
@@ -7370,6 +7393,25 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
             }
             other => panic!("expected a store, got {other:?}"),
         }
+    }
+
+
+    #[test]
+    fn a_proof_implementation_parses_even_if_its_body_is_skipped() {
+        // `primplmnt` fills in the body of an `extern prfun`.  This
+        // compiler does not model proof implementations, but the line must
+        // not stop the file: it used to read as "expected a definition".
+        let p = Parser::parse("primplmnt f () = ()").expect("parse");
+        assert!(p.defs().is_empty(), "a skipped directive produces no defs");
+    }
+
+    #[test]
+    fn a_viewtypedef_is_skipped_not_refused() {
+        // `viewtypedef` and its kind are declarations this compiler does
+        // not model; they are skipped like every other directive, never
+        // made into a parse error.
+        let p = Parser::parse("viewtypedef v = view").expect("parse");
+        assert!(p.defs().is_empty());
     }
 
 }
