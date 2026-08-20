@@ -65,6 +65,7 @@ fn is_skippable_directive(word: &str) -> bool {
             | "dynload"
             | "typedef"
             | "abstype"
+            | "abstract"
             | "absvtype"
             | "abst0ype"
             | "abstbox"
@@ -603,7 +604,7 @@ impl ParseCtx<'_> {
                     // mentions that template's type variables — hoisting
                     // it would take those out of the only scope that
                     // gives them a meaning.
-                    if matches!(w.as_str(), "abstype" | "absvtype" | "abst0ype" | "abstbox" | "abstflat" | "assume")
+                    if matches!(w.as_str(), "abstype" | "absvtype" | "abst0ype" | "abstbox" | "abstflat" | "abstract" | "assume")
             ) || self.at_at_joined_abstract();
             let before = self.pos;
             if opens_an_alias {
@@ -617,7 +618,13 @@ impl ParseCtx<'_> {
                     self.parse_typedef()
                 };
                 if !ok {
-                    self.advance();
+                    // `abstype point` with no `= t` — an *opaque*
+                    // abstract type.  Its representation is hidden, so it
+                    // is registered as the unnamed boxed type, which the
+                    // emitter lowers to a pointer.
+                    if !self.parse_abstract_opaque() {
+                        self.advance();
+                    }
                 }
             } else {
                 self.advance();
@@ -4146,6 +4153,56 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
             self.pos = save;
             return false;
         }
+        true
+    }
+
+    /// `abstype point` with no `= t`.  An abstract type whose
+    /// representation is not given is opaque: its values are boxed.  It
+    /// is registered as the unnamed type, so the emitter lowers any use
+    /// of it to a pointer rather than refusing an unknown name.
+    fn parse_abstract_opaque(&mut self) -> bool {
+        let save = self.pos;
+        let joined = self.at_at_joined_abstract();
+        let abstract_word = !joined
+            && matches!(
+                &self.tokens[self.pos].kind,
+                TokenKind::Ident(w)
+                    if matches!(
+                        w.as_str(),
+                        "abstype" | "absvtype" | "abst0ype" | "abstbox" | "abstflat" | "abstract"
+                    )
+            );
+        if !joined && !abstract_word {
+            return false;
+        }
+        if joined {
+            // `abst @ ype` — the abstract keyword cut at the `@`.
+            self.advance();
+            self.advance();
+            self.advance();
+        } else {
+            self.advance(); // the abstract keyword
+        }
+        let Some(TokenKind::Ident(name)) = self.tokens.get(self.pos).map(|t| t.kind.clone()) else {
+            self.pos = save;
+            return false;
+        };
+        self.advance();
+        // `abstype point (a) = ...` — a parameterised family governed by
+        // its `=`, not an opaque leaf.  A `(` here means there is more
+        // to this declaration than a bare name; hand it back.
+        if self.at(&TokenKind::LParen) {
+            self.pos = save;
+            return false;
+        }
+        // A concrete `= t` is the ordinary abstract alias, which the
+        // `typedef` reader already took; arriving here with an `=` means
+        // this branch was reached out of turn and should not claim it.
+        if self.at(&TokenKind::Eq) {
+            self.pos = save;
+            return false;
+        }
+        self.typedefs.insert(name, Ty::Name("_".into()));
         true
     }
 

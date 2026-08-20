@@ -6504,6 +6504,26 @@ mod tests {
         assert_eq!(for_under, LlvmType::I8Ptr, "an unnamed type is boxed");
     }
 
+    #[test]
+    fn an_abstract_type_with_no_representation_is_a_boxed_pointer() {
+        // `abstype point` hides a type without saying what it is.  Its
+        // representation is opaque, so its values are boxed: a parameter
+        // of `point` is a pointer, not a refusal.
+        let ir = emit("abstype point\nfun f(x: point): int = 0").expect("abstract type emits");
+        assert!(ir.contains("define i64 @f(ptr %x)"), "got:\n{ir}");
+    }
+
+    #[test]
+    fn an_at_joined_abstract_type_with_no_representation_is_boxed() {
+        // `abst@ype input_t0ype` — an abstract *linear* type with no
+        // concrete form.  Like any opaque type its values are boxed: a
+        // use of it is a pointer, not a refusal.
+        let ir =
+            emit("abst@ype input_t0ype\ntypedef input = input_t0ype\nfun f(x: input): int = 0")
+                .expect("abstract linear type emits");
+        assert!(ir.contains("define i64 @f(ptr %x)"), "got:\n{ir}");
+    }
+
     fn module_starts_with_identifier_and_printf_declaration() {
         let ir = emit("").expect("emit");
         assert!(ir.starts_with("; ModuleID = 'ats2llvm'"), "got:\n{ir}");
