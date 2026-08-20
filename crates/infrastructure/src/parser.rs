@@ -3796,19 +3796,25 @@ impl ParseCtx<'_> {
         let mut binds = Vec::new();
         let mut funs = Vec::new();
         loop {
-            if self.at_fun_def_keyword() {
-                let Def::Fun(f) = self.parse_fun_def()? else {
-                    unreachable!("parse_fun_def yields a Fun")
-                };
-                funs.push(f);
-                continue;
-            }
-            // `and g (...) = ...` continues a mutually recursive group.
-            if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "and") && !funs.is_empty() {
-                let Def::Fun(f) = self.parse_fun_def()? else {
-                    unreachable!("parse_fun_def yields a Fun")
-                };
-                funs.push(f);
+            // `fun` (and the `and` clauses of a recursive group) that
+            // carry a body are a *definition* and join the group.  One
+            // with no body is a *declaration* — the shape a `where`
+            // clause's signatures take — and a declaration has no place
+            // among recursive definitions, so it is read and set aside
+            // rather than forced in.
+            if self.at_fun_def_keyword()
+                || (matches!(&self.peek().kind, TokenKind::Ident(w) if w == "and")
+                    && !funs.is_empty())
+            {
+                match self.parse_fun_def()? {
+                    Def::Fun(f) => funs.push(f),
+                    Def::Extern(_) => {}
+                    // Anything else cannot come from a function
+                    // definition, so it is not a shape this run can hold.
+                    _ => return Err(self.error_here(
+                        "expected a function definition in the recursive group",
+                    )),
+                }
                 continue;
             }
             let before = self.pos;
@@ -7731,6 +7737,17 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
             }
             other => panic!("expected a LetFun, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_bodyless_fun_inside_a_let_is_a_declaration_not_a_panic() {
+        // `let fun g (x: int): int in ... end` declares a signature with
+        // no body here; a `where` block's declarations are exactly this
+        // shape.  A declaration has no place in a *recursive* group, so
+        // it is set aside rather than forced in — and, before that, it
+        // used to make the group's reader reach an unreachable panic.
+        let body = impl_body("implement main0 () = let fun g (x: int): int in 1 end");
+        assert!(matches!(body, Expr::IntLit(1)), "got {body:?}");
     }
 
     #[test]
