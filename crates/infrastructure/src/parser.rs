@@ -1438,6 +1438,20 @@ impl ParseCtx<'_> {
         let instance = self.parse_instance_arguments()?;
         self.pop_type_vars(scope);
         self.skip_static_annotations();
+        // `implement x0 = e` — filling in an `extern val` with a value.
+        // The `=` arriving where a parameter list would sit is the whole
+        // of what separates a value from a function here.  With no
+        // template and no instance to make it function-like, the body is
+        // the value itself, and the implement is a top-level `val`.
+        if self.at(&TokenKind::Eq) && ty_params.is_empty() && instance.is_empty() {
+            self.advance(); // `=`
+            let value = self.parse_expr(0)?;
+            return Ok(Def::Val(ValDef {
+                name,
+                ty: None,
+                value,
+            }));
+        }
         // The implement's own parameters are in scope for its signature
         // and body, exactly as the declaration's were for it.
         let scope = self.push_type_vars(&ty_params);
@@ -6789,6 +6803,19 @@ mod tests {
             f.ret,
             Ty::Tuple(vec![Ty::Name("int".into()), Ty::Name("int".into())])
         );
+    }
+
+    #[test]
+    fn implementing_a_value_binds_it() {
+        // `implement x0 = e` fills in an `extern val`: no parameter list
+        // sits between the name and the `=`, which is the whole of what
+        // separates a value from a function here.  It binds the name the
+        // way a top-level `val` would.
+        let p = Parser::parse("implement x0 = 1 + 2\n").expect("parse");
+        let Def::Val(v) = &p.defs()[0] else {
+            panic!("a value implement is not a val")
+        };
+        assert_eq!(v.name, "x0");
     }
 
     #[test]
