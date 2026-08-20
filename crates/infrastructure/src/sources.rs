@@ -39,6 +39,29 @@ const DISTRIBUTION: [&str; 5] = [
     "contrib/",
 ];
 
+/// The `{$NAME}` path macros the ATS build defines, mapped to the part of
+/// the distribution they point at.
+///
+/// `staload "{$EXTSOLVE}/SATS/ilist.sats"` is how a program asks for
+/// something in `contrib/ATS-extsolve` without spelling its own path.  The
+/// macros are expanded before the ordinary path resolution runs, so the
+/// result feeds the same rules any other path does — one that lands in the
+/// distribution is declined for the prelude to answer, and the rest are
+/// looked for like any user file.
+const PATH_MACROS: [(&str, &str); 11] = [
+    ("$LIBATSCC2JS", "contrib/libatscc2js"),
+    ("$LIBATSCC2PY3", "contrib/libatscc2py3"),
+    ("$LIBATSCC2ERL", "contrib/libatscc2erl"),
+    ("$LIBATSCC2PL", "contrib/libatscc2pl"),
+    ("$LIBATSCC2PHP", "contrib/libatscc2php"),
+    ("$LIBATSCC2R34", "contrib/libatscc2r34"),
+    ("$LIBATSCC2CLJ", "contrib/libatscc2clj"),
+    ("$LIBATSCC2SCM", "contrib/libatscc2scm"),
+    ("$ATSCNTRB", "contrib/atscntrb"),
+    ("$CATSPARSEMIT", "contrib/CATS-parsemit"),
+    ("$EXTSOLVE", "contrib/ATS-extsolve"),
+];
+
 /// Reads `staload`ed units from the file system.
 pub struct FileSources {
     /// The file being compiled.  Its directory is where a `staload` in
@@ -81,13 +104,30 @@ fn is_distribution(requested: &str) -> bool {
     DISTRIBUTION.iter().any(|d| requested.starts_with(d))
 }
 
+/// Substitute the known `{$NAME}` path macros in a staload path.
+///
+/// A macro this compiler does not know is left exactly as it was written,
+/// so an unresolvable path still reports where it looked rather than
+/// pretending to have found a file.
+fn expand_macros(path: &str) -> String {
+    let mut out = path.to_string();
+    for (name, dir) in PATH_MACROS {
+        out = out.replace(&format!("{{{name}}}"), dir);
+    }
+    out
+}
+
 impl SourceLoaderPort for FileSources {
     fn origin(&self) -> PathBuf {
         self.origin.clone()
     }
 
     fn load(&self, requested: &str, from: &Path) -> Result<Option<Unit>, String> {
-        let tried = self.candidates(requested, from);
+        // The `{$NAME}` build macros are expanded first, so a path that
+        // names the distribution through one of them is resolved and
+        // declined exactly as if it had spelled the directory itself.
+        let requested = expand_macros(requested);
+        let tried = self.candidates(&requested, from);
         for path in &tried {
             match std::fs::read_to_string(path) {
                 Ok(source) => {
@@ -109,7 +149,7 @@ impl SourceLoaderPort for FileSources {
         }
         // Not there — and whether that is a problem depends entirely on
         // who was supposed to provide it.
-        if is_distribution(requested) {
+        if is_distribution(&requested) {
             return Ok(None);
         }
         Err(format!(
@@ -168,6 +208,29 @@ mod tests {
         let loader = FileSources::at(&main);
         let result = loader.load("libc/SATS/stdio.sats", &main).expect("no error");
         assert!(result.is_none(), "a distribution path should be declined");
+    }
+
+    #[test]
+    fn a_macro_staload_path_lies_in_the_distribution_and_is_declined() {
+        // `staload "{$EXTSOLVE}/SATS/ilist.sats"` names a macro the ATS
+        // build defines, pointing at a directory inside the distribution
+        // (`contrib/ATS-extsolve`).  The macro is expanded, and the
+        // result is a distribution path like any other: declined so the
+        // prelude answers it, not reported as missing.
+        let s = Sandbox::new("macropath");
+        let main = s.write("main.dats", "");
+        let loader = FileSources::at(&main);
+        let result = loader
+            .load("{$EXTSOLVE}/SATS/ilist.sats", &main)
+            .expect("no error");
+        assert!(result.is_none(), "a distribution macro path should be declined");
+
+        // A macro this compiler does not know is left as it was written,
+        // and still says where it looked when it cannot find a file.
+        let err = loader
+            .load("{$UNKNOWN_LIB}/SATS/x.sats", &main)
+            .expect_err("an unknown macro is not silently dropped");
+        assert!(err.contains("names no file"), "got: {err}");
     }
 
     #[test]
