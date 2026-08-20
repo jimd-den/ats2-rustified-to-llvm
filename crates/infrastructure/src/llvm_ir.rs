@@ -982,6 +982,14 @@ fn llvm_type_in(ty: &Ty, registry: &Registry) -> Result<LlvmType, CompileError> 
         if let Some(primitive) = refined_primitive(n) {
             return llvm_type_in(&Ty::Name(primitive.into()), registry);
         }
+        // `a`, `b`, ... — an *unconstrained type parameter*, which ATS
+        // boxes: its value is whatever the caller substituted, reached
+        // through a pointer.  `_` — a type the source declined to name.
+        // Both are a pointer, and letting one reach the "only int, bool,
+        // string" wall would stop a program whose data is merely generic.
+        if is_type_variable(n) || n == "_" {
+            return Ok(LlvmType::I8Ptr);
+        }
     }
     // `(int) -> int` is a function *value*, which in this subset means a
     // closure: nothing else can produce one.
@@ -1260,6 +1268,17 @@ fn file_mode(name: &str) -> Option<&'static str> {
 ///
 /// The `Gt`/`Gte`/`Lt`/`Lte` families are the same machine integer with a
 /// bound attached, and `size_t` is how ATS spells a length.
+/// Whether `name` is a bare type variable — the single lowercase letter
+/// ATS conventionally uses for an unconstrained type parameter.  Such a
+/// value is boxed, so it lowers to a pointer.
+fn is_type_variable(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some(c), None) if c.is_ascii_lowercase()
+    )
+}
+
 fn base_type_named(name: &str) -> Option<LlvmType> {
     match name {
         // Every integer ATS distinguishes — by width, by signedness, by
@@ -6472,6 +6491,19 @@ mod tests {
     // --- module shape ---------------------------------------------
 
     #[test]
+    #[test]
+    fn a_type_variable_and_an_unknown_lower_to_a_pointer() {
+        // `a`, an unconstrained template parameter, and `_`, a type the
+        // source declined to name, are both boxed by ATS: their value is
+        // reached through a pointer, not met with the int/bool/string
+        // wall.
+        let registry = Registry::default();
+        let for_a = llvm_type_in(&Ty::Name("a".into()), &registry).expect("a lowers");
+        assert_eq!(for_a, LlvmType::I8Ptr, "a type variable is boxed");
+        let for_under = llvm_type_in(&Ty::Name("_".into()), &registry).expect("_ lowers");
+        assert_eq!(for_under, LlvmType::I8Ptr, "an unnamed type is boxed");
+    }
+
     fn module_starts_with_identifier_and_printf_declaration() {
         let ir = emit("").expect("emit");
         assert!(ir.starts_with("; ModuleID = 'ats2llvm'"), "got:\n{ir}");
@@ -8767,9 +8799,15 @@ mod tests {
     // --- unsupported constructs -----------------------------------
 
     #[test]
-    fn unsupported_types_are_errors() {
-        let err = emit_err("fun len(xs: list(a)): int = 0");
-        assert!(err.message().contains("type"), "{}", err);
+    fn an_unknown_type_is_an_error_but_a_generic_list_is_not() {
+        // A name no one declared is a wall: `Frobnicate` is nothing the
+        // emitter has met.
+        let err = emit_err("fun len(xs: Frobnicate): int = 0");
+        assert!(err.message().contains("Frobnicate"), "{}", err);
+        // But a generic `list(a)` is a boxed datatype, and `a` its boxed
+        // element: both lower to a pointer.
+        let ir = emit("fun len(xs: list(a)): int = 0").expect("list(a) supports");
+        assert!(ir.contains("define i64 @len(ptr %xs)"), "got:\n{ir}");
     }
 
     #[test]
