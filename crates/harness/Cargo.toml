@@ -1,0 +1,16 @@
+[package]
+name = "ats2-harness"
+description = "Compile every ATS file in a tree and report the pipeline stage each one reaches."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "ats2-harness"
+path = "src/main.rs"
+
+[dependencies]
+ats2-domain = { path = "../domain" }
+ats2-application = { path = "../application" }
+ats2-infrastructure = { path = "../infrastructure" }

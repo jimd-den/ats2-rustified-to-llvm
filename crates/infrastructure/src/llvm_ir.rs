@@ -1942,6 +1942,65 @@ impl LlvmIrEmitter {
             Expr::Ascribe(inner, _) => {
                 self.emit_expr_expecting(inner, expected, fb, registry, module)
             }
+            // `$extval`/`$extfcall` — a reach into C.  The type argument is
+            // what ATS sees; the string is what C is called.  The arguments
+            // are emitted as ordinary expressions, their types fix the C
+            // signature, and the function is *declared* here — which is
+            // what lets the host toolchain find it at link time.  (`$extfcall`
+            // goes through a function pointer in C; both spellings name a
+            // function symbol here, so both declare one and call it.)
+            Expr::ExtVal { ty, name, args, .. } => {
+                if args.is_empty() {
+                    // `$extval(T, "C_CONST")` names a C constant or macro,
+                    // not a function: there is nothing to call.  Lowering it
+                    // needs the header that defines it, which is a step of
+                    // its own.
+                    return Err(CompileError::emit(format!(
+                        "external C value `{name}` (no arguments) is not emitted yet"
+                    )));
+                }
+                let ret = llvm_type_in(ty, registry)?;
+                let mut arg_tys: Vec<LlvmType> = Vec::new();
+                let mut operands: Vec<String> = Vec::new();
+                for arg in args {
+                    let v = self.emit_expr(arg, fb, registry, module)?;
+                    arg_tys.push(v.ty);
+                    operands.push(format!("{} {}", llvm_ty_str(v.ty), v.reg));
+                }
+                let params = arg_tys
+                    .iter()
+                    .map(|t| llvm_ty_str(*t))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                module.externs.insert(Box::leak(
+                    format!(
+                        "declare {} @{}({})",
+                        llvm_ty_str(ret),
+                        sanitize(name),
+                        params
+                    )
+                    .into_boxed_str(),
+                ));
+                if ret == LlvmType::Void {
+                    fb.line(format!(
+                        "call void @{}({})",
+                        sanitize(name),
+                        operands.join(", ")
+                    ));
+                    return Ok(FnValue {
+                        reg: String::new(),
+                        ty: LlvmType::Void,
+                    });
+                }
+                let reg = fb.fresh_temp();
+                fb.line(format!(
+                    "{reg} = call {} @{}({})",
+                    llvm_ty_str(ret),
+                    sanitize(name),
+                    operands.join(", ")
+                ));
+                Ok(FnValue { reg, ty: ret })
+            }
             // `(pf | v)` — a value with a proof about it.  The proof is
             // erased; what runs is `v`.
             Expr::ProofPair(_, value) => {

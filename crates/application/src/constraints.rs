@@ -18,10 +18,12 @@
 //!   integer unsatisfiability, so every proof is sound.  Strict
 //!   inequalities are tightened first (`n > 0` becomes `n >= 1`), which
 //!   recovers most of what integrality buys.
-//! * **Nonlinearity is abstracted, never guessed.**  `m*n` becomes an
-//!   opaque variable — the same one every time it appears — so a claim
-//!   that only needs it to be itself still goes through, and one that
-//!   needs to know its value does not.
+//! * **Nonlinearity is multiplied out, then bounded, never guessed.**  A
+//!   product is rewritten as a canonical sum of monomials, and the only
+//!   facts added about those monomials are the ones that follow from
+//!   their factors' own bounds — a nonnegative product is nonnegative, a
+//!   square is nonnegative, and a product inside known bounds is bounded.
+//!   Anything the rules cannot reach stays `Unknown`.
 //! * **Three verdicts, not two.**  Anything outside the fragment is
 //!   `Unknown`, never a failure.  A checker that rejects what it merely
 //!   fails to understand is a checker people turn off.
@@ -302,6 +304,243 @@ fn negations(e: &SExp) -> Option<Vec<Linear>> {
         .collect()
 }
 
+/// The exact integer bounds every monomial is forced into by a
+/// conjunction of `>= 0` polynomials, found by reading one variable off
+/// one constraint at a time.  `None` on a side means unbounded.
+///
+/// From `c*x + R + k >= 0`, once the rest `R` is known to be no more
+/// than `U`, `x` is at least `ceil((-U - k)/c)` when `c` is positive,
+/// and at most `floor((U + k)/(-c))` when it is negative.  `U` is the
+/// sum of each other term's own upper estimate — an over-approximation,
+/// so every bound is weaker than the true optimum, never stronger, and
+/// therefore sound.  Fractions round outward, which over the integers
+/// only loosens the claim further.
+fn interval_bounds(system: &[Linear]) -> BTreeMap<Mono, (Option<i64>, Option<i64>)> {
+    let mut monos: Vec<Mono> = Vec::new();
+    for l in system {
+        for m in l.terms.keys() {
+            if !monos.contains(m) {
+                monos.push(m.clone());
+            }
+        }
+    }
+    let mut lo: BTreeMap<Mono, Option<i64>> = monos.iter().map(|m| (m.clone(), None)).collect();
+    let mut hi: BTreeMap<Mono, Option<i64>> = monos.iter().map(|m| (m.clone(), None)).collect();
+
+    // The bounds only ever tighten, so the fixed point is reached in a
+    // bounded number of rounds; the cap is a backstop, not a plan.
+    for _round in 0..256 {
+        let mut updates: Vec<(Mono, Option<i64>, Option<i64>)> = Vec::new();
+        for l in system {
+            for (var, &ci) in &l.terms {
+                // `rest_hi`: the largest the rest of the constraint can
+                // reach, given the current intervals.  `None` once any
+                // term it needs is unbounded, or the arithmetic will not
+                // fit — both mean "no bound this way".
+                let mut rest_hi: i128 = 0;
+                let mut finite = true;
+                for (m, &c) in &l.terms {
+                    if m == var {
+                        continue;
+                    }
+                    let side = if c >= 0 {
+                        hi.get(m).copied().flatten()
+                    } else {
+                        lo.get(m).copied().flatten()
+                    };
+                    let Some(v) = side else {
+                        finite = false;
+                        break;
+                    };
+                    match (c as i128).checked_mul(v as i128).and_then(|p| rest_hi.checked_add(p)) {
+                        Some(s) => rest_hi = s,
+                        None => {
+                            finite = false;
+                            break;
+                        }
+                    }
+                }
+                if !finite {
+                    continue;
+                }
+                let konst = l.konst as i128;
+                let mut new_lo = None;
+                let mut new_hi = None;
+                if ci > 0 {
+                    let num = rest_hi.checked_neg().and_then(|n| n.checked_sub(konst));
+                    if let Some(n) = num {
+                        if let Some(q) = ceil_div(n, ci as i128) {
+                            new_lo = i64::try_from(q).ok();
+                        }
+                    }
+                } else if ci < 0 {
+                    let c = -(ci as i128);
+                    let num = rest_hi.checked_add(konst);
+                    if let Some(n) = num {
+                        new_hi = i64::try_from(n.div_euclid(c)).ok();
+                    }
+                }
+                updates.push((var.clone(), new_lo, new_hi));
+            }
+        }
+        let mut changed = false;
+        for (var, new_lo, new_hi) in updates {
+            if let Some(v) = new_lo {
+                if lo.get(&var).copied().flatten().map_or(true, |old| v > old) {
+                    lo.insert(var.clone(), Some(v));
+                    changed = true;
+                }
+            }
+            if let Some(v) = new_hi {
+                if hi.get(&var).copied().flatten().map_or(true, |old| v < old) {
+                    hi.insert(var.clone(), Some(v));
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    monos
+        .into_iter()
+        .map(|m| {
+            let l = lo.get(&m).copied().flatten();
+            let h = hi.get(&m).copied().flatten();
+            (m, (l, h))
+        })
+        .collect()
+}
+
+/// `ceil(a / b)` for `b > 0`, guarded against overflow.
+fn ceil_div(a: i128, b: i128) -> Option<i128> {
+    debug_assert!(b > 0);
+    a.checked_add(b - 1).map(|x| x.div_euclid(b))
+}
+
+/// Every atom of a monomial appearing an even number of times: the
+/// monomial is a perfect square, and so nonnegative no matter what its
+/// root is.
+fn is_square(atoms: &[String]) -> bool {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for a in atoms {
+        *counts.entry(a.as_str()).or_insert(0) += 1;
+    }
+    counts.values().all(|c| c % 2 == 0)
+}
+
+/// `pc*P + ac*A + bc*B + konst >= 0`, assembled with checked arithmetic.
+fn triple(p: &Mono, pc: i64, a: &Mono, ac: i64, b: &Mono, bc: i64, konst: i64) -> Option<Linear> {
+    let mut terms: BTreeMap<Mono, i64> = BTreeMap::new();
+    for (m, c) in [(p, pc), (a, ac), (b, bc)] {
+        if c == 0 {
+            continue;
+        }
+        let e = terms.entry(m.clone()).or_insert(0);
+        *e = e.checked_add(c)?;
+        if *e == 0 {
+            terms.remove(m);
+        }
+    }
+    Some(Linear { terms, konst })
+}
+
+fn push_new(out: &[Linear], fresh: &mut Vec<Linear>, l: Linear) {
+    if !out.contains(&l) && !fresh.contains(&l) {
+        fresh.push(l);
+    }
+}
+
+/// The sound consequences of multiplication, joined to a system before
+/// it is decided.
+///
+/// FM elimination is linear: it treats every monomial as a free
+/// dimension, so `m >= 0` and `n >= 0` never become `m*n >= 0` on their
+/// own.  This pass adds the bridge, and nothing but the bridge:
+///
+/// * every factor nonnegative makes the product nonnegative;
+/// * a perfect square is nonnegative whatever its root is;
+/// * a two-atom product `a*b` obeys the four McCormick envelopes that
+///   its factors' bounds imply — `a*b >= la*b + lb*a - la*lb`, its three
+///   siblings, and the two upper-bounding ones.
+///
+/// Each addition is a plain consequence of the system already there, so
+/// the answer is still an honest `Proved`/`Refuted`/`Unknown`; the
+/// strengthened system just knows more of what it already knew.  A few
+/// rounds let a bound derived for one product feed a later one.
+fn strengthen(system: &[Linear]) -> Vec<Linear> {
+    const ROUNDS: usize = 3;
+    let mut out = system.to_vec();
+    for _ in 0..ROUNDS {
+        let bounds = interval_bounds(&out);
+        let snapshot: Vec<Mono> = out.iter().flat_map(|l| l.terms.keys().cloned()).collect();
+        let mut fresh: Vec<Linear> = Vec::new();
+        for mono in &snapshot {
+            let atoms = &mono.0;
+            if atoms.len() < 2 {
+                continue;
+            }
+            let b = |name: &str| {
+                bounds
+                    .get(&Mono::atom(name.to_string()))
+                    .copied()
+                    .unwrap_or((None, None))
+            };
+            // Every factor nonnegative makes the product nonnegative.
+            if atoms.iter().all(|a| b(a).0.is_some_and(|v| v >= 0)) {
+                push_new(&out, &mut fresh, Linear::var(mono.clone()));
+            }
+            // A perfect square is nonnegative whatever its root is.
+            if is_square(atoms) {
+                push_new(&out, &mut fresh, Linear::var(mono.clone()));
+            }
+            // Binary McCormick envelopes.
+            if atoms.len() == 2 {
+                let a = Mono::atom(atoms[0].clone());
+                let bb = Mono::atom(atoms[1].clone());
+                let (alo, ahi) = b(&atoms[0]);
+                let (blo, bhi) = b(&atoms[1]);
+                let prod = |x: i64, y: i64| {
+                    (x as i128).checked_mul(y as i128).and_then(|p| i64::try_from(p).ok())
+                };
+                if let (Some(la), Some(lb)) = (alo, blo) {
+                    if let Some(k) = prod(la, lb) {
+                        if let Some(l) = triple(mono, 1, &a, -lb, &bb, -la, k) {
+                            push_new(&out, &mut fresh, l);
+                        }
+                    }
+                }
+                if let (Some(ha), Some(hb)) = (ahi, bhi) {
+                    if let Some(k) = prod(ha, hb) {
+                        if let Some(l) = triple(mono, 1, &a, -hb, &bb, -ha, k) {
+                            push_new(&out, &mut fresh, l);
+                        }
+                    }
+                }
+                if let (Some(ha), Some(lb)) = (ahi, blo) {
+                    if let Some(nk) = prod(ha, lb).and_then(|k| k.checked_neg()) {
+                        if let Some(l) = triple(mono, -1, &a, lb, &bb, ha, nk) {
+                            push_new(&out, &mut fresh, l);
+                        }
+                    }
+                }
+                if let (Some(la), Some(hb)) = (alo, bhi) {
+                    if let Some(nk) = prod(la, hb).and_then(|k| k.checked_neg()) {
+                        if let Some(l) = triple(mono, -1, &a, hb, &bb, la, nk) {
+                            push_new(&out, &mut fresh, l);
+                        }
+                    }
+                }
+            }
+        }
+        if fresh.is_empty() {
+            break;
+        }
+        out.extend(fresh);
+    }
+    out
+}
+
 /// Whether a system of `>= 0` constraints has no rational solution.
 ///
 /// Fourier–Motzkin: eliminate one variable at a time by combining every
@@ -311,7 +550,7 @@ fn negations(e: &SExp) -> Option<Vec<Linear>> {
 /// verdict `Unknown` rather than inventing a proof.
 fn is_unsatisfiable(system: &[Linear]) -> bool {
     const BUDGET: usize = 4000;
-    let mut system: Vec<Linear> = system.to_vec();
+    let mut system: Vec<Linear> = strengthen(system);
     loop {
         if system.iter().any(Linear::is_false_constant) {
             return true;
@@ -750,14 +989,13 @@ mod tests {
     }
 
     #[test]
-    fn what_multiplying_out_cannot_reach_is_still_unknown() {
-        // `m >= 0 && n >= 0` implies `m*n >= 0`, and no amount of
-        // rearranging says so — it needs the sign rule for products,
-        // which this solver does not have.  Unknown, never Refuted: a
-        // solver that called this false would be lying.
+    fn a_product_of_nonnegative_factors_is_nonnegative() {
+        // `m >= 0 && n >= 0` implies `m*n >= 0`.  Rearranging alone
+        // cannot say so — the product must be given a bound of its own,
+        // which is what the sign rule for products provides.
         let hyps = vec![app(">=", v("m"), i(0)), app(">=", v("n"), i(0))];
         let goal = app(">=", app("*", v("m"), v("n")), i(0));
-        assert_eq!(entails(&hyps, &goal), Verdict::Unknown);
+        assert_eq!(entails(&hyps, &goal), Verdict::Proved);
     }
 
     #[test]
@@ -810,5 +1048,67 @@ mod tests {
     fn a_form_outside_the_fragment_is_unknown_not_an_error() {
         let hyps = vec![];
         assert_eq!(entails(&hyps, &app("!=", v("n"), i(0))), Verdict::Unknown);
+    }
+
+
+    #[test]
+    fn a_product_by_one_is_the_factor_itself() {
+        // Multiplying out must fold the unit away, not turn `n*1` into a
+        // monomial that looks nothing like `n`.
+        let goal = app("==", app("*", v("n"), i(1)), v("n"));
+        assert_eq!(entails(&[], &goal), Verdict::Proved);
+    }
+
+    #[test]
+    fn a_square_is_nonnegative_even_without_hypotheses() {
+        // `x*x >= 0` needs no sign of `x`: the square of an integer is
+        // nonnegative by itself, and a solver that could not say so
+        // would fail every lemma about magnitude.
+        let hyps: Vec<SExp> = vec![];
+        assert_eq!(entails(&hyps, &app(">=", app("*", v("x"), v("x")), i(0))), Verdict::Proved);
+    }
+
+    #[test]
+    fn a_product_is_bounded_below_by_the_product_of_lower_bounds() {
+        // `m >= 2 && n >= 3` forces `m*n >= 6`.  This is the McCormick
+        // lower envelope at work: the product's bound is read off the
+        // factors' bounds, which no rearrangement of the two facts alone
+        // could produce.
+        let hyps = vec![app(">=", v("m"), i(2)), app(">=", v("n"), i(3))];
+        assert_eq!(entails(&hyps, &app(">=", app("*", v("m"), v("n")), i(6))), Verdict::Proved);
+    }
+
+    #[test]
+    fn a_product_with_one_zero_bounded_factor_is_nonnegative() {
+        // `m >= 2 && n >= 0` gives `m*n >= 0`: one factor pinned away
+        // from zero is enough once the other is merely nonnegative.
+        let hyps = vec![app(">=", v("m"), i(2)), app(">=", v("n"), i(0))];
+        assert_eq!(entails(&hyps, &app(">=", app("*", v("m"), v("n")), i(0))), Verdict::Proved);
+    }
+
+    #[test]
+    fn a_product_with_a_factor_at_least_one_dominates_the_other() {
+        // `n >= 1 && m >= 0` gives `m*n >= m`.  A factor of at least one
+        // cannot shrink the other factor, which is the shape of every
+        // "scaling does not decrease" argument.
+        let hyps = vec![app(">=", v("n"), i(1)), app(">=", v("m"), i(0))];
+        assert_eq!(entails(&hyps, &app(">=", app("*", v("m"), v("n")), v("m"))), Verdict::Proved);
+    }
+
+    #[test]
+    fn a_product_of_nonnegative_and_nonpositive_factors_is_nonpositive() {
+        // `m >= 0 && n <= 0` gives `m*n <= 0`: the upper envelope reads
+        // the product's ceiling off the two opposite signs.
+        let hyps = vec![app(">=", v("m"), i(0)), app("<=", v("n"), i(0))];
+        assert_eq!(entails(&hyps, &app("<=", app("*", v("m"), v("n")), i(0))), Verdict::Proved);
+    }
+
+    #[test]
+    fn a_product_bound_the_factors_do_not_force_is_unknown_not_guessed() {
+        // `m >= 2 && n >= 3` does not force `m*n >= 10` (2*3 is six) nor
+        // forbid it (5*3 is fifteen).  The envelope stays inside the
+        // facts; it must not invent a tighter bound than they imply.
+        let hyps = vec![app(">=", v("m"), i(2)), app(">=", v("n"), i(3))];
+        assert_eq!(entails(&hyps, &app(">=", app("*", v("m"), v("n")), i(10))), Verdict::Unknown);
     }
 }

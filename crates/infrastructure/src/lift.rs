@@ -195,6 +195,12 @@ impl LiftCtx {
                     .map(|a| self.walk(a, scope))
                     .collect::<Result<_, _>>()?,
             ),
+            Expr::ExtVal { ty, name, args, via_ptr } => Expr::ExtVal {
+                ty: ty.clone(),
+                name: name.clone(),
+                args: args.iter().map(|a| self.walk(a, scope)).collect::<Result<_, _>>()?,
+                via_ptr: *via_ptr,
+            },
             Expr::MacroCall(name, args) => Expr::MacroCall(
                 name.clone(),
                 args.iter()
@@ -402,6 +408,11 @@ fn free_vars(expr: &Expr, bound: &mut HashSet<String>, out: &mut BTreeSet<String
                 free_vars(a, bound, out);
             }
         }
+        Expr::ExtVal { args, .. } => {
+            for a in args {
+                free_vars(a, bound, out);
+            }
+        }
         Expr::MacroCall(_, args) | Expr::TupleLit(args) => {
             for a in args {
                 free_vars(a, bound, out);
@@ -540,6 +551,12 @@ fn rewrite_calls(
                 }
             }
             Expr::Call(Box::new(go(callee)), args)
+        }
+        Expr::ExtVal { ty, name, args, via_ptr } => Expr::ExtVal {
+            ty: ty.clone(),
+            name: name.clone(),
+            args: args.iter().map(go).collect(),
+            via_ptr: *via_ptr,
         }
     }
 }

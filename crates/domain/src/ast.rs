@@ -468,6 +468,21 @@ pub enum Expr {
     StaticInst(Box<Expr>, Vec<SExp>),
     /// `f(a, b)`
     Call(Box<Expr>, Vec<Expr>),
+    /// `$extval(T, "c_fn", args...)` — a value or call written in C's
+    /// terms.
+    ///
+    /// ATS reaches a C function by naming its type and its C spelling:
+    /// the type is what the ATS side sees, the string is what the C side
+    /// is called, and the rest are the arguments.  `$extval(T, "C_CONST")`
+    /// with no arguments names a C constant or macro — a value, not a
+    /// call.  `$extfcall` is the same reach but through a function pointer
+    /// rather than a named function, which `via_ptr` records.
+    ExtVal {
+        ty: Ty,
+        name: String,
+        args: Vec<Expr>,
+        via_ptr: bool,
+    },
     /// `xs[i]` — indexing into an array or, in `main`, into `argv`.
     Index(Box<Expr>, Box<Expr>),
     /// `xs.0 := e` — a store into a *place* rather than a name.
@@ -574,6 +589,7 @@ impl Expr {
                 f(c);
                 args.iter().for_each(&mut *f);
             }
+            Expr::ExtVal { args, .. } => args.iter().for_each(&mut *f),
             Expr::MacroCall(_, args) | Expr::TupleLit(args) => args.iter().for_each(&mut *f),
             Expr::Let(binds, body) => {
                 binds.iter().for_each(|b| f(&b.value));

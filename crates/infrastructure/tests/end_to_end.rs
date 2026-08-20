@@ -269,3 +269,47 @@ fn a_staload_into_the_ats_distribution_is_still_answered_by_the_prelude() {
     let ir = uc.execute(source).expect("the program should compile");
     assert!(ir.contains("define i32 @main()"), "got:\n{ir}");
 }
+
+#[test]
+fn an_extval_reaches_a_c_function() {
+    // `$extval(T, "c_fn", args...)` is ATS's bridge to C.  Lowering it
+    // means declaring the C function and asking the host toolchain to
+    // link it — libc's `strlen`, here, which clang links by default.
+    if !clang_available() {
+        eprintln!("skipping: no clang on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("ats2llvm-extval-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a place to work");
+    let source =
+        "implement main0 () = println! (\"strlen(hi) = \", $extval(int, \"strlen\", \"hi\"))";
+
+    use ats2_application::use_cases::CompileExecutableUseCase;
+    use ats2_infrastructure::io::FileOutput;
+    use ats2_infrastructure::toolchain::ClangToolchain;
+
+    let ir = dir.join("ext.ll");
+    let bin = dir.join("ext");
+    let uc = CompileExecutableUseCase::new(Parser, LlvmIrEmitter, ClangToolchain, FileOutput);
+    uc.execute(source, &ir, &bin)
+        .expect("the program should build");
+
+    let out = Command::new(&bin).output().expect("run the linked program");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "strlen(hi) = 2"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_extfcall_lowers_to_a_call() {
+    // `$extfcall(T, "f", args...)` is the same reach into C, through a
+    // function pointer.  The two spellings lower alike today; the pointer
+    // indirection is a refinement of the C side, not of the call.
+    let source = "fun f (): int = $extfcall(int, \"atoi\", \"7\")";
+    let program = Parser::parse(source).expect("parse");
+    let ir = LlvmIrEmitter::emit(&program).expect("emit");
+    assert!(ir.contains("declare i64 @atoi"), "got:\n{ir}");
+    assert!(ir.contains("call i64 @atoi"), "got:\n{ir}");
+}

@@ -21,6 +21,15 @@ name = "ats2-domain"
 version = "0.1.0"
 
 [[package]]
+name = "ats2-harness"
+version = "0.1.0"
+dependencies = [
+ "ats2-application",
+ "ats2-domain",
+ "ats2-infrastructure",
+]
+
+[[package]]
 name = "ats2-infrastructure"
 version = "0.1.0"
 dependencies = [

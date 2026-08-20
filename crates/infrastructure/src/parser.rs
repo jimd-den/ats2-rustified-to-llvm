@@ -162,6 +162,12 @@ fn splice_macro_args(expr: &Expr, params: &[String], args: &[Expr]) -> Expr {
         E::BinOp(op, l, r) => E::BinOp(*op, Box::new(sub(l)), Box::new(sub(r))),
         E::TupleLit(items) => E::TupleLit(items.iter().map(sub).collect()),
         E::Call(c, items) => E::Call(Box::new(sub(c)), items.iter().map(sub).collect()),
+        E::ExtVal { ty, name, args, via_ptr } => E::ExtVal {
+            ty: ty.clone(),
+            name: name.clone(),
+            args: args.iter().map(sub).collect(),
+            via_ptr: *via_ptr,
+        },
         E::Index(b, i) => E::Index(Box::new(sub(b)), Box::new(sub(i))),
         E::Store(p, v) => E::Store(Box::new(sub(p)), Box::new(sub(v))),
         E::Deref(e) => E::Deref(Box::new(sub(e))),
@@ -3057,6 +3063,53 @@ impl ParseCtx<'_> {
                 self.advance();
                 self.advance();
                 self.parse_primary(min_bp)
+            }
+            // `$extval(T, "c_fn", args...)` / `$extfcall(T, "c_fn", ...)`
+            // — a value or call written in C's terms.  The first argument
+            // is a *type* ATS sees, the second the C spelling, the rest
+            // ordinary arguments.  It cannot ride the ordinary-call path:
+            // a type in argument position would be read as a variable and
+            // the emitter would go looking for a function nobody declared.
+            TokenKind::Ident(name) if name == "$extval" || name == "$extfcall" => {
+                let via_ptr = name == "$extfcall";
+                self.advance(); // the name
+                self.expect(
+                    &TokenKind::LParen,
+                    "expected `(` after the external name",
+                )?;
+                let ty = self.parse_type()?;
+                self.expect(
+                    &TokenKind::Comma,
+                    "expected `,` after the external type",
+                )?;
+                let span = self.peek().span;
+                let TokenKind::StrLit(raw) = self.peek().kind.clone() else {
+                    return Err(self.error_here("expected the C name as a string literal"));
+                };
+                self.advance();
+                let name = decode_string(&raw, span)?;
+                let mut args = Vec::new();
+                if self.at(&TokenKind::Comma) {
+                    self.advance();
+                    loop {
+                        args.push(self.parse_expr(0)?);
+                        if self.at(&TokenKind::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.expect(
+                    &TokenKind::RParen,
+                    "expected `)` after the external call",
+                )?;
+                Ok(Expr::ExtVal {
+                    ty,
+                    name,
+                    args,
+                    via_ptr,
+                })
             }
             TokenKind::Ident(name) if self.macros.contains_key(&name) => {
                 self.advance();
@@ -7161,4 +7214,56 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
         assert!(matches!(p.defs()[1], Def::Fun(_)));
         assert!(matches!(p.defs()[2], Def::Implement(_)));
     }
+
+    #[test]
+    fn an_extval_is_a_type_a_c_name_and_its_arguments() {
+        // `$extval(T, "c_fn", args...)` is how ATS reaches a C function:
+        // the first argument is a *type* ATS sees, the second the C
+        // spelling, the rest ordinary arguments.  Parsing it as a plain
+        // call would turn the type into a variable and hand the emitter a
+        // function nobody declared.
+        let body = impl_body("implement main0 () = $extval(int, \"strlen\", \"hi\")");
+        match body {
+            Expr::ExtVal { ty, name, args, via_ptr } => {
+                assert_eq!(ty, Ty::Name("int".into()));
+                assert_eq!(name, "strlen");
+                assert_eq!(args, vec![Expr::StrLit("hi".into())]);
+                assert!(!via_ptr);
+            }
+            other => panic!("expected an ExtVal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_extval_without_arguments_is_a_value_not_a_call() {
+        // `$extval(T, "C_CONST")` names a C constant or macro, not a
+        // function: there is nothing to call, only a value to read.
+        let body = impl_body("implement main0 () = $extval(int, \"EOF\")");
+        match body {
+            Expr::ExtVal { ty, name, args, via_ptr } => {
+                assert_eq!(ty, Ty::Name("int".into()));
+                assert_eq!(name, "EOF");
+                assert!(args.is_empty());
+                assert!(!via_ptr);
+            }
+            other => panic!("expected an ExtVal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_extfcall_is_a_call_through_a_function_pointer() {
+        // `$extfcall(T, "f", args...)` is the same reach into C, but the
+        // address is a function pointer rather than a named function.
+        let body = impl_body("implement main0 () = $extfcall(int, \"atoi\", \"7\")");
+        match body {
+            Expr::ExtVal { ty, name, args, via_ptr } => {
+                assert_eq!(ty, Ty::Name("int".into()));
+                assert_eq!(name, "atoi");
+                assert_eq!(args, vec![Expr::StrLit("7".into())]);
+                assert!(via_ptr);
+            }
+            other => panic!("expected an ExtVal, got {other:?}"),
+        }
+    }
+
 }

@@ -566,16 +566,48 @@ fn a_product_written_the_other_way_round_is_the_same_product() {
     ));
     assert!(errs.is_empty(), "{errs:?}");
 }
+#[test]
+fn a_product_of_nonnegative_indices_is_nonnegative() {
+    // The sign rule for products, reached through the checker rather
+    // than the solver alone: `m >= 0` and `n >= 0` force `m*n >= 0`, so
+    // a proof whose only obligation is that bound goes through.
+    let src = "\
+dataprop GE0 (int) = | {k:int | k >= 0} GE0c (k) of () \
+prfun lem {m:nat} {n:nat} (): GE0 (m*n) = GE0c {m*n} ()";
+    let errs = check(src);
+    assert!(errs.is_empty(), "{errs:?}");
+}
 
 #[test]
-fn zz_probe_mul_shapes() {
-    for (label, src) in [
-        ("plain 0", "prfun base {n:int} (): MUL (0, n, 0) = MULbas ()"),
-        ("n*0", "prfun base {n:int} (): MUL (0, n, n*0) = MULbas ()"),
-        ("0*n", "prfun base {n:int} (): MUL (0, n, 0*n) = MULbas ()"),
-        ("concrete", "prfun base (): MUL (0, 7, 0) = MULbas ()"),
-        ("concrete n*0", "prfun base (): MUL (0, 7, 7*0) = MULbas ()"),
-    ] {
-        println!("{label:>14}: {:?}", check(&format!("{MUL} {src}")));
-    }
+fn a_square_index_is_nonnegative_without_a_sign() {
+    // `n*n >= 0` for any integer `n`, with no hypothesis about `n`'s
+    // sign at all.  A lemma about magnitude cannot be stated without it.
+    let src = "\
+dataprop GE0 (int) = | {k:int | k >= 0} GE0c (k) of () \
+prfun sq {n:int} (): GE0 (n*n) = GE0c {n*n} ()";
+    let errs = check(src);
+    assert!(errs.is_empty(), "{errs:?}");
 }
+
+#[test]
+fn a_product_is_bounded_by_the_product_of_its_factors_bounds() {
+    // `m >= 2` and `n >= 3` force `m*n >= 6`: the bound is the product
+    // of the bounds, which only the McCormick envelope reads off.
+    let src = "\
+dataprop GE6 (int) = | {k:int | k >= 6} GE6c (k) of () \
+prfun lem {m:int | m >= 2} {n:int | n >= 3} (): GE6 (m*n) = GE6c {m*n} ()";
+    let errs = check(src);
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn a_product_claim_the_factors_do_not_force_is_refused() {
+    // `m >= 0` and `n >= 0` do *not* force `m*n >= 1` — nought times
+    // nought is nought.  The envelope stays inside the facts.
+    let src = "\
+dataprop GE1 (int) = | {k:int | k >= 1} GE1c (k) of () \
+prfun lem {m:nat} {n:nat} (): GE1 (m*n) = GE1c {m*n} ()";
+    let errs = check(src);
+    assert!(!errs.is_empty(), "a product claim the factors do not force was accepted");
+}
+

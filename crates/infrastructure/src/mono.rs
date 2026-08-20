@@ -561,6 +561,12 @@ impl MonoCtx {
                     .map(|a| self.rewrite(a, subst))
                     .collect::<Result<_, _>>()?,
             ),
+            Expr::ExtVal { ty, name, args, via_ptr } => Expr::ExtVal {
+                ty: ty.clone(),
+                name: name.clone(),
+                args: args.iter().map(|a| self.rewrite(a, subst)).collect::<Result<_, _>>()?,
+                via_ptr: *via_ptr,
+            },
             Expr::MacroCall(name, args) => Expr::MacroCall(
                 name.clone(),
                 args.iter()
