@@ -93,6 +93,11 @@ fn splice_macro_args(expr: &Expr, params: &[String], args: &[Expr]) -> Expr {
             Some(i) => args.get(i).cloned().unwrap_or(E::Wildcard),
             None => expr.clone(),
         },
+        // Static instantiation carries no dynamic content, so every
+        // pass that rewrites *code* looks straight through it.
+        E::StaticInst(inner, at) => E::StaticInst(Box::new(sub(inner)), at.clone()),
+        E::ProofPair(p, v) => E::ProofPair(Box::new(sub(p)), Box::new(sub(v))),
+        E::Ascribe(inner, ty) => E::Ascribe(Box::new(sub(inner)), ty.clone()),
         E::Wildcard | E::Unit | E::Uninit | E::IntLit(_) | E::CharLit(_) | E::FloatLit(_)
         | E::BoolLit(_) | E::StrLit(_) | E::Inst(..) => expr.clone(),
         E::UnaryNeg(e) => E::UnaryNeg(Box::new(sub(e))),
@@ -154,12 +159,17 @@ fn splice_macro_args(expr: &Expr, params: &[String], args: &[Expr]) -> Expr {
 fn indexed_base(name: &str) -> Option<&'static str> {
     Some(match name {
         "int" | "intGt" | "intGte" | "intLt" | "intLte" | "intBtw" | "intBtwe" | "nat"
-        | "natLt" | "natLte" | "natGt" | "natGte" => "int",
+        | "natLt" | "natLte" | "natGt" | "natGte" | "pos" | "Nat" | "Pos" => "int",
         "uint" | "uintGt" | "uintGte" | "uintLt" | "uintLte" | "size_t" | "ssize_t"
         | "sizeGt" | "sizeGte" | "sizeLt" | "sizeLte" | "sizeBtw" | "sizeBtwe" => "int",
         "string" => "string",
         "bool" => "bool",
         "char" => "char",
+        // `ptr(n)` — a pointer to `n` cells, and `ptr(l)` a pointer at
+        // the address `l`.  Either way the argument measures the
+        // pointer rather than describing it, and a pointer is a
+        // pointer whatever it points at.
+        "ptr" => "ptr",
         _ => return None,
     })
 }
@@ -194,6 +204,20 @@ fn sexp_of_expr(e: &Expr) -> Option<SExp> {
         }
         _ => return None,
     })
+}
+
+/// Whether a static term states a *relation* rather than naming a value.
+///
+/// It is what separates `[fact(0) == 1]` — a claim — from `{n}` — an
+/// argument.  Both are a bracketed term; only one of them may be
+/// believed.
+fn is_relation(e: &SExp) -> bool {
+    matches!(
+        e,
+        SExp::App(op, args)
+            if args.len() == 2
+                && matches!(op.as_str(), "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||")
+    )
 }
 
 /// The static language's spelling of a shared operator.
@@ -255,6 +279,10 @@ fn substitute_type(ty: &Ty, subst: &HashMap<String, Ty>) -> Ty {
             Ty::App(n.clone(), args.iter().map(|a| substitute_type(a, subst)).collect())
         }
         Ty::Tuple(items) => Ty::Tuple(items.iter().map(|i| substitute_type(i, subst)).collect()),
+        Ty::Proof(p, v) => Ty::Proof(
+            Box::new(substitute_type(p, subst)),
+            Box::new(substitute_type(v, subst)),
+        ),
         Ty::Record(fields) => Ty::Record(
             fields.iter().map(|(n, t)| (n.clone(), substitute_type(t, subst))).collect(),
         ),
@@ -465,12 +493,16 @@ impl ParseCtx<'_> {
                 }
                 Ok(())
             }
-            // `datavtype` — a datatype whose values are linear.  The
-            // views that make them linear are erased before emission,
-            // so it parses exactly as `datatype` does.
+            // `datavtype` — a datatype whose values are linear: each
+            // must be consumed exactly once.  The views that make them
+            // so are erased before emission, so it parses exactly as
+            // `datatype` does — but *that* it is one is recorded, since
+            // nothing about the bits says so and the declaration is the
+            // only place that can.
             TokenKind::Ident(w) if w == "datavtype" => {
                 self.advance(); // `datavtype`
-                out.push(self.parse_datatype_body()?);
+                // `datavtype` — a datatype whose values are *resources*.
+                out.push(self.parse_datatype_body(true)?);
                 Ok(())
             }
             TokenKind::Val => {
@@ -547,10 +579,43 @@ impl ParseCtx<'_> {
             // does, with a different word for a distinction (which
             // compilation unit owns the symbol) that does not survive to
             // a single-module compiler.
+            // `praxi f {n:pos} (): [P] void` — an axiom.  Its *result
+            // type* is the claim it establishes, so a proof language
+            // that skipped it would skip the only statement in the file
+            // that said anything.  `prfun` is the same shape with a
+            // proof term behind it rather than a fiat.
+            // `dataprop FACT (int,int) = | {n:pos}{r:int} FACTind (n, n*r)
+            // of FACT(n-1, r)` — an inductive proposition.  Each
+            // constructor is a function from the proofs it consumes to a
+            // proof of its own indices, which is all a constructor of a
+            // proposition is; saying it that way needs no machinery a
+            // function does not already have, and makes every proof term
+            // an ordinary call the checker already knows how to read.
+            TokenKind::Ident(name) if name == "dataprop" || name == "dataview" => {
+                let save = self.pos;
+                match self.parse_dataprop(name == "dataview") {
+                    Some(decls) => out.extend(decls.into_iter().map(Def::Extern)),
+                    None => {
+                        self.pos = save;
+                        self.skip_directive();
+                    }
+                }
+                Ok(())
+            }
+            TokenKind::Ident(name) if name == "praxi" || name == "prfun" => {
+                let save = self.pos;
+                if let Ok(decl) = self.parse_extern_decl() {
+                    out.push(Def::Extern(decl));
+                    return Ok(());
+                }
+                self.pos = save;
+                self.skip_directive();
+                Ok(())
+            }
             TokenKind::Ident(name) if name == "extern" || name == "static" => {
                 let save = self.pos;
                 self.advance();
-                if matches!(self.peek().kind, TokenKind::Fun | TokenKind::Fn) {
+                if self.at_proof_keyword() || matches!(self.peek().kind, TokenKind::Fun | TokenKind::Fn) {
                     if let Ok(decl) = self.parse_extern_decl() {
                         out.push(Def::Extern(decl));
                         return Ok(());
@@ -562,10 +627,19 @@ impl ParseCtx<'_> {
                 // declaration as a definition.
                 self.pos = save;
                 self.advance(); // `extern`
-                if matches!(self.peek().kind, TokenKind::Fun | TokenKind::Fn) {
+                if self.at_proof_keyword() || matches!(self.peek().kind, TokenKind::Fun | TokenKind::Fn) {
                     self.advance();
                 }
                 self.skip_directive();
+                Ok(())
+            }
+            // `%{ ... %}` — C the program brought with it.  Nothing here
+            // reads it; it is carried through to the toolchain, which
+            // speaks C.
+            TokenKind::InlineC(text) => {
+                let text = text.clone();
+                self.advance();
+                out.push(Def::InlineC(text));
                 Ok(())
             }
             TokenKind::Ident(name) if name == "macdef" => {
@@ -732,13 +806,13 @@ impl ParseCtx<'_> {
 
     fn parse_datatype_def(&mut self) -> Result<Def, CompileError> {
         self.advance(); // `datatype`
-        self.parse_datatype_body()
+        self.parse_datatype_body(false)
     }
 
     /// Everything after the `datatype`/`datavtype` keyword.  The type
     /// parameters stay in scope while the constructors are read, so a
     /// field written `bintree a` applies the datatype to `a`.
-    fn parse_datatype_body(&mut self) -> Result<Def, CompileError> {
+    fn parse_datatype_body(&mut self, linear: bool) -> Result<Def, CompileError> {
         let name = self.expect_ident("expected a datatype name")?;
         let ty_params = self.parse_optional_type_params()?;
         let scope = self.push_type_vars(&ty_params);
@@ -753,7 +827,7 @@ impl ParseCtx<'_> {
                 self.advance();
                 ctors.push(self.parse_ctor()?);
             }
-            Ok(Def::Datatype(DatatypeDef { name, ty_params, ctors }))
+            Ok(Def::Datatype(DatatypeDef { name, ty_params, ctors, linear }))
         })();
         self.pop_type_vars(scope);
         def
@@ -855,8 +929,9 @@ impl ParseCtx<'_> {
         // unlike the other static annotations they are kept.
         let ty_params = self.parse_template_params();
         let name = self.expect_ident("expected a function name")?;
-        // `{n:nat}` / `{a:t@ype}` — the dependent half of the signature.
-        let universals = self.parse_quantifiers();
+        // `{n:nat}` / `{a:t@ype}` — the dependent half of the signature,
+        // and `.<n>.` — the half that says it terminates.
+        let (universals, metric) = self.parse_quantifiers_and_metric();
         // The template's parameters are in scope for its own signature
         // and body, so `bintree a` in either place applies `bintree`.
         let scope = self.push_type_vars(&ty_params);
@@ -881,16 +956,121 @@ impl ParseCtx<'_> {
         self.expect(&TokenKind::Eq, "expected `=` before the function body")?;
         let body = self.parse_expr(0)?;
         self.pop_type_vars(scope);
-        Ok(Def::Fun(FunDef { ty_params, universals, existentials, name, params, ret, body }))
+        Ok(Def::Fun(FunDef { ty_params, universals, existentials, metric, name, params, ret, body }))
     }
 
     /// The body of an `extern fun` declaration: everything a `fun` has
     /// except the `= body`.
+    /// `dataprop P (s1, s2) = | {q} C (i1, i2) of (arg, ...) | ...`
+    ///
+    /// Returns one declaration per constructor, or `None` when the shape
+    /// is one this parser does not model — in which case the whole
+    /// declaration goes back to being skipped, costing its own proofs
+    /// and not the file.
+    fn parse_dataprop(&mut self, linear: bool) -> Option<Vec<FunDecl>> {
+        self.advance(); // `dataprop` / `dataview`
+        let TokenKind::Ident(prop) = self.peek().kind.clone() else { return None };
+        self.advance();
+        // `(int, int)` — the sorts it is indexed by.  How many there are
+        // is all that matters here; what they are is checked by ATS.
+        if self.at(&TokenKind::LParen) {
+            self.skip_balanced(&TokenKind::LParen, &TokenKind::RParen);
+        }
+        if !self.at(&TokenKind::Eq) {
+            return None;
+        }
+        self.advance();
+        let mut out = Vec::new();
+        loop {
+            if self.at(&TokenKind::Pipe) {
+                self.advance();
+            }
+            let universals = self.parse_quantifiers();
+            let TokenKind::Ident(name) = self.peek().kind.clone() else { return None };
+            self.advance();
+            // `(n, n*r)` — the indices *this* constructor's proof has.
+            let indices = self.parse_index_terms();
+            let ret = if indices.is_empty() {
+                Ty::Name(prop.clone())
+            } else {
+                Ty::Index(Box::new(Ty::Name(prop.clone())), indices)
+            };
+            // `of FACT(n-1, r)` — the proofs it consumes.
+            let mut params = Vec::new();
+            if self.at(&TokenKind::Of) {
+                self.advance();
+                for (i, ty) in self.parse_constructor_fields()?.into_iter().enumerate() {
+                    params.push(Param { name: format!("pf{i}"), ty, borrowed: false });
+                }
+            }
+            out.push(FunDecl {
+                // A `dataview`'s proofs are *resources*: permission to
+                // touch something, which could not be permission at all
+                // if it could be used twice.
+                linear,
+                // A constructor of a proposition builds a proof, and a
+                // proof is not a value.
+                proof: true,
+                name,
+                ty_params: Vec::new(),
+                universals,
+                existentials: Vec::new(),
+                params,
+                ret,
+            });
+            if !self.at(&TokenKind::Pipe) {
+                break;
+            }
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// The `of (a, b)` — or `of a` — that follows a constructor.
+    ///
+    /// `of ()` consumes nothing, which is how a base case is written.
+    fn parse_constructor_fields(&mut self) -> Option<Vec<Ty>> {
+        if !self.at(&TokenKind::LParen) {
+            return self.parse_type().ok().map(|t| vec![t]);
+        }
+        self.advance();
+        let mut out = Vec::new();
+        if self.at(&TokenKind::RParen) {
+            self.advance();
+            return Some(out);
+        }
+        loop {
+            out.push(self.parse_type().ok()?);
+            if self.at(&TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.at(&TokenKind::RParen).then(|| {
+            self.advance();
+            out
+        })
+    }
+
+    /// Whether the next token is one of the proof-language spellings of
+    /// `fun`.  They declare the same thing — a name, its quantifiers,
+    /// its parameters and its result — and differ only in that nothing
+    /// they describe survives to run time.
+    fn at_proof_keyword(&self) -> bool {
+        matches!(&self.peek().kind, TokenKind::Ident(w) if w == "praxi" || w == "prfun")
+    }
+
     fn parse_extern_decl(&mut self) -> Result<FunDecl, CompileError> {
-        self.advance(); // `fun` / `fn`
+        // `praxi`/`prfun` declare a proof: the checker reads it, the
+        // emitter never sees it.
+        let proof = self.at_proof_keyword();
+        self.advance(); // `fun` / `fn` / `praxi` / `prfun`
         let ty_params = self.parse_template_params();
         let name = self.expect_ident("expected a function name")?;
-        self.skip_static_annotations();
+        // `{n:nat}` — a declaration's quantifiers say exactly what a
+        // definition's do, and skipping them here left the corpus's
+        // `extern fun`s promising nothing at all.
+        let universals = self.parse_quantifiers();
         // As with a `fun`, the template's parameters are in scope for
         // the signature being declared.
         let scope = self.push_type_vars(&ty_params);
@@ -900,6 +1080,7 @@ impl ParseCtx<'_> {
         }
         self.advance();
         self.skip_effect_annotation();
+        let existentials = self.parse_existentials();
         let ret = self.parse_type()?;
         self.skip_static_annotations();
         // `= "ext#name"` binds the declaration to a C symbol; the subset
@@ -914,7 +1095,7 @@ impl ParseCtx<'_> {
             }
         }
         self.pop_type_vars(scope);
-        Ok(FunDecl { name, ty_params, params, ret })
+        Ok(FunDecl { linear: false, proof, name, ty_params, universals, existentials, params, ret })
     }
 
     fn parse_implement_def(&mut self) -> Result<Def, CompileError> {
@@ -1020,6 +1201,8 @@ impl ParseCtx<'_> {
     /// with nothing.
     fn parse_instance_arguments(&mut self) -> Result<Vec<Ty>, CompileError> {
         while self.at(&TokenKind::LBrace) {
+            let save = self.pos;
+            self.read_static_group(save);
             self.skip_balanced(&TokenKind::LBrace, &TokenKind::RBrace);
         }
         Ok(self.parse_template_arguments()?.unwrap_or_default())
@@ -1087,8 +1270,23 @@ impl ParseCtx<'_> {
     /// falls back to being skipped, so an unmodelled form costs
     /// precision rather than the whole file.
     fn parse_quantifiers(&mut self) -> Vec<Quant> {
+        self.parse_quantifiers_and_metric().0
+    }
+
+    /// The same, keeping the `.<n>.` metric that may sit among them.
+    ///
+    /// Quantifier and metric interleave in real signatures — `{n:nat}
+    /// .<n>.` and `.<n>. {n:nat}` are both written — so one routine reads
+    /// the run rather than two taking turns and each stopping at the
+    /// other.
+    fn parse_quantifiers_and_metric(&mut self) -> (Vec<Quant>, Vec<SExp>) {
+        let mut metric = Vec::new();
         let mut out = Vec::new();
         loop {
+            if let Some(terms) = self.parse_metric() {
+                metric = terms;
+                continue;
+            }
             if self.at(&TokenKind::LBrace) {
                 let save = self.pos;
                 match self.parse_one_quantifier(&TokenKind::RBrace) {
@@ -1103,8 +1301,66 @@ impl ParseCtx<'_> {
             let before = self.pos;
             self.skip_static_annotations();
             if self.pos == before {
-                return out;
+                return (out, metric);
             }
+        }
+    }
+
+    /// `.<n>.`, `.<m, n>.`, `.<>.` — a termination metric, if one is here.
+    ///
+    /// Returns `None` when the next tokens are not a metric at all, and
+    /// an *empty* vector for `.<>.`, which is ATS for "no metric": the
+    /// two are different answers and collapsing them would turn "I claim
+    /// nothing" into "I claim something about nothing".
+    fn parse_metric(&mut self) -> Option<Vec<SExp>> {
+        if !self.at(&TokenKind::Dot) {
+            return None;
+        }
+        // The lexer reads `<>` as one not-equal token, so `.<>.` arrives
+        // as three tokens rather than four.
+        match self.tokens.get(self.pos + 1).map(|t| t.kind.clone()) {
+            Some(TokenKind::Ne) => {
+                self.advance();
+                self.advance();
+                if self.at(&TokenKind::Dot) {
+                    self.advance();
+                }
+                Some(Vec::new())
+            }
+            Some(TokenKind::Lt) => {
+                let save = self.pos;
+                self.advance();
+                self.advance();
+                let mut terms = Vec::new();
+                // Above the comparisons' binding power, so the closing
+                // `>` ends the metric instead of being read as
+                // "greater than" — `.<n>.` would otherwise parse as the
+                // start of `n > .`, and swallow the signature with it.
+                const ABOVE_COMPARISON: u8 = 6;
+                while !self.at(&TokenKind::Gt) && !self.at(&TokenKind::Eof) {
+                    let Ok(e) = self.parse_expr(ABOVE_COMPARISON) else { break };
+                    let Some(term) = sexp_of_expr(&e) else { break };
+                    terms.push(term);
+                    if self.at(&TokenKind::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                if !self.at(&TokenKind::Gt) {
+                    // A metric outside the fragment costs its own claim,
+                    // not the signature it was written on.
+                    self.pos = save;
+                    self.skip_static_annotations();
+                    return Some(Vec::new());
+                }
+                self.advance();
+                if self.at(&TokenKind::Dot) {
+                    self.advance();
+                }
+                Some(terms)
+            }
+            _ => None,
         }
     }
 
@@ -1113,7 +1369,37 @@ impl ParseCtx<'_> {
     /// The universal and existential forms differ only in their
     /// brackets, so the closer is a parameter and one routine reads both.
     fn parse_one_quantifier(&mut self, close: &TokenKind) -> Option<Quant> {
+        let opener = self.pos;
         self.advance(); // `{` or `[`
+        if let Some(q) = self.parse_binder_group(close) {
+            return Some(q);
+        }
+        // `[fact(0) == 1]` — a bracket with nothing bound.  A proof
+        // function states what it proves this way: no witness is named
+        // because there is nothing to name, the claim *is* the content.
+        // Read as a binder it parses as nothing at all, and the axiom
+        // says nothing.
+        self.pos = opener + 1;
+        let claim = self.parse_expr(0).ok().as_ref().and_then(sexp_of_expr);
+        match claim {
+            // Only a *relation* qualifies.  `{n}` at a call site is an
+            // instantiation, and reading a bare name as a guard would
+            // turn every instantiation into an assumption.
+            Some(claim) if is_relation(&claim) && self.at(close) => {
+                self.advance();
+                Some(Quant { vars: Vec::new(), guard: Some(claim) })
+            }
+            _ => {
+                self.pos = opener;
+                None
+            }
+        }
+    }
+
+    /// `{m,n : nat | m > n}` — the binder half of a quantifier, if that
+    /// is what is here.  The opener has already been consumed.
+    fn parse_binder_group(&mut self, close: &TokenKind) -> Option<Quant> {
+        let save = self.pos;
         let mut names = Vec::new();
         loop {
             match self.peek().kind.clone() {
@@ -1121,7 +1407,10 @@ impl ParseCtx<'_> {
                     self.advance();
                     names.push(n);
                 }
-                _ => return None,
+                _ => {
+                    self.pos = save;
+                    return None;
+                }
             }
             if self.at(&TokenKind::Comma) {
                 self.advance();
@@ -1132,20 +1421,39 @@ impl ParseCtx<'_> {
         // A group with no sort (`{n}`) is an instantiation, not a
         // binder, and this is not the place that reads one.
         if !self.at(&TokenKind::Colon) {
+            self.pos = save;
             return None;
         }
         self.advance();
-        let sort = self.parse_sort_name()?;
+        let Some(sort) = self.parse_sort_name() else {
+            self.pos = save;
+            return None;
+        };
         let vars: Vec<(String, Sort)> =
             names.into_iter().map(|n| (n, Sort::from_name(&sort))).collect();
+        // `{i,j:nat | i <= j+1; i+j == n-1}` — ATS writes a conjunction
+        // of claims with semicolons, and this is how every loop
+        // invariant in the corpus is spelled.  Reading only the first
+        // conjunct would not merely weaken the guard: the quantifier
+        // would fail to close, and the *sorts* would be lost with it, so
+        // the loop would forget even that its counters are naturals.
         let guard = if self.at(&TokenKind::Pipe) {
             self.advance();
-            let e = self.parse_expr(0).ok()?;
-            Some(sexp_of_expr(&e)?)
+            let mut conjuncts = Vec::new();
+            loop {
+                let e = self.parse_expr(0).ok()?;
+                conjuncts.push(sexp_of_expr(&e)?);
+                if !self.at(&TokenKind::Semicolon) {
+                    break;
+                }
+                self.advance();
+            }
+            conjuncts.into_iter().reduce(|a, b| SExp::App("&&".into(), vec![a, b]))
         } else {
             None
         };
         if !self.at(close) {
+            self.pos = save;
             return None;
         }
         self.advance();
@@ -1238,7 +1546,69 @@ impl ParseCtx<'_> {
     /// `f<>` — the "work it out" spelling — yields an empty list, which
     /// is still an instantiation and still distinct from no `<...>` at
     /// all.
+    /// Read one `{...}` group as *static* terms, leaving the position
+    /// where it found it.
+    ///
+    /// A brace group has two readings — `{int}` names a type,
+    /// `{n}` names an index — and which one is meant depends on the
+    /// callee's quantifiers, which the parser has no access to.  So both
+    /// are recorded and the checker, which does know, takes the one it
+    /// can use.  Reading only types is what made every proof application
+    /// in the corpus indistinguishable from a template instantiation.
+    fn read_static_group(&mut self, at: usize) -> Option<Vec<SExp>> {
+        // `{n:int}` carries a sort, which makes it a *binder* — a
+        // quantifier written where an argument could have been.  The
+        // colon is the whole difference, and the expression parser reads
+        // straight past it, so it has to be looked for before parsing
+        // rather than noticed afterwards.
+        let mut i = at + 1;
+        let mut depth = 0usize;
+        while let Some(t) = self.tokens.get(i) {
+            match t.kind {
+                TokenKind::LBrace | TokenKind::LParen | TokenKind::LBracket => depth += 1,
+                TokenKind::RParen | TokenKind::RBracket => depth = depth.saturating_sub(1),
+                TokenKind::RBrace if depth == 0 => break,
+                TokenKind::RBrace => depth -= 1,
+                TokenKind::Colon if depth == 0 => return None,
+                TokenKind::Eof => return None,
+                _ => {}
+            }
+            i += 1;
+        }
+        let save = self.pos;
+        self.pos = at;
+        self.advance(); // `{`
+        let mut read = Vec::new();
+        loop {
+            let Ok(e) = self.parse_expr(0) else { break };
+            match sexp_of_expr(&e) {
+                Some(term) => read.push(term),
+                None => break,
+            }
+            if self.at(&TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        // Only a group read *to its closing brace* is static arguments.
+        // `{n:int}` is a binder, and stopping halfway through one would
+        // hand the checker an argument the source never supplied.
+        let whole = self.at(&TokenKind::RBrace);
+        self.pos = save;
+        whole.then_some(read)
+    }
+
     fn parse_template_arguments(&mut self) -> Result<Option<Vec<Ty>>, CompileError> {
+        Ok(self.parse_instantiation()?.0)
+    }
+
+    /// The same, keeping the *static* reading of the brace groups.
+    ///
+    /// Returned rather than stashed on the cursor because reading a
+    /// static term parses an expression, which re-enters this routine —
+    /// and shared state does not survive its own recursion.
+    fn parse_instantiation(&mut self) -> Result<(Option<Vec<Ty>>, Vec<SExp>), CompileError> {
         // `BTnil{int}()`, `list_vt_cons{int}{0}(...)` — ATS writes a
         // template's arguments in braces as readily as in angle
         // brackets, and the two notations mix freely.  A brace group is
@@ -1247,8 +1617,14 @@ impl ParseCtx<'_> {
         // parse as types is put back and skipped as before.
         let mut brace_args: Vec<Ty> = Vec::new();
         let mut saw_brace_group = false;
+        // A template instantiation names *every* argument.  One group
+        // that is not types makes the whole run static — otherwise
+        // `g{n+1}{n}` would be half an instance and half a claim.
+        let mut every_group_typed = true;
+        let mut static_args: Vec<SExp> = Vec::new();
         while self.at(&TokenKind::LBrace) {
             let save = self.pos;
+            static_args.extend(self.read_static_group(save).unwrap_or_default());
             self.advance();
             let mut group = Vec::new();
             let parsed = (|| -> Result<(), CompileError> {
@@ -1267,11 +1643,15 @@ impl ParseCtx<'_> {
                 saw_brace_group = true;
                 brace_args.extend(group);
             } else {
+                every_group_typed = false;
                 self.pos = save;
                 self.skip_balanced(&TokenKind::LBrace, &TokenKind::RBrace);
             }
         }
         while self.at(&TokenKind::LBrace) {
+            let save = self.pos;
+            static_args.extend(self.read_static_group(save).unwrap_or_default());
+            every_group_typed = false;
             self.skip_balanced(&TokenKind::LBrace, &TokenKind::RBrace);
         }
         // `f<>` — "work it out".  The lexer reads `<>` as the not-equal
@@ -1281,12 +1661,12 @@ impl ParseCtx<'_> {
             && self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == TokenKind::LParen)
         {
             self.advance();
-            return Ok(Some(Vec::new()));
+            return Ok((Some(Vec::new()), static_args));
         }
         if !(self.at(&TokenKind::Lt) && self.looks_like_template_args()) {
             // No angle group follows: the braces alone decide whether an
             // instance was named.
-            return Ok(if saw_brace_group { Some(brace_args) } else { None });
+            return Ok((if saw_brace_group && every_group_typed { Some(brace_args) } else { None }, static_args));
         }
         let mut args = Vec::new();
         // `array_foreach$fwork<a><tenv>` — a template may take its
@@ -1317,6 +1697,8 @@ impl ParseCtx<'_> {
             }
         }
         while self.at(&TokenKind::LBrace) {
+            let save = self.pos;
+            self.read_static_group(save);
             self.skip_balanced(&TokenKind::LBrace, &TokenKind::RBrace);
         }
         // Braces and angle brackets name one instance between them, so
@@ -1325,7 +1707,7 @@ impl ParseCtx<'_> {
         if !brace_args.is_empty() {
             args.splice(0..0, brace_args);
         }
-        Ok(Some(args))
+        Ok((Some(args), static_args))
     }
 
     /// Skip the `<...>` / `{...}` arguments that select a template
@@ -1469,6 +1851,17 @@ impl ParseCtx<'_> {
         Ok(all)
     }
 
+    /// Whether a parameter's type is prefixed by a borrow marker.
+    ///
+    /// `!t` lends a linear value: the caller keeps it and gets it back.
+    /// `&t` lends a *cell*: the callee may write through it and may not
+    /// consume it.  Both mean the same thing to a resource check — the
+    /// value is not being handed over — and neither changes the type,
+    /// which is why the marker is read here rather than in `parse_type`.
+    fn at_borrow_marker(&self) -> bool {
+        matches!(self.peek().kind, TokenKind::Amp | TokenKind::Bang)
+    }
+
     fn parse_one_param_list(&mut self, allow_untyped: bool) -> Result<Vec<Param>, CompileError> {
         self.expect(&TokenKind::LParen, "expected `(` to begin the parameter list")?;
         let mut params = Vec::new();
@@ -1483,9 +1876,10 @@ impl ParseCtx<'_> {
                         matches!(t.kind, TokenKind::Colon | TokenKind::Comma | TokenKind::RParen)
                     });
                 if !named {
+                    let borrowed = self.at_borrow_marker();
                     let ty = self.parse_type()?;
                     self.gensym += 1;
-                    params.push(Param { name: format!("arg${}", self.gensym), ty });
+                    params.push(Param { borrowed, name: format!("arg${}", self.gensym), ty });
                     if self.at(&TokenKind::Comma) {
                         self.advance();
                         continue;
@@ -1493,8 +1887,10 @@ impl ParseCtx<'_> {
                     break;
                 }
                 let name = self.expect_ident("expected a parameter name")?;
+                let mut borrowed = false;
                 let ty = if self.at(&TokenKind::Colon) {
                     self.advance();
+                    borrowed = self.at_borrow_marker();
                     self.parse_type()?
                 } else if let Some(known) = well_known_param_type(&name) {
                     // `main`'s two parameters have types fixed by the
@@ -1505,7 +1901,7 @@ impl ParseCtx<'_> {
                 } else {
                     return Err(self.error_here(format!("parameter `{name}` needs a type annotation")));
                 };
-                params.push(Param { name, ty });
+                params.push(Param { borrowed, name, ty });
                 if self.at(&TokenKind::Comma) {
                     self.advance();
                 } else {
@@ -1569,10 +1965,26 @@ impl ParseCtx<'_> {
                     if self.at(&TokenKind::RBracket) {
                         self.advance();
                     }
+                    // `@[t][n]` — the second bracket is how many cells
+                    // there are, which is the only thing that can make a
+                    // subscript into it checkable.
+                    let mut sizes = Vec::new();
                     while self.at(&TokenKind::LBracket) {
-                        self.skip_balanced(&TokenKind::LBracket, &TokenKind::RBracket);
+                        let save = self.pos;
+                        self.advance();
+                        match self.parse_expr(0).ok().as_ref().and_then(sexp_of_expr) {
+                            Some(term) if self.at(&TokenKind::RBracket) => {
+                                self.advance();
+                                sizes.push(term);
+                            }
+                            _ => {
+                                self.pos = save;
+                                self.skip_balanced(&TokenKind::LBracket, &TokenKind::RBracket);
+                            }
+                        }
                     }
-                    Ty::App("array".into(), vec![elem])
+                    let base = Ty::App("array".into(), vec![elem]);
+                    if sizes.is_empty() { base } else { Ty::Index(Box::new(base), sizes) }
                 } else {
                     self.parse_type()?
                 }
@@ -1610,15 +2022,43 @@ impl ParseCtx<'_> {
         // terms, not types, so they are read as terms and kept.
         if let Some(base) = indexed_base(&name) {
             let idx = self.parse_index_terms();
-            let atom = Ty::Name(base.into());
-            let atom = if idx.is_empty() { atom } else { Ty::Index(Box::new(atom), idx) };
+            if idx.is_empty() {
+                // `Nat` is `[i:nat] int i` — an integer nobody has
+                // named, known to be non-negative.  No index is written
+                // and the refinement is the whole content of the name,
+                // so the name is what survives; only a family that says
+                // nothing its base does not collapses to the base.
+                let kept = if name == base { base.to_string() } else { name.clone() };
+                return self.finish_arrow_type(Ty::Name(kept));
+            }
+            // The *family* is kept, not the base it refines.  `intGte(0)`
+            // and `int(0)` are the same machine word and different
+            // claims — "at least nought" against "is nought" — and
+            // collapsing them here told the checker that every bounded
+            // integer equals its own bound.  Emission maps the family
+            // back to its base, which is the stage that may forget.
+            let atom = Ty::Index(Box::new(Ty::Name(name.clone())), idx);
             return self.finish_arrow_type(atom);
         }
+        // How many of the arguments about to be read are *types*.  For a
+        // family this compiler canonicalises — `array(a, n)`,
+        // `list(a, n)` — the rest are static indices, and reading them as
+        // types is how `array(int, n+1)` fails to parse and `array(int,
+        // n)` loses the `n` it was written with.
+        let type_arity = crate::prelude::canonical_type(&name).map(|(_, k)| k);
         let atom = if self.at(&TokenKind::LParen) {
             self.advance();
             let mut args = Vec::new();
+            let mut sizes: Vec<SExp> = Vec::new();
             loop {
-                if let Some(ty) = self.parse_type_argument()? {
+                if type_arity.is_some_and(|k| args.len() >= k) {
+                    // Past the type arguments: what remains measures the
+                    // value rather than describing it.
+                    match self.parse_expr(0).ok().as_ref().and_then(sexp_of_expr) {
+                        Some(term) => sizes.push(term),
+                        None => break,
+                    }
+                } else if let Some(ty) = self.parse_type_argument()? {
                     args.push(ty);
                 }
                 if self.at(&TokenKind::Comma) {
@@ -1640,10 +2080,17 @@ impl ParseCtx<'_> {
                 self.apply_type_head(name, args)
             } else if let Some((canonical, arity)) = crate::prelude::canonical_type(&name) {
                 // `list(t, n)` and `List0(t)` name one type; the length is
-                // static, so only the first `arity` arguments survive.
+                // static, so only the first `arity` arguments describe
+                // what the value *is*.
                 let mut args = args;
                 args.truncate(arity);
-                if args.is_empty() { Ty::Name(canonical.into()) } else { Ty::App(canonical.into(), args) }
+                let base =
+                    if args.is_empty() { Ty::Name(canonical.into()) } else { Ty::App(canonical.into(), args) };
+                // The length is kept *around* that type rather than
+                // inside it, so what the value is stays exactly what it
+                // was: `erased()` gives back the same type as before, and
+                // no later stage can tell the difference.
+                if sizes.is_empty() { base } else { Ty::Index(Box::new(base), sizes) }
             } else if args.is_empty() {
                 // A name applied to nothing but index terms is just the
                 // name: `int(n)` is an `int`, `intGte(0)` a bounded one.
@@ -1797,12 +2244,14 @@ impl ParseCtx<'_> {
             self.advance();
             items.push(self.parse_type()?);
         }
-        // `(PROOF | t)` — a value of type `t` that carries a proof.
-        // Proofs are erased before anything runs, so what was read
-        // before the bar is discarded and the types after it are the
-        // ones a value actually has.
+        // `(PROOF | t)` — a value of type `t` that carries a proof about
+        // itself.  The proof is erased before anything runs, so `t` is
+        // what the value *is* — but the proposition is kept, because it
+        // is where the interesting index usually lives.
+        let mut proof = None;
         if self.at(&TokenKind::Pipe) {
             self.advance();
+            proof = items.pop();
             items = vec![self.parse_type()?];
             while self.at(&TokenKind::Comma) {
                 self.advance();
@@ -1810,6 +2259,10 @@ impl ParseCtx<'_> {
             }
         }
         self.expect(&TokenKind::RParen, "expected `)` after the type list")?;
+        if let (Some(proof), 1) = (proof, items.len()) {
+            let value = items.pop().expect("checked");
+            return self.finish_arrow_type(Ty::Proof(Box::new(proof), Box::new(value)));
+        }
         if self.eat_arrow() {
             let ret = self.parse_type()?;
             Ok(Ty::Fun(items, Box::new(ret)))
@@ -1939,13 +2392,15 @@ impl ParseCtx<'_> {
             let rhs = self.parse_expr(rbp)?;
             lhs = Expr::BinOp(op, Box::new(lhs), Box::new(rhs));
         }
-        // `e : t` — an ascription.  It exists to tell the ATS type
-        // checker what `e` should be; with no type checker here there is
-        // nobody to tell, so it is read and dropped rather than kept as a
-        // node no later stage would consult.
+        // `e : t` — an ascription.  It says what `e` should be, which is
+        // a *claim*, and there is a checker to tell now: `(if n >= 0
+        // then n else 0): intGte(0)` is how a program turns an integer
+        // nobody can bound into one that is bounded, and it is the only
+        // line in the file that says so.
         if self.at(&TokenKind::Colon) && min_bp == 0 {
             self.advance();
-            let _ascribed = self.parse_type()?;
+            let ascribed = self.parse_type()?;
+            lhs = Expr::Ascribe(Box::new(lhs), ascribed);
         }
         // `x := e`, and the compound `x :=+ e` which means `x := x + e`.
         // Assignment binds loosest of all, so it is matched after the
@@ -1965,14 +2420,18 @@ impl ParseCtx<'_> {
                 let tmp = format!("swap${}", self.gensym);
                 return Ok(Expr::Let(
                     vec![
-                        LetBind { name: Some(tmp.clone()), ty: None, value: lhs.clone(), mutable: false },
+                        LetBind { opened: Vec::new(), proof: false, name: Some(tmp.clone()), ty: None, value: lhs.clone(), mutable: false },
                         LetBind {
+                            opened: Vec::new(),
+                            proof: false,
                             name: None,
                             ty: None,
                             value: Expr::Store(Box::new(lhs), Box::new(rhs.clone())),
                             mutable: false,
                         },
                         LetBind {
+                            opened: Vec::new(),
+                            proof: false,
                             name: None,
                             ty: None,
                             value: Expr::Store(Box::new(rhs), Box::new(Expr::Var(tmp))),
@@ -2391,9 +2850,22 @@ impl ParseCtx<'_> {
                 // `f<int>(x)` names the instance wanted.  The types are
                 // kept — monomorphisation needs them — while `f{...}(x)`
                 // supplies *static* arguments, which are erased.
-                let ty_args = self.parse_template_arguments()?;
+                let (ty_args, at) = self.parse_instantiation()?;
                 if let Some(ty_args) = ty_args {
+                    // The group read as types, so that is what it is
+                    // called here.  `{n}` is ambiguous — a type argument
+                    // and an index argument look identical — and only the
+                    // callee's quantifiers can say which was meant, so
+                    // the checker re-reads a type argument as an index
+                    // when the signature it is calling wants one.
                     return Ok(Expr::Inst(name, ty_args));
+                }
+                // `{n, 0}`, `{n+1}` — a group no reading as types
+                // survives.  It can only be static, and it is kept,
+                // because `fact_ind{n}()` and `fact_ind{m}()` are the
+                // same code and different claims.
+                if !at.is_empty() {
+                    return Ok(Expr::StaticInst(Box::new(Expr::Var(name)), at));
                 }
                 if self.at(&TokenKind::Bang) {
                     self.advance();
@@ -2422,10 +2894,20 @@ impl ParseCtx<'_> {
                     return Ok(Expr::Unit);
                 }
                 let mut items = vec![self.parse_expr(0)?];
-                // `(pf | v)` — the proof half is erased.
+                // `(pf | v)` — a value returned together with a proof
+                // about it.  The proof is erased before anything runs;
+                // it is kept because it is what determines the
+                // existential the function promised.
+                let mut proof = None;
                 if self.at(&TokenKind::Pipe) {
                     self.advance();
+                    proof = items.pop();
                     items = vec![self.parse_expr(0)?];
+                }
+                if let (Some(proof), true) = (&proof, self.at(&TokenKind::RParen)) {
+                    let value = items.pop().expect("a value half");
+                    self.advance();
+                    return Ok(Expr::ProofPair(Box::new(proof.clone()), Box::new(value)));
                 }
                 // `(a, b)` is a tuple: the comma builds a value.
                 if self.at(&TokenKind::Comma) {
@@ -2449,7 +2931,7 @@ impl ParseCtx<'_> {
                 let mut expr = it.next().expect("at least one element");
                 for earlier in it {
                     expr = Expr::Let(
-                        vec![LetBind { name: None, ty: None, value: earlier, mutable: false }],
+                        vec![LetBind { opened: Vec::new(), proof: false, name: None, ty: None, value: earlier, mutable: false }],
                         Box::new(expr),
                     );
                 }
@@ -2659,7 +3141,7 @@ impl ParseCtx<'_> {
                     }
                     for d in defs {
                         if let Def::Const(c) = d {
-                            binds.push(LetBind { name: Some(c.name), ty: None, value: c.value, mutable: false });
+                            binds.push(LetBind { opened: Vec::new(), proof: false, name: Some(c.name), ty: None, value: c.value, mutable: false });
                         }
                     }
                 }
@@ -2711,6 +3193,16 @@ impl ParseCtx<'_> {
                         self.pending.push(def);
                     }
                 }
+                // `prval pf = ...` — a proof, which the checker must see
+                // and the emitter must not.  Skipping it threw away the
+                // only line establishing the claim the body then relies
+                // on; emitting it would call a function never built.
+                TokenKind::Ident(w) if w == "prval" || w == "prvar" => {
+                    match self.parse_proof_binding() {
+                        Some(bind) => binds.push(bind),
+                        None => self.skip_local_directive(),
+                    }
+                }
                 TokenKind::Ident(w) if is_skippable_directive(&w) => self.skip_local_directive(),
                 _ => return Ok((binds, None)),
             }
@@ -2730,8 +3222,10 @@ impl ParseCtx<'_> {
         // `val [r:int] (pf | r) = ...` — the binding opens an
         // existential: the caller learns there *is* such an `r` and
         // gives it a name.  The name is static, so it binds nothing at
-        // run time.
-        self.parse_existentials();
+        // run time — but it is what lets the caller *reason* about the
+        // witness the callee refused to name, so it is kept.
+        let opened: Vec<(String, Sort)> =
+            self.parse_existentials().into_iter().flat_map(|q| q.vars).collect();
         // Does a pattern start here?  A literal always does; a name does
         // when it is applied — `cons(n, ns)` — since a binding's name is
         // never followed by `(`.
@@ -2757,21 +3251,21 @@ impl ParseCtx<'_> {
             let pattern = self.parse_pattern()?;
             if let Pattern::Var(n) = pattern {
                 // `(x)` is just `x` spelled with its brackets.
-                return Ok(BindKind::Simple(self.finish_let_bind(Some(n), None, mutable)?));
+                return Ok(BindKind::Simple(self.finish_let_bind(&opened, Some(n), None, mutable)?));
             }
             if let Pattern::Tuple(items) = &pattern {
                 if items.is_empty() {
-                    return Ok(BindKind::Simple(self.finish_let_bind(None, None, mutable)?));
+                    return Ok(BindKind::Simple(self.finish_let_bind(&opened, None, None, mutable)?));
                 }
                 if items.len() == 1 {
                     if let Pattern::Var(n) = &items[0] {
                         let n = n.clone();
-                        return Ok(BindKind::Simple(self.finish_let_bind(Some(n), None, mutable)?));
+                        return Ok(BindKind::Simple(self.finish_let_bind(&opened, Some(n), None, mutable)?));
                     }
                 }
             }
             if let Pattern::Wildcard = pattern {
-                return Ok(BindKind::Simple(self.finish_let_bind(None, None, mutable)?));
+                return Ok(BindKind::Simple(self.finish_let_bind(&opened, None, None, mutable)?));
             }
             self.expect(&TokenKind::Eq, "expected `=` in the binding")?;
             let value = self.parse_expr(0)?;
@@ -2782,11 +3276,11 @@ impl ParseCtx<'_> {
         } else {
             return Err(self.error_here("expected a name, `_` or a pattern after `val`"));
         };
-        Ok(BindKind::Simple(self.finish_let_bind(name, None, mutable)?))
+        Ok(BindKind::Simple(self.finish_let_bind(&opened, name, None, mutable)?))
     }
 
     /// The `: type` and `= value` (or uninitialized zero) of a binding.
-    fn finish_let_bind(&mut self, name: Option<String>, _dummy: Option<()>, mutable: bool) -> Result<LetBind, CompileError> {
+    fn finish_let_bind(&mut self, opened: &[(String, Sort)], name: Option<String>, _dummy: Option<()>, mutable: bool) -> Result<LetBind, CompileError> {
         let ty = if self.at(&TokenKind::Colon) {
             self.advance();
             Some(self.parse_type()?)
@@ -2805,7 +3299,7 @@ impl ParseCtx<'_> {
             self.expect(&TokenKind::Eq, "expected `=` in the binding")?;
             self.parse_expr(0)?
         };
-        Ok(LetBind { name, ty, value, mutable })
+        Ok(LetBind { opened: opened.to_vec(), proof: false, name, ty, value, mutable })
     }
 
     /// `typedef T = t` — record the alias, and report whether it was one
@@ -2981,6 +3475,54 @@ impl ParseCtx<'_> {
         };
         self.advance();
         Some(Def::Overload { op: op.to_string(), func })
+    }
+
+    /// `prval pf = e`, `prval () = e`, `prval EQINT() = e` — a proof
+    /// binding.
+    ///
+    /// Only the *name* on the left is read, and only when it is a plain
+    /// one: a proof pattern destructures a proof, and this compiler
+    /// tracks no proof values to destructure.  The expression on the
+    /// right is what matters — it is the application of an axiom, and
+    /// its result type is the claim that comes into scope.
+    fn parse_proof_binding(&mut self) -> Option<LetBind> {
+        let save = self.pos;
+        self.advance(); // `prval` / `prvar`
+        let name = match self.peek().kind.clone() {
+            // `prval pf = ...` — a name, unless it is a constructor
+            // pattern (`EQINT()`), which binds nothing this compiler has.
+            TokenKind::Ident(n)
+                if self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == TokenKind::Eq) =>
+            {
+                self.advance();
+                Some(n)
+            }
+            _ => {
+                // Anything else on the left — `()`, `EQINT()`, a pattern
+                // — is stepped over to reach the `=`.
+                while !self.at(&TokenKind::Eq) && !self.at(&TokenKind::Eof) {
+                    let before = self.pos;
+                    self.advance();
+                    if self.pos == before {
+                        self.pos = save;
+                        return None;
+                    }
+                }
+                None
+            }
+        };
+        if !self.at(&TokenKind::Eq) {
+            self.pos = save;
+            return None;
+        }
+        self.advance();
+        match self.parse_expr(0) {
+            Ok(value) => Some(LetBind { opened: Vec::new(), proof: true, name, ty: None, value, mutable: false }),
+            Err(_) => {
+                self.pos = save;
+                None
+            }
+        }
     }
 
     /// Skip an ignorable declaration inside a body, stopping before the
@@ -3220,7 +3762,7 @@ impl ParseCtx<'_> {
             let mut params = Vec::new();
             while let TokenKind::Ident(name) = self.peek().kind.clone() {
                 self.advance();
-                params.push(Param { name, ty: Ty::Name("_".into()) });
+                params.push(Param { borrowed: false, name, ty: Ty::Name("_".into()) });
             }
             params
         };
@@ -3278,7 +3820,7 @@ fn sequence(items: Vec<Expr>) -> Expr {
     let Some(mut expr) = it.next() else { return Expr::Unit };
     for earlier in it {
         expr = Expr::Let(
-            vec![LetBind { name: None, ty: None, value: earlier, mutable: false }],
+            vec![LetBind { opened: Vec::new(), proof: false, name: None, ty: None, value: earlier, mutable: false }],
             Box::new(expr),
         );
     }
@@ -3361,7 +3903,7 @@ mod tests {
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
         assert_eq!(f.name, "f");
         assert_eq!(f.params.len(), 1);
-        assert_eq!(f.params[0], Param { name: "x".into(), ty: Ty::Name("int".into()) });
+        assert_eq!(f.params[0], Param { borrowed: false, name: "x".into(), ty: Ty::Name("int".into()) });
         assert_eq!(f.ret, Ty::Name("int".into()));
         assert_eq!(f.body, Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(int(1))));
     }
@@ -3585,9 +4127,10 @@ mod tests {
         let p = Parser::parse("fun f(): int = from{n:int} (1)").expect("parse");
         let rendered = format!("{:?}", &p.defs()[0]);
         assert!(
-            !rendered.contains("Inst("),
+            !rendered.contains("Inst(\"from\""),
             "a static group was read as a template argument:\n{rendered}"
         );
+        assert!(!rendered.contains("StaticInst"), "a binder was read as an argument:\n{rendered}");
     }
 
     #[test]
@@ -3882,19 +4425,24 @@ mod tests {
     // --- ascription and indexing -----------------------------------
 
     #[test]
-    fn a_type_ascription_is_dropped() {
-        // `(e): int` tells the ATS type checker what `e` should be.  This
-        // compiler has no type checker to tell, so the annotation is read
-        // and discarded rather than recorded as an AST node nothing
-        // consults.
-        assert_eq!(impl_body("implement main0() = (1 + 2): int"), 
-                   Expr::BinOp(BinOp::Add, Box::new(int(1)), Box::new(int(2))));
+    fn a_type_ascription_is_kept_as_the_claim_it_is() {
+        // `(e): int` says what `e` should be, which is a claim — and
+        // there is a checker to make it to.  The value is untouched, so
+        // every stage after the checker looks through it.
+        let body = impl_body("implement main0() = (1 + 2): int");
+        let Expr::Ascribe(inner, ty) = &body else { panic!("{body:?}") };
+        assert_eq!(**inner, Expr::BinOp(BinOp::Add, Box::new(int(1)), Box::new(int(2))));
+        assert_eq!(*ty, Ty::Name("int".into()));
     }
 
     #[test]
-    fn an_ascription_may_name_a_type_we_do_not_know() {
-        // `intGte(0)` is a dependent type; it still parses and vanishes.
-        assert_eq!(impl_body("implement main0() = 5: intGte(0)"), int(5));
+    fn an_ascription_may_name_a_dependent_type() {
+        // `intGte(0)` is where an unbounded integer becomes a bounded
+        // one, and the only line in the file that says so.
+        let body = impl_body("implement main0() = 5: intGte(0)");
+        let Expr::Ascribe(inner, ty) = &body else { panic!("{body:?}") };
+        assert_eq!(**inner, int(5));
+        assert_eq!(*ty, Ty::Index(Box::new(Ty::Name("intGte".into())), vec![SExp::IntLit(0)]));
     }
 
     #[test]
@@ -3928,18 +4476,23 @@ mod tests {
     // --- skipping declarations without losing the ones that matter -
 
     #[test]
-    fn a_skipped_declaration_may_contain_braces() {
-        // `prval () = fact_ind{n}()` is proof-level and gets skipped, but
-        // the `{n}` inside it must not be mistaken for the end of the
-        // enclosing block — otherwise the `in` after it is never seen.
+    fn a_proof_binding_keeps_its_proof_and_the_block_around_it() {
+        // `prval () = fact_ind{n}()` is proof-level: it is kept, marked,
+        // and the body that follows it survives.  The `{n}` inside must
+        // not be mistaken for the end of the enclosing block, or the
+        // `in` after it is never seen.
         let body = impl_body("implement main0() = let prval () = fact_ind{n}() in println!(1) end");
-        assert_eq!(body, Expr::MacroCall("println!".into(), vec![int(1)]));
+        let Expr::Let(binds, rest) = &body else { panic!("{body:?}") };
+        assert!(binds[0].proof);
+        assert_eq!(**rest, Expr::MacroCall("println!".into(), vec![int(1)]));
     }
 
     #[test]
-    fn a_skipped_declaration_may_contain_parentheses_and_brackets() {
+    fn a_proof_binding_whose_left_hand_side_is_a_pattern_is_still_kept() {
         let body = impl_body("implement main0() = let prval EQINT() = eqint_make{n,0}[x] in println!(2) end");
-        assert_eq!(body, Expr::MacroCall("println!".into(), vec![int(2)]));
+        let Expr::Let(binds, rest) = &body else { panic!("{body:?}") };
+        assert!(binds[0].proof);
+        assert_eq!(**rest, Expr::MacroCall("println!".into(), vec![int(2)]));
     }
 
     #[test]
@@ -4139,7 +4692,7 @@ mod tests {
         assert_eq!(
             body_of("fun f(x: int): int = let val y = x + 1 in y * 2 end"),
             Expr::Let(
-                vec![LetBind { name: Some("y".into()), ty: None, value: Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(int(1))), mutable: false }],
+                vec![LetBind { opened: Vec::new(), proof: false, name: Some("y".into()), ty: None, value: Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(int(1))), mutable: false }],
                 Box::new(Expr::BinOp(BinOp::Mul, Box::new(var("y")), Box::new(int(2)))),
             )
         );
@@ -4208,18 +4761,23 @@ mod tests {
     }
 
     #[test]
-    fn a_proof_component_is_erased_from_a_type() {
+    fn a_proof_component_is_erased_from_what_a_value_is() {
         // `(PROOF | int)` is a value of type `int` carrying a proof.
-        // Proofs have no runtime content, so only the part after the
-        // bar survives.
+        // The proof is kept, because it is what the checker reasons
+        // with; what the value *is* stays `int`, which is what every
+        // stage after the checker asks.
         let p = Parser::parse("fun f(x: int): (FACT(n, r) | int) = (pf | x)").expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        assert_eq!(f.ret, Ty::Name("int".into()));
+        assert_eq!(f.ret.erased(), Ty::Name("int".into()));
+        assert!(f.ret.proof().is_some(), "the proposition is kept: {:?}", f.ret);
     }
 
     #[test]
-    fn a_proof_component_is_erased_from_an_expression() {
-        assert_eq!(body_of("fun f(x: int): int = (pf | x)"), var("x"));
+    fn a_proof_component_is_erased_from_what_an_expression_evaluates_to() {
+        let body = body_of("fun f(x: int): int = (pf | x)");
+        let Expr::ProofPair(proof, value) = &body else { panic!("{body:?}") };
+        assert_eq!(**proof, var("pf"));
+        assert_eq!(**value, var("x"), "what runs is the value half");
     }
 
     #[test]
@@ -4239,6 +4797,497 @@ mod tests {
     }
 
     #[test]
+    fn a_termination_metric_is_read_rather_than_skipped() {
+        // `.<n>.` is the claim that makes a function *total*: without it
+        // a definition may promise anything and satisfy the promise by
+        // never returning.  It is a claim, so it is kept.
+        let p = Parser::parse("fun f {n:nat} .<n>. (x: int n): int = x").expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        assert_eq!(f.metric, vec![SExp::Var("n".into())]);
+        assert_eq!(f.universals.len(), 1, "the quantifier must survive the metric");
+    }
+
+    #[test]
+    fn a_metric_may_be_lexicographic() {
+        let p = Parser::parse("fun f {m,n:nat} .<m, n>. (x: int m): int = x").expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        assert_eq!(f.metric, vec![SExp::Var("m".into()), SExp::Var("n".into())]);
+    }
+
+    #[test]
+    fn a_metric_may_be_an_expression_not_only_a_variable() {
+        let p = Parser::parse("fun f {n:nat} .<n-1>. (x: int n): int = x").expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        assert_eq!(
+            f.metric,
+            vec![SExp::App("-".into(), vec![SExp::Var("n".into()), SExp::IntLit(1)])]
+        );
+    }
+
+    #[test]
+    fn the_empty_metric_claims_nothing_and_is_recorded_as_nothing() {
+        // `.<>.` is ATS for "no metric here".  It must not become a
+        // metric with no components, which would be a claim about an
+        // empty tuple.
+        let p = Parser::parse("fun f {n:nat} .<>. (x: int n): int = x").expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        assert!(f.metric.is_empty());
+        assert_eq!(f.universals.len(), 1);
+    }
+
+    #[test]
+    fn a_bracket_may_hold_a_bare_proposition_with_nothing_bound() {
+        // `[fact(0) == 1] void` is how a proof function states what it
+        // proves: no witness is named, because there is nothing to name
+        // — the claim *is* the content.  Read as a binder it parses as
+        // nothing at all, and the axiom says nothing.
+        let p = Parser::parse("extern fun ax (): [fact(0) == 1] void").expect("parse");
+        let Def::Extern(d) = &p.defs()[0] else { panic!("{:?}", p.defs()[0]) };
+        assert_eq!(d.existentials.len(), 1);
+        assert!(d.existentials[0].vars.is_empty(), "nothing is bound");
+        assert_eq!(
+            d.existentials[0].guard,
+            Some(SExp::App(
+                "==".into(),
+                vec![SExp::App("fact".into(), vec![SExp::IntLit(0)]), SExp::IntLit(1)]
+            ))
+        );
+    }
+
+    #[test]
+    fn a_proof_function_is_a_signature_like_any_other() {
+        // `praxi` declares an axiom: a proof that exists by fiat, whose
+        // *result type* is the claim it establishes.  Skipping it threw
+        // away the only statement in the file that said anything.
+        let p = Parser::parse("extern praxi fact_ind {n:pos} (): [fact(n) == n * fact(n-1)] void")
+            .expect("parse");
+        let Def::Extern(d) = &p.defs()[0] else { panic!("{:?}", p.defs()[0]) };
+        assert_eq!(d.name, "fact_ind");
+        assert_eq!(d.universals[0].vars, vec![("n".to_string(), Sort::Pos)]);
+        assert_eq!(d.existentials.len(), 1);
+    }
+
+    #[test]
+    fn a_static_argument_at_a_call_site_is_kept() {
+        // `fact_ind{n}()` and `fact_ind{m}()` are the same code and
+        // different claims.  An axiom applied at the wrong index is the
+        // one mistake a proof language exists to catch, so the index
+        // cannot be thrown away on the way in.
+        let p = Parser::parse("fun f {n:nat} (x: int n): int = g{n, 0}(x)").expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        let Expr::Call(callee, _) = &f.body else { panic!("{:?}", f.body) };
+        let Expr::StaticInst(inner, at) = &**callee else { panic!("{:?}", callee) };
+        assert_eq!(**inner, Expr::Var("g".into()));
+        assert_eq!(*at, vec![SExp::Var("n".into()), SExp::IntLit(0)]);
+    }
+
+    #[test]
+    fn several_static_argument_groups_are_read_in_order() {
+        let p = Parser::parse("fun f {n:nat} (x: int n): int = g{n+1}{n}(x)").expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        let Expr::Call(callee, _) = &f.body else { panic!() };
+        let Expr::StaticInst(_, at) = &**callee else { panic!("{:?}", callee) };
+        assert_eq!(
+            *at,
+            vec![
+                SExp::App("+".into(), vec![SExp::Var("n".into()), SExp::IntLit(1)]),
+                SExp::Var("n".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_group_that_reads_as_a_type_stays_a_type_argument() {
+        // `{int}` and `{n}` are the same shape; the parser cannot tell
+        // them apart and does not try.  It calls the group what it
+        // parses as, and the checker — which can see the callee's
+        // quantifiers — re-reads it when the signature wants an index.
+        let p = Parser::parse("fun f (): int = g{n}(1)").expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        let Expr::Call(callee, _) = &f.body else { panic!() };
+        assert_eq!(**callee, Expr::Inst("g".into(), vec![Ty::Name("n".into())]));
+    }
+
+    #[test]
+    fn a_call_with_no_static_arguments_is_left_unwrapped() {
+        let p = Parser::parse("fun f (x: int): int = g(x)").expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        let Expr::Call(callee, _) = &f.body else { panic!() };
+        assert_eq!(**callee, Expr::Var("g".into()));
+    }
+
+    #[test]
+    fn a_proof_value_becomes_a_binding_the_checker_can_see() {
+        // `prval () = fact_ind{n}()` is the line that establishes the
+        // claim the rest of the body relies on.  Skipping it threw away
+        // the proof and left the body unprovable; emitting it would call
+        // a function that was never built.  So it is kept, and marked.
+        let p = Parser::parse(
+            "fun f {n:nat} (x: int n): int = let prval () = ax{n}() in x end",
+        )
+        .expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        let Expr::Let(binds, _) = &f.body else { panic!("{:?}", f.body) };
+        assert_eq!(binds.len(), 1);
+        assert!(binds[0].proof, "a proof binding must say so");
+        assert_eq!(binds[0].name, None, "`()` names nothing");
+        assert!(matches!(binds[0].value, Expr::Call(..)), "{:?}", binds[0].value);
+    }
+
+    #[test]
+    fn a_proof_value_may_be_given_a_name() {
+        let p = Parser::parse(
+            "fun f {n:nat} (x: int n): int = let prval pf = ax{n}() in x end",
+        )
+        .expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        let Expr::Let(binds, _) = &f.body else { panic!() };
+        assert_eq!(binds[0].name.as_deref(), Some("pf"));
+        assert!(binds[0].proof);
+    }
+
+    #[test]
+    fn a_proof_value_bound_by_a_pattern_still_runs_its_proof() {
+        // `prval EQINT() = eqint_make{n,0}()` names nothing this
+        // compiler tracks, but the call on the right is still what
+        // establishes the equality.
+        let p = Parser::parse(
+            "fun f {n:nat} (x: int n): int = let prval EQINT() = mk{n,0}() in x end",
+        )
+        .expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        let Expr::Let(binds, _) = &f.body else { panic!("{:?}", f.body) };
+        assert!(binds[0].proof);
+        assert!(matches!(binds[0].value, Expr::Call(..)), "{:?}", binds[0].value);
+    }
+
+    #[test]
+    fn a_proof_declaration_that_does_not_parse_is_still_skipped() {
+        let p = Parser::parse("fun f (): int = let prval pf = ?? ~~ in 1 end").expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        assert!(matches!(f.body, Expr::Let(..) | Expr::IntLit(1)), "{:?}", f.body);
+    }
+
+    #[test]
+    fn a_dataprop_constructor_becomes_the_signature_it_is() {
+        // `dataprop FACT(int,int) = | {n:pos}{r:int} FACTind (n, n*r) of
+        // FACT(n-1, r)` declares `FACTind` as a function from a proof of
+        // `FACT(n-1,r)` to a proof of `FACT(n, n*r)`.  That is all a
+        // constructor of a proposition is, and saying so needs no
+        // machinery a function does not already have.
+        let p = Parser::parse(
+            "dataprop FACT (int, int) = | FACTbas (0, 1) of () \
+             | {n:pos}{r:int} FACTind (n, n*r) of FACT (n-1, r)",
+        )
+        .expect("parse");
+        let decl = |name: &str| {
+            p.defs()
+                .iter()
+                .find_map(|d| match d {
+                    Def::Extern(d) if d.name == name => Some(d.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no `{name}` in {:?}", p.defs()))
+        };
+        let bas = decl("FACTbas");
+        assert!(bas.params.is_empty());
+        assert_eq!(
+            bas.ret,
+            Ty::Index(Box::new(Ty::Name("FACT".into())), vec![SExp::IntLit(0), SExp::IntLit(1)])
+        );
+        let ind = decl("FACTind");
+        assert_eq!(ind.universals.len(), 2);
+        assert_eq!(ind.params.len(), 1, "the proof it consumes");
+        assert_eq!(
+            ind.ret,
+            Ty::Index(
+                Box::new(Ty::Name("FACT".into())),
+                vec![
+                    SExp::Var("n".into()),
+                    SExp::App("*".into(), vec![SExp::Var("n".into()), SExp::Var("r".into())])
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn an_existential_result_may_be_opened_by_naming_its_witness() {
+        // `val [r1:int] (pf1 | r1) = fact (x-1)` names the witness the
+        // callee refused to name.  Without the name every fact about the
+        // returned value is about a variable nobody can mention twice,
+        // and the proof that follows has nothing to attach to.
+        let p = Parser::parse("fun f (x: int): int = let val [r1:int] (pf1 | res) = g(x) in res end")
+            .expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        let Expr::Let(binds, _) = &f.body else { panic!("{:?}", f.body) };
+        assert_eq!(binds[0].opened, vec![("r1".to_string(), Sort::Int)]);
+        assert_eq!(binds[0].name.as_deref(), Some("res"), "the value half is what is bound");
+        assert!(!binds[0].proof, "the value half runs");
+    }
+
+    #[test]
+    fn a_binding_that_opens_nothing_says_so() {
+        let p = Parser::parse("fun f (x: int): int = let val y = g(x) in y end").expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        let Expr::Let(binds, _) = &f.body else { panic!() };
+        assert!(binds[0].opened.is_empty());
+    }
+
+    #[test]
+    fn a_result_type_keeps_the_proof_it_promises() {
+        // `[r:int] (FACT(n,r) | int(r))` pins `r` down through the
+        // proposition.  Erasing the proof half leaves only `int(r)`, and
+        // then `r` has to be recovered from arithmetic that is often
+        // nonlinear and out of any linear solver's reach.
+        let p = Parser::parse("fun f {n:nat} (x: int n): [r:int] (FACT(n, r) | int(r)) = x")
+            .expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        let Ty::Proof(proof, value) = &f.ret else { panic!("{:?}", f.ret) };
+        // A proposition applied to plain names parses as a type
+        // application; the checker reads its arguments as index terms.
+        assert_eq!(
+            **proof,
+            Ty::App("FACT".into(), vec![Ty::Name("n".into()), Ty::Name("r".into())])
+        );
+        assert_eq!(**value, Ty::Index(Box::new(Ty::Name("int".into())), vec![SExp::Var("r".into())]));
+        // What the value *is* is still the value half.
+        assert_eq!(f.ret.erased(), Ty::Name("int".into()));
+        assert_eq!(f.ret.indices(), &[SExp::Var("r".into())]);
+    }
+
+    #[test]
+    fn a_returned_pair_keeps_the_proof_it_returns() {
+        let p = Parser::parse("fun f (x: int): int = (pf | x)").expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        let Expr::ProofPair(proof, value) = &f.body else { panic!("{:?}", f.body) };
+        assert_eq!(**proof, Expr::Var("pf".into()));
+        assert_eq!(**value, Expr::Var("x".into()));
+    }
+
+    #[test]
+    fn a_plain_parenthesised_expression_is_not_a_pair() {
+        let p = Parser::parse("fun f (x: int): int = (x)").expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        assert_eq!(f.body, Expr::Var("x".into()));
+    }
+
+    /// The type of `f`'s only parameter.
+    fn first_param_ty(src: &str) -> Ty {
+        let p = Parser::parse(src).expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!("expected a fun") };
+        f.params[0].ty.clone()
+    }
+
+    /// `array(int, n)` — an array of `int`, `n` long.
+    fn int_array(size: SExp) -> Ty {
+        Ty::Index(Box::new(Ty::App("array".into(), vec![Ty::Name("int".into())])), vec![size])
+    }
+
+    #[test]
+    fn an_array_keeps_the_size_it_was_declared_with() {
+        // The size is the whole reason to write `array(int, n)` rather
+        // than `array(int)`: without it `A[i]` cannot be checked against
+        // anything, and a bounds check is the obligation ATS exists to
+        // make.
+        assert_eq!(first_param_ty("fun f {n:nat} (a: array(int, n)): int = 1"), int_array(SExp::Var("n".into())));
+    }
+
+    #[test]
+    fn the_bracket_spelling_of_an_array_is_the_same_array() {
+        // `@[int][n]` is a flat array of `n` ints — the same type
+        // `array(int, n)` names, written the way a `var` declares one.
+        assert_eq!(first_param_ty("fun f {n:nat} (a: @[int][n]): int = 1"), int_array(SExp::Var("n".into())));
+    }
+
+    #[test]
+    fn a_by_reference_array_is_the_array_it_refers_to() {
+        // `&(@[int][m]) >> _` passes the array by reference and says its
+        // view is unchanged.  Neither the `&` nor the `>>` alters what
+        // the value is or how long it is.
+        assert_eq!(
+            first_param_ty("fun f {m:nat} (t: &(@[int][m]) >> _): int = 1"),
+            int_array(SExp::Var("m".into()))
+        );
+    }
+
+    #[test]
+    fn an_arrayref_is_an_array_with_its_size() {
+        assert_eq!(
+            first_param_ty("fun f {n:nat} (a: arrayref(int, n)): int = 1"),
+            int_array(SExp::Var("n".into()))
+        );
+    }
+
+    #[test]
+    fn a_size_may_be_an_expression_rather_than_a_variable() {
+        assert_eq!(
+            first_param_ty("fun f {n:nat} (a: array(int, n+1)): int = 1"),
+            int_array(SExp::App("+".into(), vec![SExp::Var("n".into()), SExp::IntLit(1)]))
+        );
+    }
+
+    #[test]
+    fn a_run_of_bytes_is_indexed_by_how_many_there_are() {
+        // `b0ytes(n)` is `n` bytes, uninitialised; `bytes(n)` is `n`
+        // bytes that have been written.  The difference is a view, which
+        // this compiler does not track; the length is not, and it is
+        // what a bounds check needs.
+        for name in ["bytes", "b0ytes"] {
+            let ty = first_param_ty(&format!("fun f {{n:pos}} (b: {name}(n)): int = 1"));
+            assert_eq!(ty.indices(), &[SExp::Var("n".into())], "{name}: {ty:?}");
+        }
+    }
+
+    #[test]
+    fn an_arrays_size_is_static_and_leaves_no_trace_in_what_it_is() {
+        // Emission must not notice any of this: an `array(int, n)` and
+        // an `array(int)` are the same bytes.
+        assert_eq!(
+            first_param_ty("fun f {n:nat} (a: array(int, n)): int = 1").erased(),
+            Ty::App("array".into(), vec![Ty::Name("int".into())])
+        );
+    }
+
+    #[test]
+    fn a_block_of_inline_c_survives_to_the_program() {
+        // A program that declares `extern fun f = "ext#f"` and defines
+        // `f` in a `%{ %}` block used to compile and then fail to link,
+        // naming a symbol whose definition was thrown away three stages
+        // earlier.  The text is not this compiler's language; it is the
+        // toolchain's, and it has to reach it.
+        let p = Parser::parse(
+            "%{^\nint triple (int n) { return 3 * n; }\n%}\n\
+             extern fun triple (n: int): int = \"ext#triple\"\n\
+             implement main0 () = println! (triple (2))",
+        )
+        .expect("parse");
+        let c: Vec<&String> = p
+            .defs()
+            .iter()
+            .filter_map(|d| match d {
+                Def::InlineC(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(c.len(), 1, "{:?}", p.defs());
+        assert!(c[0].contains("return 3 * n"), "{}", c[0]);
+    }
+
+    #[test]
+    fn the_marker_that_says_where_the_c_goes_is_not_part_of_it() {
+        // `%{^` puts it above the output and `%{$` below.  Neither
+        // marker is C, and leaving one in makes the file not compile.
+        let p = Parser::parse("%{$\nint z = 1;\n%}\nimplement main0 () = println! (0)")
+            .expect("parse");
+        let Some(Def::InlineC(text)) = p.defs().iter().find(|d| matches!(d, Def::InlineC(_)))
+        else {
+            panic!("{:?}", p.defs())
+        };
+        assert!(!text.contains('$'), "the marker survived: {text}");
+        assert!(text.trim().starts_with("int z"), "{text}");
+    }
+
+    #[test]
+    fn a_linear_datatype_says_that_it_is_one() {
+        // `datavtype` declares values that must be consumed exactly
+        // once.  Parsing it as an ordinary `datatype` erases the only
+        // thing that distinguishes it, and the resource discipline that
+        // is half of what ATS is for goes unchecked.
+        let p = Parser::parse("datavtype box_vt(a) = mk_vt of (a)").expect("parse");
+        let Def::Datatype(d) = &p.defs()[0] else { panic!("{:?}", p.defs()[0]) };
+        assert!(d.linear, "a datavtype is linear");
+    }
+
+    #[test]
+    fn an_ordinary_datatype_is_not_linear() {
+        let p = Parser::parse("datatype box(a) = mk of (a)").expect("parse");
+        let Def::Datatype(d) = &p.defs()[0] else { panic!() };
+        assert!(!d.linear);
+    }
+
+    #[test]
+    fn a_dataview_is_linear_as_well() {
+        // A `dataview` is a `dataprop` whose proofs are resources: it
+        // stands for permission to touch something, and permission that
+        // could be used twice would not be permission at all.
+        let p = Parser::parse("dataview owned (int) = | own (0) of ()").expect("parse");
+        let owned = p.defs().iter().any(|d| matches!(d, Def::Extern(e) if e.name == "own" && e.linear));
+        assert!(owned, "{:?}", p.defs());
+    }
+
+    #[test]
+    fn a_borrowed_parameter_says_that_it_is_borrowed() {
+        // `!xs` is lent, not given: the caller keeps it, and the body
+        // must *not* consume it.  Dropping the `!` makes every borrow
+        // look like a handover.
+        let p = Parser::parse("fun f (xs: !box_vt(int), ys: box_vt(int)): int = 1").expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        assert!(f.params[0].borrowed, "`!` marks a borrow");
+        assert!(!f.params[1].borrowed, "a plain parameter is given");
+    }
+
+    #[test]
+    fn a_by_reference_parameter_is_borrowed_too() {
+        // `&t` passes a cell the caller keeps: the callee may write
+        // through it and may not consume it.
+        let p = Parser::parse("fun f (a: &int): int = 1").expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        assert!(f.params[0].borrowed);
+    }
+
+    #[test]
+    fn a_dataprop_that_does_not_parse_is_skipped_not_fatal() {
+        let p = Parser::parse("dataprop WEIRD = | ??? \n fun f(): int = 1").expect("parse");
+        assert!(p.defs().iter().any(|d| matches!(d, Def::Fun(f) if f.name == "f")));
+    }
+
+    #[test]
+    fn a_proof_function_needs_no_extern_before_it() {
+        let p = Parser::parse("praxi ax (): [1 == 1] void").expect("parse");
+        let Def::Extern(d) = &p.defs()[0] else { panic!("{:?}", p.defs()[0]) };
+        assert_eq!(d.name, "ax");
+    }
+
+    #[test]
+    fn a_proof_function_that_does_not_parse_is_skipped_not_fatal() {
+        // The fallback must survive: a proof language this compiler does
+        // not model costs its own declaration, never the file.
+        let p = Parser::parse("praxi weird {a:t@ype} (!list(a) >> list(a)): void\nfun f(): int = 1")
+            .expect("parse");
+        assert!(p.defs().iter().any(|d| matches!(d, Def::Fun(f) if f.name == "f")));
+    }
+
+    #[test]
+    fn a_bracket_holding_a_binder_is_still_read_as_a_binder() {
+        let p = Parser::parse("extern fun g (): [r:nat] int r").expect("parse");
+        let Def::Extern(d) = &p.defs()[0] else { panic!() };
+        assert_eq!(d.existentials[0].vars, vec![("r".to_string(), Sort::Nat)]);
+        assert_eq!(d.existentials[0].guard, None);
+    }
+
+    #[test]
+    fn a_brace_holding_only_a_name_is_an_instantiation_and_binds_nothing() {
+        // `f{n}(...)` hands a static argument to a call; it is not a
+        // quantifier, and reading it as a bare proposition would turn
+        // every instantiation into an assumption.
+        let p = Parser::parse("fun f {n:nat} (x: int n): int = g{n}(x)").expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        assert_eq!(f.universals.len(), 1);
+        assert_eq!(f.universals[0].vars, vec![("n".to_string(), Sort::Nat)]);
+    }
+
+    #[test]
+    fn an_extern_declaration_records_its_quantifiers_too() {
+        // `extern fun f {n:nat} (int n): int` is how the corpus declares
+        // everything it implements elsewhere, and a declaration that
+        // forgets its quantifier is a promise nobody can keep.
+        let p = Parser::parse("extern fun ext {n:nat} (x: int n): int").expect("parse");
+        let Def::Extern(d) = &p.defs()[0] else { panic!("{:?}", p.defs()[0]) };
+        assert_eq!(d.universals.len(), 1);
+        assert_eq!(d.universals[0].vars, vec![("n".to_string(), Sort::Nat)]);
+    }
+
+    #[test]
     fn a_universal_quantifier_is_recorded_rather_than_skipped() {
         // `{n:nat | n > 0}` is the dependent half of the signature.  It
         // is what makes the type of `f` say something about *which*
@@ -4251,6 +5300,46 @@ mod tests {
             f.universals[0].guard,
             Some(SExp::App(">".into(), vec![SExp::Var("n".into()), SExp::IntLit(0)]))
         );
+    }
+
+    #[test]
+    fn a_guard_may_be_several_claims_separated_by_semicolons() {
+        // `{i,j:nat | i <= j+1; i+j == n-1}` is one guard written as two
+        // conjuncts, and it is how every real ATS loop invariant is
+        // spelled.  Failing to read the `;` cost the *whole* quantifier
+        // — the sorts included — so a loop lost even its nat-ness.
+        let p = Parser::parse("fun loop {i,j:nat | i <= j; i+j == 4} (x: int i): int = x")
+            .expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        assert_eq!(f.universals.len(), 1);
+        assert_eq!(f.universals[0].vars.len(), 2);
+        assert_eq!(
+            f.universals[0].guard,
+            Some(SExp::App(
+                "&&".into(),
+                vec![
+                    SExp::App("<=".into(), vec![SExp::Var("i".into()), SExp::Var("j".into())]),
+                    SExp::App(
+                        "==".into(),
+                        vec![
+                            SExp::App("+".into(), vec![SExp::Var("i".into()), SExp::Var("j".into())]),
+                            SExp::IntLit(4)
+                        ]
+                    ),
+                ]
+            ))
+        );
+    }
+
+    #[test]
+    fn every_conjunct_of_a_guard_reaches_the_checker_as_a_hypothesis() {
+        let p = Parser::parse("fun loop {i,j:nat | i <= j; i+j == 4} (x: int i): int = x")
+            .expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        let hyps: Vec<String> = f.universals[0].hypotheses().iter().map(|h| h.to_string()).collect();
+        assert!(hyps.contains(&"i >= 0".to_string()), "{hyps:?}");
+        assert!(hyps.contains(&"j >= 0".to_string()), "{hyps:?}");
+        assert!(hyps.iter().any(|h| h.contains("i <= j")), "{hyps:?}");
     }
 
     #[test]
@@ -4281,7 +5370,7 @@ mod tests {
         assert_eq!(
             impl_body("implement main0() = { val x = 1; x + 1 }"),
             Expr::Let(
-                vec![LetBind { name: Some("x".into()), ty: None, value: int(1), mutable: false }],
+                vec![LetBind { opened: Vec::new(), proof: false, name: Some("x".into()), ty: None, value: int(1), mutable: false }],
                 Box::new(Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(int(1)))),
             )
         );
@@ -4292,7 +5381,7 @@ mod tests {
         assert_eq!(
             body_of("fun f(): int = lam (x: int) => x + 1"),
             Expr::Lam(
-                vec![Param { name: "x".into(), ty: Ty::Name("int".into()) }],
+                vec![Param { borrowed: false, name: "x".into(), ty: Ty::Name("int".into()) }],
                 None,
                 Box::new(Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(int(1)))),
             )
@@ -4543,9 +5632,11 @@ fun f(): res = list0_nil()")
         assert_eq!(
             body_of("fun f(): int = let val x = 1 in g(); x end"),
             Expr::Let(
-                vec![LetBind { name: Some("x".into()), ty: None, value: int(1), mutable: false }],
+                vec![LetBind { opened: Vec::new(), proof: false, name: Some("x".into()), ty: None, value: int(1), mutable: false }],
                 Box::new(Expr::Let(
                     vec![LetBind {
+                        opened: Vec::new(),
+                        proof: false,
                         name: None,
                         ty: None,
                         value: Expr::Call(Box::new(var("g")), vec![]),
@@ -4562,7 +5653,7 @@ fun f(): res = list0_nil()")
         assert_eq!(
             body_of("fun f(x: int): int = let val () = fold@ x in x end"),
             Expr::Let(
-                vec![LetBind { name: None, ty: None, value: Expr::Unit, mutable: false }],
+                vec![LetBind { opened: Vec::new(), proof: false, name: None, ty: None, value: Expr::Unit, mutable: false }],
                 Box::new(var("x")),
             )
         );
@@ -4625,6 +5716,8 @@ fun f(): res = list0_nil()")
             body_of("fun f(): int = begin g(); 1 end"),
             Expr::Let(
                 vec![LetBind {
+                    opened: Vec::new(),
+                    proof: false,
                     name: None,
                     ty: None,
                     value: Expr::Call(Box::new(var("g")), vec![]),
@@ -4745,7 +5838,7 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
         assert_eq!(
             body_of("fun f(): int = lam x => x + 1"),
             Expr::Lam(
-                vec![Param { name: "x".into(), ty: Ty::Name("_".into()) }],
+                vec![Param { borrowed: false, name: "x".into(), ty: Ty::Name("_".into()) }],
                 None,
                 Box::new(Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(int(1)))),
             )
@@ -4758,8 +5851,8 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
             body_of("fun f(): int = lam (x0, x1) => x0 + x1"),
             Expr::Lam(
                 vec![
-                    Param { name: "x0".into(), ty: Ty::Name("_".into()) },
-                    Param { name: "x1".into(), ty: Ty::Name("_".into()) },
+                    Param { borrowed: false, name: "x0".into(), ty: Ty::Name("_".into()) },
+                    Param { borrowed: false, name: "x1".into(), ty: Ty::Name("_".into()) },
                 ],
                 None,
                 Box::new(Expr::BinOp(BinOp::Add, Box::new(var("x0")), Box::new(var("x1")))),

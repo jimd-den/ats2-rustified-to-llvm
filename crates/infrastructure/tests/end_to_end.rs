@@ -80,3 +80,46 @@ fn the_emitted_ir_executes_under_lli() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(stdout, "fact(5) = 120\n", "unexpected output: {stdout:?}");
 }
+
+/// Whether the host has a C toolchain to link with.
+fn clang_available() -> bool {
+    Command::new("clang").arg("--version").output().is_ok()
+}
+
+#[test]
+fn a_program_that_brought_its_own_c_is_compiled_with_it() {
+    // `%{ ... %}` is the body of some `extern fun` declared beside it.
+    // The block used to be thrown away at the lexer, so a program like
+    // this compiled and then failed to link, naming a symbol whose
+    // definition had been discarded three stages earlier.  Now the C is
+    // written next to the IR and both go to the toolchain together.
+    //
+    // This lives here rather than in `examples/` because the suite there
+    // runs each sample under `lli`, which sees the IR alone: a program
+    // with foreign code is one that has to be *linked* to mean anything.
+    if !clang_available() {
+        eprintln!("skipping: no clang on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join("ats2llvm-inline-c");
+    std::fs::create_dir_all(&dir).expect("a place to work");
+    let source = "%{^\nint triple (int n) { return 3 * n; }\n%}\n\
+                  extern fun triple (n: int): int = \"ext#triple\"\n\
+                  implement main0 () = println! (\"triple 14 = \", triple (14))";
+
+    use ats2_application::use_cases::CompileExecutableUseCase;
+    use ats2_infrastructure::io::FileOutput;
+    use ats2_infrastructure::toolchain::ClangToolchain;
+
+    let ir = dir.join("foreign.ll");
+    let bin = dir.join("foreign");
+    let uc = CompileExecutableUseCase::new(Parser, LlvmIrEmitter, ClangToolchain, FileOutput);
+    uc.execute(source, &ir, &bin).expect("the program should build");
+
+    // The C was written where the IR is, because that is where the other
+    // half of the program already is.
+    assert!(ir.with_extension("c").exists(), "the C block was not written out");
+
+    let out = Command::new(&bin).output().expect("run the linked program");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "triple 14 = 42");
+}

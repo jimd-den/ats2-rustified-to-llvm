@@ -16,6 +16,13 @@ impl LlvmIrEmitter {
         // The prelude supplies the declarations every ATS program assumes
         // it has.  It comes first so that inference and expansion see one
         // program, with no notion of where a declaration came from.
+        // The static language stops here.  A `praxi`, a `prfun` and each
+        // constructor of a `dataprop` declare something with no body, no
+        // symbol and no bits, whose result type — `FACT(n, r)` — is not a
+        // type any machine has.  They are dropped before anything else
+        // looks at the program, because every stage after this one is
+        // about what runs.
+        let program = &without_proofs(program);
         let program = &with_prelude(program)?;
         // Naming the instance a bare template call means needs the types
         // of its arguments, so inference runs before expansion.
@@ -26,6 +33,8 @@ impl LlvmIrEmitter {
         let mut module = ModuleBuilder::new();
         for def in &program.defs {
             match def {
+                // Not this compiler's language; the toolchain reads it.
+                Def::InlineC(_) => {}
                 Def::Fun(f) => emit_function(f, &registry, &mut module)?,
                 Def::Implement(im) if im.name == "main0" || im.name == "main" => {
                     // The initializers run first, in the order they were
@@ -51,9 +60,10 @@ impl LlvmIrEmitter {
                         .params
                         .iter()
                         .zip(&sig.params)
-                        .map(|(p, ty)| Param { name: p.name.clone(), ty: ty_for(*ty) })
+                        .map(|(p, ty)| Param { borrowed: false, name: p.name.clone(), ty: ty_for(*ty) })
                         .collect();
                     let f = ats2_domain::ast::FunDef {
+                        metric: Vec::new(),
                         ty_params: im.ty_params.clone(),
                         // An `implement` inherits the declaration's
                         // quantifiers; nothing here re-states them.
@@ -255,6 +265,8 @@ fn zero_literal(ty: LlvmType) -> &'static str {
 /// The name a definition introduces, if it introduces one.
 fn def_name(def: &Def) -> Option<String> {
     match def {
+        // Not this compiler's language; the toolchain reads it.
+        Def::InlineC(_) => None,
         Def::Fun(f) => Some(f.name.clone()),
         Def::Extern(d) => Some(d.name.clone()),
         Def::Implement(im) => Some(im.name.clone()),
@@ -269,6 +281,8 @@ fn def_name(def: &Def) -> Option<String> {
 fn collect_names(defs: &[Def], out: &mut std::collections::HashSet<String>) {
     for def in defs {
         match def {
+            // Not this compiler's language; the toolchain reads it.
+            Def::InlineC(_) => {}
             Def::Fun(f) => {
                 for p in &f.params {
                     collect_type_names(&p.ty, out);
@@ -312,6 +326,8 @@ fn collect_names(defs: &[Def], out: &mut std::collections::HashSet<String>) {
 
 fn collect_type_names(ty: &Ty, out: &mut std::collections::HashSet<String>) {
     match ty {
+        // A proposition names nothing the emitter has to build.
+        Ty::Proof(_, value) => collect_type_names(value, out),
         Ty::Name(n) => {
             out.insert(n.clone());
         }
@@ -339,6 +355,15 @@ fn collect_expr_names(expr: &Expr, out: &mut std::collections::HashSet<String>) 
         Expr::Var(n) => {
             out.insert(n.clone());
         }
+        // An ascription and a proof pair both wrap an expression whose
+        // names are still needed: the prelude is pruned by this walk, and
+        // a name it does not reach is a function that is never built.
+        Expr::Ascribe(inner, ty) => {
+            collect_expr_names(inner, out);
+            collect_type_names(ty, out);
+        }
+        Expr::ProofPair(_, value) => collect_expr_names(value, out),
+        Expr::StaticInst(inner, _) => collect_expr_names(inner, out),
         Expr::Inst(n, tys) => {
             out.insert(n.clone());
             for t in tys {
@@ -385,7 +410,11 @@ fn collect_expr_names(expr: &Expr, out: &mut std::collections::HashSet<String>) 
         }
         Expr::Lam(_, _, b) => go(b, out),
         Expr::Let(binds, body) => {
-            for b in binds {
+            // A proof binding mentions names that exist only in the
+            // static language — an axiom has no body to emit and no
+            // symbol to link.  Collecting them would ask the emitter to
+            // build something the source never wrote.
+            for b in binds.iter().filter(|b| !b.proof) {
                 if let Some(t) = &b.ty {
                     collect_type_names(t, out);
                 }
@@ -771,6 +800,8 @@ fn registry_of(program: &Program) -> Result<Registry, CompileError> {
     }
     for def in &program.defs {
         match def {
+            // Not this compiler's language; the toolchain reads it.
+            Def::InlineC(_) => {}
             Def::Fun(f) => {
                 let params = f.params.iter().map(|p| llvm_type_in(&p.ty, &registry)).collect::<Result<Vec<_>, _>>()?;
                 // `fun f (m: int) = lam (n: int): int => ...` writes no
@@ -872,7 +903,27 @@ fn registry_of(program: &Program) -> Result<Registry, CompileError> {
 }
 
 /// As `llvm_type_of`, but also resolving the datatypes declared here.
+/// The primitive an ATS refinement family refines.
+///
+/// `intGte(0)` is an `int` that is known to be at least nought; the
+/// knowledge is the checker's business and the machine word is the
+/// emitter's.  This is where the knowledge is dropped.
+fn refined_primitive(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "intGt" | "intGte" | "intLt" | "intLte" | "intBtw" | "intBtwe" | "nat" | "natLt"
+        | "natLte" | "natGt" | "natGte" | "uintGt" | "uintGte" | "uintLt" | "uintLte"
+        | "sizeGt" | "sizeGte" | "sizeLt" | "sizeLte" | "sizeBtw" | "sizeBtwe" | "size_t"
+        | "ssize_t" | "uint" | "pos" | "Nat" | "Pos" => "int",
+        _ => return None,
+    })
+}
+
 fn llvm_type_in(ty: &Ty, registry: &Registry) -> Result<LlvmType, CompileError> {
+    if let Ty::Name(n) = ty {
+        if let Some(primitive) = refined_primitive(n) {
+            return llvm_type_in(&Ty::Name(primitive.into()), registry);
+        }
+    }
     // `(int) -> int` is a function *value*, which in this subset means a
     // closure: nothing else can produce one.
     if let Ty::Fun(params, ret) = ty {
@@ -941,6 +992,9 @@ fn llvm_type_in(ty: &Ty, registry: &Registry) -> Result<LlvmType, CompileError> 
 /// Map a domain type to an LLVM type, or report it as unsupported.
 fn llvm_type_of(ty: &Ty) -> Result<LlvmType, CompileError> {
     match ty {
+        // `(pf | v)` occupies exactly what `v` occupies: a proof is not
+        // a value and has no representation to ask about.
+        Ty::Proof(_, value) => llvm_type_of(value),
         // An index is a fact *about* a value, never a part of one, so
         // emission looks straight through it.  This is what ATS itself
         // does: the static language is gone before any code is emitted.
@@ -1138,6 +1192,34 @@ fn base_type_named(name: &str) -> Option<LlvmType> {
         "argv" => Some(LlvmType::Argv),
         "FILEref" | "FILEptr" => Some(LlvmType::FileRef),
         _ => None,
+    }
+}
+
+/// The program with its proof declarations removed.
+///
+/// Everything the static language declares is invisible from here on: it
+/// has already been read by the checker, which is the only stage that
+/// could do anything with it.
+fn without_proofs(program: &Program) -> Program {
+    Program::new(
+        program
+            .defs()
+            .iter()
+            .filter(|d| !matches!(d, Def::Extern(decl) if decl.proof))
+            .cloned()
+            .collect(),
+    )
+}
+
+/// An expression with any static instantiation stripped away.
+///
+/// `ax{n}(...)` names which claim was made, and by emission time no
+/// claim is being made any more.  Every place that asks "what is being
+/// called here" wants the answer underneath.
+fn peel_static(e: &Expr) -> &Expr {
+    match e {
+        Expr::StaticInst(inner, _) => peel_static(inner),
+        _ => e,
     }
 }
 
@@ -1667,6 +1749,24 @@ impl LlvmIrEmitter {
     fn emit_expr_expecting(&self, expr: &Expr, expected: Option<LlvmType>, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
         match expr {
             Expr::Unit => Ok(FnValue { reg: String::new(), ty: LlvmType::Void }),
+            // `fact_ind{n}()` — a static instantiation.  It picks which
+            // *claim* is being made and no bits at all, so emission
+            // looks straight through it.  This is where the static
+            // language stops: everything past here runs.
+            // `e : t` — an ascription.  It says what `e` should be,
+            // which the checker has already read; nothing about the
+            // value changes, so emission looks through it.
+            Expr::Ascribe(inner, _) => {
+                self.emit_expr_expecting(inner, expected, fb, registry, module)
+            }
+            // `(pf | v)` — a value with a proof about it.  The proof is
+            // erased; what runs is `v`.
+            Expr::ProofPair(_, value) => {
+                self.emit_expr_expecting(value, expected, fb, registry, module)
+            }
+            Expr::StaticInst(inner, _) => {
+                self.emit_expr_expecting(inner, expected, fb, registry, module)
+            }
             // `'{ x= 1, y= 2 }` — a record.  Its slots are laid out in
             // the order written, which is what fixes each name to one.
             Expr::RecordLit(fields) => {
@@ -1876,6 +1976,14 @@ impl LlvmIrEmitter {
             Expr::IfThenElse(c, t, e) => self.emit_if(c, t, e, expected, fb, registry, module),
             Expr::Let(binds, body) => {
                 for bind in binds {
+                    // A proof binding names a proof: no storage, no
+                    // code, and the axiom on its right-hand side has no
+                    // body anywhere.  Emission is where the static
+                    // language stops, and this is the line where it
+                    // stops.
+                    if bind.proof {
+                        continue;
+                    }
                     let annotated = bind.ty.as_ref().map(|t| llvm_type_in(t, registry)).transpose()?;
                     let v = self.emit_expr_expecting(&bind.value, annotated, fb, registry, module)?;
                     if let Some(ann) = &bind.ty {
@@ -2157,7 +2265,7 @@ impl LlvmIrEmitter {
             for part in spine.iter().rev() {
                 flat.extend(part.iter().cloned());
             }
-            let head = match inner {
+            let head = match peel_static(inner) {
                 Expr::Var(n) => Some(n),
                 Expr::Inst(n, _) => Some(n),
                 _ => None,
@@ -2188,7 +2296,10 @@ impl LlvmIrEmitter {
 
         // `f<t>(x)` reaches here when `f` is a shim rather than a
         // template: the type arguments choose which shim is meant.
-        let (name, ty_args) = match &*callee {
+        // Static instantiation — `ax{n}(...)` — chose a *claim*, which
+        // stopped mattering one stage ago, so it is looked through.
+        let callee = peel_static(callee);
+        let (name, ty_args) = match callee {
             Expr::Var(n) => (n, Vec::new()),
             Expr::Inst(n, tys) => (n, tys.clone()),
             _ => return Err(CompileError::emit("only named functions can be called (no higher-order calls)")),
@@ -3635,6 +3746,60 @@ impl LlvmIrEmitter {
             "string_length" | "string0_length" | "string1_length" | "strlen" => {
                 Ok(Some(self.emit_libc_shim(name, "strlen", "declare i64 @strlen(ptr)", LlvmType::I8Ptr, LlvmType::I64, args, fb, registry, module)?))
             }
+            // `string_append (s, t)` — a *third* string.  ATS strings are
+            // NUL-terminated bytes somebody else owns, so joining two
+            // means asking the arena for room and copying both in: there
+            // is nowhere else for the result to live, and writing into
+            // either argument would be writing into a constant.
+            "string_append" | "string_append1" | "string0_append" | "strcat" => {
+                let [first, second] = args else {
+                    return Err(CompileError::emit(format!("`{name}` takes two strings")));
+                };
+                let a = self.emit_string_arg(first, name, fb, registry, module)?;
+                let b = self.emit_string_arg(second, name, fb, registry, module)?;
+                let na = self.emit_strlen(&a, fb, module);
+                let nb = self.emit_strlen(&b, fb, module);
+                let total = fb.fresh_temp();
+                fb.line(format!("{total} = add i64 {na}, {nb}"));
+                let room = fb.fresh_temp();
+                fb.line(format!("{room} = add i64 {total}, 1"));
+                let out = self.emit_alloc_bytes(&room, fb, module);
+                self.emit_memcpy(&out, &a, &na, fb, module);
+                let tail = fb.fresh_temp();
+                fb.line(format!("{tail} = getelementptr i8, ptr {out}, i64 {na}"));
+                // One more byte than `b` is long: that is its terminator,
+                // and it becomes the result's.
+                let with_nul = fb.fresh_temp();
+                fb.line(format!("{with_nul} = add i64 {nb}, 1"));
+                self.emit_memcpy(&tail, &b, &with_nul, fb, module);
+                Ok(Some(FnValue { reg: out, ty: LlvmType::I8Ptr }))
+            }
+            // `string_make_substring (s, start, len)` — `len` bytes from
+            // `start`.  The copy is terminated here rather than carried
+            // over: a substring ends where it is told to, not where the
+            // string it came from did.
+            "string_make_substring" | "substring" | "string_substring" => {
+                let [subject, start, len] = args else {
+                    return Err(CompileError::emit(format!(
+                        "`{name}` takes a string, a start and a length"
+                    )));
+                };
+                let s = self.emit_string_arg(subject, name, fb, registry, module)?;
+                let from = self.emit_expr(start, fb, registry, module)?;
+                let from = self.emit_numeric_cast(from, LlvmType::I64, fb)?;
+                let count = self.emit_expr(len, fb, registry, module)?;
+                let count = self.emit_numeric_cast(count, LlvmType::I64, fb)?;
+                let room = fb.fresh_temp();
+                fb.line(format!("{room} = add i64 {}, 1", count.reg));
+                let out = self.emit_alloc_bytes(&room, fb, module);
+                let src = fb.fresh_temp();
+                fb.line(format!("{src} = getelementptr i8, ptr {s}, i64 {}", from.reg));
+                self.emit_memcpy(&out, &src, &count.reg, fb, module);
+                let end = fb.fresh_temp();
+                fb.line(format!("{end} = getelementptr i8, ptr {out}, i64 {}", count.reg));
+                fb.line(format!("store i8 0, ptr {end}"));
+                Ok(Some(FnValue { reg: out, ty: LlvmType::I8Ptr }))
+            }
             _ => Ok(None),
         }
     }
@@ -3724,6 +3889,28 @@ impl LlvmIrEmitter {
     }
 
     /// As `emit_alloc`, but for a size only known at run time.
+    /// An argument that must be a string, emitted and checked.
+    fn emit_string_arg(&self, e: &Expr, of: &str, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<String, CompileError> {
+        let v = self.emit_expr(e, fb, registry, module)?;
+        self.require(v.ty, LlvmType::I8Ptr, of)?;
+        Ok(v.reg)
+    }
+
+    /// How long a NUL-terminated string is.
+    fn emit_strlen(&self, s: &str, fb: &mut FnBuilder, module: &mut ModuleBuilder) -> String {
+        module.externs.insert("declare i64 @strlen(ptr)");
+        let n = fb.fresh_temp();
+        fb.line(format!("{n} = call i64 @strlen(ptr {s})"));
+        n
+    }
+
+    /// `count` bytes from `src` to `dst`.
+    fn emit_memcpy(&self, dst: &str, src: &str, count: &str, fb: &mut FnBuilder, module: &mut ModuleBuilder) {
+        module.externs.insert("declare ptr @memcpy(ptr, ptr, i64)");
+        let done = fb.fresh_temp();
+        fb.line(format!("{done} = call ptr @memcpy(ptr {dst}, ptr {src}, i64 {count})"));
+    }
+
     fn emit_alloc_bytes(&self, bytes: &str, fb: &mut FnBuilder, module: &mut ModuleBuilder) -> String {
         module.needs_heap = true;
         module.externs.insert("declare ptr @malloc(i64)");
@@ -4134,13 +4321,24 @@ impl LlvmIrEmitter {
         decl.push_str(&ret_instruction(ret_ty, &value));
         module.lines.push(decl);
 
-        // The record: the code, then everything it captured.
-        let ptr = self.emit_alloc(WORD * (1 + captures.len()), fb, module);
-        fb.line(format!("store ptr @{fname}, ptr {ptr}"));
-        for (i, (_, v)) in captures.iter().enumerate() {
-            let addr = self.emit_slot_address(&ptr, i + 1, fb);
-            fb.line(format!("store {} {}, ptr {addr}", llvm_ty_str(v.ty), v.reg));
-        }
+        // The record: the code, then everything it captured.  A lambda
+        // that captured nothing has the same record every time it is
+        // evaluated, so it gets one, in read-only memory: no allocation,
+        // and — because the code pointer now lives somewhere that
+        // provably never changes — a call through it is one LLVM knows
+        // how to turn back into a direct call, and then to inline.
+        let ptr = if captures.is_empty() {
+            module.globals.push(format!("@clos.{id} = private unnamed_addr constant ptr @{fname}"));
+            format!("@clos.{id}")
+        } else {
+            let ptr = self.emit_alloc(WORD * (1 + captures.len()), fb, module);
+            fb.line(format!("store ptr @{fname}, ptr {ptr}"));
+            for (i, (_, v)) in captures.iter().enumerate() {
+                let addr = self.emit_slot_address(&ptr, i + 1, fb);
+                fb.line(format!("store {} {}, ptr {addr}", llvm_ty_str(v.ty), v.reg));
+            }
+            ptr
+        };
         let index = registry.intern_closure(FnSig { params: param_tys, ret: ret_ty });
         Ok(FnValue { reg: ptr, ty: LlvmType::Closure(index) })
     }
@@ -5460,6 +5658,54 @@ mod tests {
     }
 
     #[test]
+    fn a_proposition_is_not_a_type_the_emitter_has_to_know() {
+        // A `dataprop` declares constructors whose result is a
+        // proposition — `FACT(n, r)` — which is not a type any machine
+        // has.  The checker reads them; the emitter must not be handed
+        // them at all.
+        let ir = emit(
+            "dataprop FACT (int, int) = | FACTbas (0, 1) of () \
+             | {n:pos}{r:int} FACTind (n, n*r) of FACT (n-1, r) \
+             implement main0() = println!(1)",
+        )
+        .expect("emit");
+        assert!(!ir.contains("FACT"), "a proposition reached the emitter:\n{ir}");
+    }
+
+    #[test]
+    fn a_proof_binding_emits_nothing_at_all() {
+        // `prval () = ax{n}()` establishes a claim and occupies no
+        // storage.  `ax` is an axiom: it has no body anywhere, so a call
+        // to it would not link.  Emission is where the static language
+        // stops.
+        let ir = emit(
+            "praxi ax {n:nat} (): [n >= 0] void \
+             fun f {n:nat} (x: int n): int = let prval () = ax{n}() in x end \
+             implement main0() = println!(f(3))",
+        )
+        .expect("emit");
+        assert!(!ir.contains("@ax"), "the axiom reached the emitter:\n{ir}");
+    }
+
+    #[test]
+    fn a_capture_free_lambda_is_a_constant_and_allocates_nothing() {
+        // A lambda that reads nothing from its scope has the same record
+        // on every evaluation, so there is one, in read-only memory.
+        // Allocating a fresh copy per evaluation would cost a bump and,
+        // worse, hide the code pointer behind a mutable store — which is
+        // what stops LLVM turning the indirect call into a direct one.
+        let ir = emit(
+            "fun mk(): (int) -> int = lam (n: int): int => n + 1 \
+             implement main0() = println!(mk()(2))",
+        )
+        .expect("emit");
+        assert!(ir.contains("constant ptr @lam.0"), "no constant record in:\n{ir}");
+        let mk = &ir[ir.find("define ptr @mk").expect("a mk")..];
+        let mk = &mk[..mk.find("\n}").expect("an end")];
+        assert!(!mk.contains(".ats_alloc"), "capture-free lambda still allocates:\n{mk}");
+    }
+
+    #[test]
     fn a_closure_captures_what_it_reads() {
         let ir = emit(
             "fun adder(m: int): (int) -> int = lam (n: int): int => m + n \
@@ -6271,6 +6517,27 @@ mod tests {
     fn the_int_suffixed_spelling_is_the_same_shim() {
         let ir = emit("implement main0(argc, argv) = println!(g0string2int_int(argv[1]))").expect("emit");
         assert!(ir.contains("call i64 @atoi(ptr"), "got:\n{ir}");
+    }
+
+    #[test]
+    fn appending_two_strings_makes_a_third() {
+        // ATS strings are NUL-terminated bytes somebody else owns, so
+        // joining two means asking the arena for room and copying both
+        // in.  There is nowhere else for the result to live.
+        let ir = emit(r#"implement main0() = println!(string_append("ab", "cd"))"#)
+            .expect("emit");
+        assert!(ir.contains("@memcpy"), "nothing was copied:\n{ir}");
+        assert!(ir.contains("@.ats_alloc"), "the result has nowhere to live:\n{ir}");
+    }
+
+    #[test]
+    fn a_substring_is_copied_out_and_terminated() {
+        let ir = emit(r#"implement main0() = println!(string_make_substring("hello", 1, 3))"#)
+            .expect("emit");
+        assert!(ir.contains("@memcpy"), "nothing was copied:\n{ir}");
+        // The copy is not NUL-terminated by itself: a substring ends
+        // where it is told to, not where the original did.
+        assert!(ir.contains("store i8 0"), "the result never ends:\n{ir}");
     }
 
     #[test]

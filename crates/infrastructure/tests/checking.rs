@@ -1,0 +1,429 @@
+//! # Checking real ATS, prelude and all
+//!
+//! *Literate note.*  The unit tests in `ats2-application` build syntax
+//! trees by hand, which is the right way to pin a typing rule down: the
+//! rule is the subject, and a parser between the test and the rule is
+//! noise.  These tests are the other half.  They start from *source*,
+//! because the questions here are about what a real program means —
+//! whether `string_length` returns the length it was given, whether
+//! `A[i]` is inside `A` — and those questions are only asked properly by
+//! a program somebody could have written.
+//!
+//! The prelude is the reason this file exists.  Nearly every claim a real
+//! ATS program makes rests on a declaration the program never wrote, and
+//! a checker that cannot see those declarations cannot check anything but
+//! toy code.
+
+use ats2_application::checking::{check_program, Strictness};
+use ats2_infrastructure::parser::Parser;
+
+/// Parse `source` and check it strictly, returning the complaints.
+fn check(source: &str) -> Vec<String> {
+    let program = Parser::parse(source).expect("the source should parse");
+    let mut defs = Vec::new();
+    for text in [
+        ats2_infrastructure::prelude::PRELUDE_SOURCE,
+        ats2_infrastructure::prelude::PRELUDE_STATIC_SOURCE,
+    ] {
+        defs.extend(Parser::parse(text).expect("the prelude should parse").defs().to_vec());
+    }
+    let prelude = ats2_domain::ast::Program::new(defs);
+    check_program(&program, &prelude, Strictness::Strict)
+        .into_iter()
+        .map(|e| e.message)
+        .collect()
+}
+
+#[test]
+fn a_prelude_signature_is_in_scope_for_the_checker() {
+    // `string_length` is the prelude's, and its result is the length of
+    // the string it was given.  A program relying on that is checkable
+    // only if the checker can see a declaration the program never wrote
+    // — which is nearly every claim a real ATS program makes.
+    let errs = check("fun f {n:nat} (s: string n): int n = string_length(s)");
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn a_program_may_still_declare_a_name_the_prelude_also_has() {
+    // The prelude fills gaps; it does not shadow.  What the program
+    // declares is the program's, and it is what its calls are checked
+    // against.
+    let errs = check(
+        "extern fun string_length {n:nat} (s: string n): int (n+1) \
+         fun f {n:nat} (s: string n): int (n+1) = string_length(s)",
+    );
+    assert!(errs.is_empty(), "the program's own declaration should win: {errs:?}");
+}
+
+#[test]
+fn a_prelude_signature_can_refuse_a_program() {
+    // Seeing the prelude has to cut both ways, or it is not a check.
+    let errs = check("fun f {n:nat} (s: string n): int (n+1) = string_length(s)");
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].contains("the result of `f`"), "{}", errs[0]);
+}
+
+#[test]
+fn a_compile_time_constant_is_a_number_the_checker_knows() {
+    // `#define N 1024` is not a variable: every mention of `N` *is*
+    // 1024, decided before the program runs.  A checker that treated it
+    // as an unknown could not prove the one thing it is written to make
+    // obvious.
+    let errs = check(
+        "#define N 1024 \
+         fun f {n:pos} (x: int n): int = x \
+         implement main0() = f(N)",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn a_compile_time_constant_can_refuse_a_program_too() {
+    let errs = check(
+        "#define ZERO 0 \
+         fun f {n:pos} (x: int n): int = x \
+         implement main0() = f(ZERO)",
+    );
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].contains("is false"), "{}", errs[0]);
+}
+
+#[test]
+fn a_bare_refinement_type_still_refines() {
+    // `Nat` is `[i:nat] int i` — an integer nobody has named, known to
+    // be non-negative.  No index is written, and the refinement is the
+    // whole content of the name: collapsing it to `int` throws away the
+    // only thing `Nat` says.
+    for spelling in ["Nat", "nat"] {
+        let errs = check(&format!(
+            "fun f {{n:nat}} (x: int n): int = x \
+             fun g (k: {spelling}): int = f(k)"
+        ));
+        assert!(errs.is_empty(), "{spelling}: {errs:?}");
+    }
+}
+
+#[test]
+fn a_bare_pos_is_stronger_than_a_bare_nat() {
+    for spelling in ["Pos", "pos"] {
+        let errs = check(&format!(
+            "fun f {{n:pos}} (x: int n): int = x \
+             fun g (k: {spelling}): int = f(k)"
+        ));
+        assert!(errs.is_empty(), "{spelling}: {errs:?}");
+    }
+    // ...and a `nat` is not a `pos`.
+    let errs = check(
+        "fun f {n:pos} (x: int n): int = x \
+         fun g (k: Nat): int = f(k)",
+    );
+    assert_eq!(errs.len(), 1, "{errs:?}");
+}
+
+#[test]
+fn a_bare_refinement_is_still_an_ordinary_integer_to_the_emitter() {
+    // Nothing about `Nat` changes what it is: an `int` in a register.
+    let program = Parser::parse("fun g (k: Nat): int = k \n implement main0() = println!(g(3))")
+        .expect("parse");
+    ats2_infrastructure::llvm_ir::LlvmIrEmitter::emit(&program).expect("emit");
+}
+
+#[test]
+fn an_index_buried_in_a_type_argument_is_still_found() {
+    // `list0(list(int, n))` carries its index a level down, inside the
+    // element type.  Matching only the outermost index leaves `n`
+    // undetermined and every promise about the result unprovable —
+    // which is how a list of lists goes unchecked.
+    let errs = check(
+        "extern fun g {n:nat} (xs: list0(list(int, n))): int n \
+         fun f {k:nat} (xs: list0(list(int, k))): int k = g(xs)",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn a_buried_index_that_disagrees_is_still_owed() {
+    // The depth must not cost the *check*, only the effort of reaching
+    // it: a call that gets the nested length wrong is still wrong.
+    let errs = check(
+        "extern fun g {n:nat} (xs: list0(list(int, n))): int n \
+         fun f {k:nat} (xs: list0(list(int, k))): int (k+1) = g(xs)",
+    );
+    assert_eq!(errs.len(), 1, "{errs:?}");
+}
+
+#[test]
+fn a_top_level_size_is_the_same_rule_read_at_depth_nought() {
+    // `string(n)` was matched by a rule of its own before; it is the
+    // shallowest case of this one, and must stay working.
+    let errs = check("fun f {n:nat} (s: string n): int n = string_length(s)");
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn a_constructor_pattern_gives_its_fields_the_types_they_have() {
+    // `case xs of list0_cons (x, rest) => ...` — the tail is a list of
+    // the same thing the head came out of, and its length is the length
+    // the scrutinee was carrying.  Binding the fields as unknowns is
+    // what leaves every recursion over an indexed list unchecked.
+    let errs = check(
+        "extern fun g {n:nat} (xs: list0(list(int, n))): int \
+         fun f {k:nat} (xss: list0(list(int, k))): int = \
+           case+ xss of | list0_cons (x, rest) => g(rest) | list0_nil () => 0",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn a_field_of_a_constructor_pattern_carries_its_own_refinement() {
+    // The head of a `list0(Nat)` is a `Nat`, and knowing so is what
+    // lets the arm hand it to something that demands one.
+    let errs = check(
+        "fun needs_nat {n:nat} (x: int n): int = x \
+         fun f (xs: list0(Nat)): int = \
+           case+ xs of | list0_cons (x, rest) => needs_nat(x) | list0_nil () => 0",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn a_pattern_field_of_the_wrong_shape_still_claims_nothing() {
+    // A scrutinee whose type nobody knows binds unknowns, as before —
+    // the rule adds knowledge where there is some, and invents none.
+    let errs = check(
+        "fun needs_nat {n:nat} (x: int n): int = x \
+         fun f (xs: list0(int)): int = \
+           case+ xs of | list0_cons (x, rest) => needs_nat(x) | list0_nil () => 0",
+    );
+    assert_eq!(errs.len(), 1, "an `int` is not known to be a `nat`: {errs:?}");
+}
+
+#[test]
+fn a_constructor_written_by_one_of_its_other_names_still_takes_the_value_apart() {
+    // ATS spells the list constructors several ways — `cons`,
+    // `list_cons`, `list_vt_cons` — and a program mixes them freely.
+    // Which one was written says nothing about what the value is made
+    // of, so it must not decide whether the pieces have types.
+    for spelling in ["cons", "list_cons", "list0_cons"] {
+        let errs = check(&format!(
+            "extern fun g {{n:nat}} (xs: list0(list(int, n))): int \
+             fun f {{k:nat}} (xss: list0(list(int, k))): int = \
+               case+ xss of | {spelling} (x, rest) => g(rest) | _ => 0"
+        ));
+        assert!(errs.is_empty(), "{spelling}: {errs:?}");
+    }
+}
+
+#[test]
+fn a_call_hands_on_the_type_of_what_it_returned() {
+    // `g(mk(x))` — the argument is not a name, it is what another call
+    // produced.  Its indices are in its *type*, and a checker that only
+    // learns types from names cannot follow a value that was never
+    // given one.
+    let errs = check(
+        "extern fun mk {k:nat} (x: int k): list0(list(int, k)) \
+         extern fun g {n:nat} (xs: list0(list(int, n))): int n \
+         fun f {k:nat} (x: int k): int k = g(mk(x))",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn a_binding_remembers_the_type_of_what_it_bound() {
+    // The same value, given a name on the way past.
+    let errs = check(
+        "extern fun mk {k:nat} (x: int k): list0(list(int, k)) \
+         extern fun g {n:nat} (xs: list0(list(int, n))): int n \
+         fun f {k:nat} (x: int k): int k = let val ys = mk(x) in g(ys) end",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn a_templates_type_argument_reaches_its_result_type() {
+    // `nth<N2>(...)` returns an `N2`, and `N2` is `intGte(2)` — an
+    // integer known to be at least two.  A checker that read the result
+    // as the bare parameter `a` would learn nothing from a call that
+    // says precisely what it produces.
+    let errs = check(
+        "typedef N2 = intGte(2) \
+         extern fun{a:t@ype} nth (xs: int, i: int): a \
+         fun f (n: Nat): Nat = nth<N2>(0, n)",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn a_templates_type_argument_can_refuse_a_program_too() {
+    // The substitution has to cut both ways: an instance that produces
+    // something the caller's promise excludes is a call that is wrong.
+    let errs = check(
+        "typedef Neg = intLte(~1) \
+         extern fun{a:t@ype} nth (xs: int, i: int): a \
+         fun f (n: Nat): Nat = nth<Neg>(0, n)",
+    );
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].contains("is false"), "{}", errs[0]);
+}
+
+#[test]
+fn a_template_called_without_naming_an_instance_claims_nothing_new() {
+    // No type argument, nothing to substitute — and nothing invented.
+    let errs = check(
+        "extern fun{a:t@ype} nth (xs: int, i: int): a \
+         fun f (n: Nat): Nat = nth(0, n)",
+    );
+    assert_eq!(errs.len(), 1, "an unknown result cannot be shown to be a nat: {errs:?}");
+}
+
+#[test]
+fn an_arrays_size_survives_being_made_taken_apart_and_read_through() {
+    // The corpus builds an array, takes a pointer out of it, and hands
+    // that pointer on: `arrayptr_make_elt (asz, ~1)`, then
+    // `arrayptr_takeout_viewptr`, then `!p`.  The length has to reach
+    // the far end of that, or a function demanding `m > n` cannot be
+    // called with the array that was built to satisfy it.
+    let errs = check(
+        "extern fun use {m,n:nat | m > n} (a: &(@[int][m]), i: int n): int \
+         fun f {n:nat} (n: int n): int = let \
+           val asz = g1i2u (n+1) \
+           val arrp = arrayptr_make_elt<int> (asz, ~1) \
+           val (pf | p) = arrayptr_takeout_viewptr (arrp) \
+         in use (!p, n) end",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn an_array_too_short_for_what_it_is_handed_to_is_refused() {
+    // The same chain, one element short: the promise `m > n` is then
+    // false rather than merely unproved.
+    let errs = check(
+        "extern fun use {m,n:nat | m > n} (a: &(@[int][m]), i: int n): int \
+         fun f {n:nat} (n: int n): int = let \
+           val asz = g1i2u (n) \
+           val arrp = arrayptr_make_elt<int> (asz, ~1) \
+           val (pf | p) = arrayptr_takeout_viewptr (arrp) \
+         in use (!p, n) end",
+    );
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].contains("is false"), "{}", errs[0]);
+}
+
+#[test]
+fn taking_an_element_out_of_a_list_leaves_one_fewer() {
+    // `list_takeout_at (xs, i, x)` removes the element at `i` and hands
+    // back the rest — a list exactly one shorter.  Without that, every
+    // recursion that shrinks a list by taking something out of it has a
+    // length nobody can bound.
+    let errs = check(
+        "extern fun{a:t@ype} g {n:nat} (xs: list(a, n)): int \
+         fun f {n:int} (xs: list(int, n), i: natLt(n)): int = let \
+           var x: int \
+           val xs1 = list_takeout_at<int> (xs, i, x) \
+         in g<int>(xs1) end",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn the_length_of_a_list_is_the_length_it_carries() {
+    let errs = check(
+        "fun f {n:nat} (xs: list(int, n)): int n = length<int>(xs)",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn a_nested_function_can_see_what_it_captured() {
+    // `fn fopr (i) = ... xs ...` reads `xs` from the function it is
+    // written inside.  Checking it in a scope of its own makes every
+    // captured value an unknown, and a nested loop — which is how ATS
+    // writes nearly every one — goes unchecked.
+    let errs = check(
+        "extern fun{a:t@ype} g {n:nat} (xs: list(a, n)): int \
+         fun outer {n:nat} (xs: list(int, n)): int = \
+           let fun inner (): int = g<int>(xs) in inner() end",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn a_nested_functions_own_parameters_win_over_what_it_captured() {
+    // Capturing must not overwrite: a parameter named like something
+    // outside is the parameter.
+    let errs = check(
+        "fun f {n:pos} (x: int n): int = x \
+         fun outer {k:pos} (x: int k): int = \
+           let fun inner {m:pos} (x: int m): int = f(x) in inner(x) end",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn an_unsafe_cast_is_the_programmers_word_and_is_taken() {
+    // `$UN.cast{T}(e)` is ATS's escape hatch: the programmer asserts a
+    // type the checker cannot derive, and takes responsibility for it.
+    // That is what `$UNSAFE` means, and a checker that argued with it
+    // would reject every program that reaches for the hatch on purpose.
+    let errs = check(
+        "fun f {n:int} (x: int n): intGte(0) = $UN.cast{intGte(0)}(x)",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn without_the_cast_the_same_program_is_not_believed() {
+    // The hatch has to be doing the work, or the test above proves
+    // nothing about the hatch.
+    let errs = check("fun f {n:int} (x: int n): intGte(0) = x");
+    assert_eq!(errs.len(), 1, "{errs:?}");
+}
+
+#[test]
+fn a_cast_demands_nothing_of_what_it_is_handed() {
+    // The point of an unchecked cast is that it is unchecked: the value
+    // going in owes nothing.
+    let errs = check(
+        "fun f {n:nat} (x: int n): int = x \
+         fun g {n:int} (x: int n): int = f($UN.cast{intGte(0)}(x))",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn an_annotated_binding_records_the_type_it_was_annotated_with() {
+    // `val xs: list(int, 5) = ...` says how long `xs` is.  The
+    // annotation is the only place that says so for a list built out of
+    // constructors, and a binding that kept only the value's index
+    // would throw it away.
+    let errs = check(
+        "extern fun{a:t@ype} g {n:nat | n > 2} (xs: list(a, n)): int \
+         extern fun mk (): int \
+         fun f (): int = let val xs: list(int, 5) = mk() in g<int>(xs) end",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn a_length_is_known_to_be_a_length() {
+    // A value of type `list(a, n)` exists, so `n` counted something:
+    // lengths are not negative.  ATS makes a program ask for this with
+    // `prval () = lemma_list_param (xs)`; it follows from the value
+    // being there at all, so it is simply known.
+    let errs = check(
+        "extern fun{a:t@ype} g {n:nat} (xs: list(a, n)): int \
+         fun f {n:int} (xs: list(int, n)): int = g<int>(xs)",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn measuring_something_owes_nothing() {
+    // `string_length(s)` for a string nobody has measured is not a
+    // claim about `s`; it is how the length is found out in the first
+    // place.
+    let errs = check("fun f (s: string): int = string_length(s)");
+    assert!(errs.is_empty(), "{errs:?}");
+}

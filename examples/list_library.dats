@@ -10,7 +10,11 @@
 
 implement main0 () = {
 //
-val xs = list_make_intrange (0, 5)
+// The length is written down because the takeout below needs it: a
+// list built out of constructors carries no length of its own, and
+// `list_takeout_at (xs, 2, _)` is only safe when there is a third
+// element to take.
+val xs: list(int, 5) = list_make_intrange (0, 5)
 val () = println! ("xs           = ", xs)
 val () = println! ("length       = ", list_length<int> (xs))
 val () = println! ("reverse      = ", list_reverse<int> (xs))

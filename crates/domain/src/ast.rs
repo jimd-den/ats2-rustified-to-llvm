@@ -16,7 +16,7 @@
 //! metrics — are intentionally absent; they arrive in later iterations
 //! without disturbing this shape.
 
-use crate::statics::{Quant, SExp};
+use crate::statics::{Quant, SExp, Sort};
 
 /// A whole compiled unit: an ordered list of top-level definitions.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +57,14 @@ pub enum Def {
     /// function and occupies no storage: every mention of `NAME` is
     /// replaced by `value` at emission time.
     Const(ConstDef),
+    /// `%{ ... %}` — a block of C the program brought with it.
+    ///
+    /// It is not this compiler's language, and nothing here reads it: it
+    /// is carried through untouched and handed to the toolchain, which
+    /// speaks C. It is a *definition* because that is what it is — the
+    /// body of some `extern fun` declared elsewhere in the file — and a
+    /// program that lost it would compile and then fail to link.
+    InlineC(String),
 }
 
 /// `datatype name(a, b) = ctor1(...) | ctor2 | ...`
@@ -65,6 +73,13 @@ pub struct DatatypeDef {
     pub name: String,
     pub ty_params: Vec<String>,
     pub ctors: Vec<Ctor>,
+    /// `datavtype` / `dataview` — whether its values are *resources*.
+    ///
+    /// A linear value must be consumed exactly once: used twice it is a
+    /// use-after-free, never used it is a leak.  Nothing about the bits
+    /// says which kind a value is — the declaration does, and it is the
+    /// only place that does.
+    pub linear: bool,
 }
 
 /// One constructor of a datatype, e.g. `cons(a, list(a))`.
@@ -78,6 +93,14 @@ pub struct Ctor {
 pub struct Param {
     pub name: String,
     pub ty: Ty,
+    /// `!t` or `&t` — whether the parameter is *lent* rather than given.
+    ///
+    /// The caller keeps a borrowed value and gets it back; the callee
+    /// may read it, may write through it, and may not consume it.
+    /// Dropping the mark makes every borrow look like a handover, and
+    /// then a program that lends the same list twice reads as one that
+    /// frees it twice.
+    pub borrowed: bool,
 }
 
 /// `fun name(x: int, y: int): int = body` — recursive by default, exactly
@@ -95,6 +118,14 @@ pub struct FunDef {
     /// The `[r:int]` quantifier written on the result: what the caller
     /// may assume about the value it gets back.
     pub existentials: Vec<Quant>,
+    /// `.<n>.` — the term that must decrease on every recursive call.
+    ///
+    /// It is what makes a *total* function total: without it a
+    /// definition may promise anything at all and satisfy the promise by
+    /// never returning.  Several terms are a lexicographic metric, in the
+    /// order written.  Empty means the source made no claim, and none is
+    /// checked — ATS's `.<>.` says exactly that.
+    pub metric: Vec<SExp>,
     pub name: String,
     pub params: Vec<Param>,
     pub ret: Ty,
@@ -135,9 +166,30 @@ pub struct ValDef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunDecl {
     pub name: String,
+    /// Whether what this builds or returns is a resource.
+    ///
+    /// A `dataview`'s constructors build linear proofs: permission to
+    /// touch something, which could not be permission at all if it could
+    /// be used twice.
+    pub linear: bool,
+    /// Whether this declares a *proof* rather than a function.
+    ///
+    /// `praxi`, `prfun` and each constructor of a `dataprop` declare
+    /// something that exists only in the static language: no body, no
+    /// symbol, no bits.  The checker must see them — they are where every
+    /// claim in a proof comes from — and the emitter must not, because
+    /// there is nothing there to emit and `FACT(n, r)` is not a type any
+    /// machine has.
+    pub proof: bool,
     /// The type parameters a template abstracts over: the `a` of
     /// `fun{a:t@ype}`.  Empty for an ordinary function.
     pub ty_params: Vec<String>,
+    /// `{n:nat | n > 0}` — the same promise a definition's quantifiers
+    /// make.  A declaration is a promise with the body left elsewhere,
+    /// and a call site cannot tell the two apart, so it must not have to.
+    pub universals: Vec<Quant>,
+    /// `[r:int]` on the result — what the caller may assume it got.
+    pub existentials: Vec<Quant>,
     pub params: Vec<Param>,
     pub ret: Ty,
 }
@@ -176,6 +228,15 @@ pub enum Ty {
     /// different types.  The order is the order written, which is what
     /// fixes each name to a slot.
     Record(Vec<(String, Ty)>),
+    /// `(FACT(n, r) | int(r))` — a value carrying a proof about itself.
+    ///
+    /// The proof half is erased before anything runs, so the value's
+    /// representation is the second half alone.  It is kept because it
+    /// is where the *interesting* index usually lives: a function
+    /// returning `[r:int] (FACT(n,r) | int(r*r0))` pins `r` down through
+    /// the proposition, not through the arithmetic — and the arithmetic
+    /// on its own is nonlinear and out of any linear solver's reach.
+    Proof(Box<Ty>, Box<Ty>),
 }
 
 impl Ty {
@@ -187,6 +248,8 @@ impl Ty {
     pub fn erased(&self) -> Ty {
         match self {
             Ty::Index(base, _) => base.erased(),
+            // A proof occupies no storage: what a `(pf | v)` *is*, is v.
+            Ty::Proof(_, value) => value.erased(),
             Ty::Name(_) => self.clone(),
             Ty::App(n, args) => Ty::App(n.clone(), args.iter().map(Ty::erased).collect()),
             Ty::Fun(args, ret) => {
@@ -203,7 +266,18 @@ impl Ty {
     pub fn indices(&self) -> &[SExp] {
         match self {
             Ty::Index(_, idx) => idx,
+            // The indices of a `(pf | v)` are the value's: they are what
+            // describes the thing that exists at run time.
+            Ty::Proof(_, value) => value.indices(),
             _ => &[],
+        }
+    }
+
+    /// The proposition a value carries a proof of, if it carries one.
+    pub fn proof(&self) -> Option<&Ty> {
+        match self {
+            Ty::Proof(proof, _) => Some(proof),
+            _ => None,
         }
     }
 }
@@ -291,10 +365,37 @@ pub enum Expr {
     /// which slot a name means depends on the record's type, and only
     /// the emitter knows that.
     Field(Box<Expr>, String),
+    /// `e : t` — an ascription.
+    ///
+    /// It says what `e` should be, which is a *claim* and therefore the
+    /// checker's business: `(if n >= 0 then n else 0): intGte(0)` is how
+    /// a program turns an integer nobody can bound into one that is
+    /// bounded, and it is the only line that says so.  Nothing about the
+    /// value changes, so every later stage looks through it.
+    Ascribe(Box<Expr>, Ty),
+    /// `(pf | v)` — a value returned together with a proof about it.
+    ///
+    /// The proof is erased before anything runs, so `v` is the whole of
+    /// what this evaluates to.  It survives to the checker because the
+    /// proof is what determines the existential the function promised:
+    /// `(pf0 | res)` against `[r:int] (FACT(n,r) | int(r*r0))` fixes `r`
+    /// through the proposition, which the arithmetic alone cannot do.
+    ProofPair(Box<Expr>, Box<Expr>),
     /// `f<int>` — a template named together with the types it is being
     /// instantiated at.  It is not yet a function: monomorphisation turns
     /// each distinct instantiation into one.
     Inst(String, Vec<Ty>),
+    /// `fact_ind{n}{r}` — an expression named together with the *static*
+    /// terms it is instantiated at.
+    ///
+    /// Distinct from [`Expr::Inst`] because the two instantiate different
+    /// languages: type arguments choose which function is emitted, index
+    /// arguments choose what it *proves*.  Nothing here survives to run
+    /// time — the emitter looks straight through it — but the checker
+    /// cannot: `fact_ind{n}()` and `fact_ind{m}()` are the same code and
+    /// different claims, and an axiom applied at the wrong index is the
+    /// one mistake a proof language exists to catch.
+    StaticInst(Box<Expr>, Vec<SExp>),
     /// `f(a, b)`
     Call(Box<Expr>, Vec<Expr>),
     /// `xs[i]` — indexing into an array or, in `main`, into `argv`.
@@ -375,6 +476,12 @@ impl Expr {
             | Expr::StrLit(_)
             | Expr::Var(_)
             | Expr::Inst(..) => {}
+            Expr::StaticInst(inner, _) => f(inner),
+            Expr::ProofPair(proof, value) => {
+                f(proof);
+                f(value);
+            }
+            Expr::Ascribe(inner, _) => f(inner),
             Expr::UnaryNeg(a) | Expr::Proj(a, _) | Expr::Deref(a) | Expr::Field(a, _) => f(a),
             Expr::RecordLit(fields) => fields.iter().for_each(|(_, v)| f(v)),
             Expr::BinOp(_, a, b) | Expr::Index(a, b) | Expr::Store(a, b) | Expr::While(a, b) => {
@@ -495,6 +602,26 @@ pub struct LetBind {
     pub ty: Option<Ty>,
     pub value: Expr,
     pub mutable: bool,
+    /// `val [r1:int] (pf | x) = f(...)` — the static variables this
+    /// binding *opens*.
+    ///
+    /// A function that returns `[r:int] int(r)` promises a witness
+    /// exists and refuses to say which.  The caller may give that
+    /// witness a name, and from then on reason about it — which is the
+    /// only way an existential result is ever useful.  Without the name,
+    /// every fact about the returned value is about a variable nobody
+    /// can mention twice.
+    pub opened: Vec<(String, Sort)>,
+    /// `prval pf = ...` — a *proof* binding.
+    ///
+    /// It is a binding the checker must see and the emitter must not.
+    /// What it names is a proof, which occupies no storage and cannot be
+    /// called at run time: emitting it would be a call to a function
+    /// that was never built. But erasing it at the parser would throw
+    /// away the only line in the file that establishes the claim the
+    /// body goes on to rely on, so it is *marked* rather than dropped,
+    /// and each stage does with it what its own job requires.
+    pub proof: bool,
 }
 
 #[cfg(test)]
@@ -508,7 +635,7 @@ mod tests {
     }
 
     fn param(name: &str, t: &str) -> Param {
-        Param { name: name.to_string(), ty: ty(t) }
+        Param { name: name.to_string(), ty: ty(t), borrowed: false }
     }
 
     fn int(n: i64) -> Expr {
@@ -527,6 +654,7 @@ mod tests {
             Def::Fun(FunDef {
                 universals: vec![],
                 existentials: vec![],
+            metric: vec![],
             ty_params: vec![],
                 name: "f".into(),
                 params: vec![],
@@ -552,6 +680,7 @@ mod tests {
     #[test]
     fn datatype_def_carries_params_and_constructors() {
         let d = DatatypeDef {
+            linear: false,
             name: "list".into(),
             ty_params: vec!["a".into()],
             ctors: vec![
@@ -573,6 +702,7 @@ mod tests {
         let f = FunDef {
             universals: vec![],
             existentials: vec![],
+            metric: vec![],
             ty_params: vec![],
             name: "add".into(),
             params: vec![param("x", "int"), param("y", "int")],
@@ -720,13 +850,13 @@ mod tests {
     #[test]
     fn a_let_bind_is_immutable_by_default() {
         // `val x = 1` binds a value; `var x = 1` binds a *cell*.
-        let bind = LetBind { name: Some("x".into()), ty: None, value: Expr::IntLit(1), mutable: false };
+        let bind = LetBind { opened: Vec::new(), proof: false, name: Some("x".into()), ty: None, value: Expr::IntLit(1), mutable: false };
         assert!(!bind.mutable);
     }
 
     #[test]
     fn a_var_binding_is_marked_mutable() {
-        let bind = LetBind { name: Some("x".into()), ty: Some(ty("int")), value: Expr::IntLit(0), mutable: true };
+        let bind = LetBind { opened: Vec::new(), proof: false, name: Some("x".into()), ty: Some(ty("int")), value: Expr::IntLit(0), mutable: true };
         assert!(bind.mutable);
         assert_eq!(bind.name.as_deref(), Some("x"));
     }
@@ -770,6 +900,8 @@ mod tests {
     fn let_bind_can_be_a_discard() {
         // `val () = println!(...)` — a binding with no name.
         let bind = LetBind {
+            opened: Vec::new(),
+            proof: false,
             name: None,
             ty: None,
             value: Expr::MacroCall("println!".into(), vec![]),
@@ -783,6 +915,7 @@ mod tests {
         let a = Program::new(vec![Def::Fun(FunDef {
             universals: vec![],
             existentials: vec![],
+            metric: vec![],
             ty_params: vec![],
             name: "f".into(),
             params: vec![],
@@ -802,6 +935,7 @@ mod tests {
             Def::Fun(FunDef {
                 universals: vec![],
                 existentials: vec![],
+            metric: vec![],
             ty_params: vec![],
                 name: "fact".into(),
                 params: vec![param("n", "int")],

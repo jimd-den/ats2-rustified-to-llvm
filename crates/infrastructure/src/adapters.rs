@@ -19,6 +19,21 @@ impl ParserPort for Parser {
     fn parse(&self, source: &str) -> Result<Program, Vec<CompileError>> {
         Parser::parse(source)
     }
+
+    /// The prelude, read by the same parser as user code.
+    ///
+    /// A prelude that does not parse is a bug in this crate rather than
+    /// in the program being compiled, so there is nothing useful to
+    /// report and nothing sensible to do with a failure: the caller
+    /// gets no ambient declarations and every claim resting on one
+    /// becomes unproved, which is loud in exactly the right way.
+    fn prelude(&self) -> Program {
+        let mut defs = Vec::new();
+        for source in [crate::prelude::PRELUDE_SOURCE, crate::prelude::PRELUDE_STATIC_SOURCE] {
+            defs.extend(Parser::parse(source).map(|p| p.defs().to_vec()).unwrap_or_default());
+        }
+        Program::new(defs)
+    }
 }
 
 /// The stateless emitter *is* the IR-emitting port.

@@ -25,7 +25,7 @@
 //! were then added to satisfy exactly those tests (GREEN).  The tests are
 //! the normative description of what each port must look like.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ats2_domain::ast::Program;
 use ats2_domain::errors::CompileError;
@@ -34,6 +34,20 @@ use ats2_domain::errors::CompileError;
 /// behind one seam: callers neither know nor care how tokens are made.
 pub trait ParserPort {
     fn parse(&self, source: &str) -> Result<Program, Vec<CompileError>>;
+
+    /// The declarations every program is entitled to assume: `list0`,
+    /// `string_length`, `succ`, and the rest of the prelude.
+    ///
+    /// It is a *parser* question rather than an emitter one because the
+    /// prelude is written in ATS and read by the same parser as user
+    /// code — and because the checker needs it long before the emitter
+    /// does. Nearly every claim a real ATS program makes rests on a
+    /// declaration the program never wrote.
+    ///
+    /// The default is none, so a fake parser stays two lines.
+    fn prelude(&self) -> Program {
+        Program::new(Vec::new())
+    }
 }
 
 /// Lowers a parsed program to canonical textual LLVM IR.
@@ -44,7 +58,17 @@ pub trait LlvmEmitterPort {
 /// Links an LLVM IR file into an executable using the host toolchain
 /// (clang/llc).  The `String` error is free-form tool output.
 pub trait ToolchainPort {
-    fn link(&self, ir_path: &Path, output: &Path) -> Result<(), String>;
+    fn link(&self, ir_path: &Path, output: &Path) -> Result<(), String> {
+        self.link_all(&[ir_path.to_path_buf()], output)
+    }
+
+    /// Link several inputs at once.
+    ///
+    /// A program that brought its own C — a `%{ ... %}` block — compiles
+    /// to two files, not one: the IR this compiler emitted, and the C it
+    /// was handed. Both go to the toolchain together, because the whole
+    /// point of the block is that something in the IR calls into it.
+    fn link_all(&self, inputs: &[PathBuf], output: &Path) -> Result<(), String>;
 }
 
 /// Writes text to a named output (a file, a socket, …).  The `String`
@@ -63,7 +87,7 @@ pub trait DiagnosticsPort {
 mod contract_tests {
     //! The port contract, pinned by tests and in-memory fakes.
     use std::cell::RefCell;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use ats2_domain::ast::{Def, Expr, FunDef, Program, Ty};
     use ats2_domain::errors::CompileError;
@@ -102,6 +126,7 @@ mod contract_tests {
         Program::new(vec![Def::Fun(FunDef {
             universals: vec![],
             existentials: vec![],
+            metric: vec![],
             ty_params: vec![],
             name: "f".into(),
             params: vec![],
@@ -129,8 +154,9 @@ mod contract_tests {
     }
 
     impl crate::ports::ToolchainPort for FakeToolchain {
-        fn link(&self, ir_path: &Path, output: &Path) -> Result<(), String> {
-            self.linked.borrow_mut().push((ir_path.to_string_lossy().into_owned(), output.to_string_lossy().into_owned()));
+        fn link_all(&self, inputs: &[std::path::PathBuf], output: &Path) -> Result<(), String> {
+            let first = inputs.first().cloned().unwrap_or_default();
+            self.linked.borrow_mut().push((first.to_string_lossy().into_owned(), output.to_string_lossy().into_owned()));
             Ok(())
         }
     }
@@ -230,7 +256,7 @@ mod contract_tests {
     fn toolchain_port_failures_are_free_form_strings() {
         struct FailingToolchain;
         impl crate::ports::ToolchainPort for FailingToolchain {
-            fn link(&self, _ir: &Path, _out: &Path) -> Result<(), String> {
+            fn link_all(&self, _inputs: &[PathBuf], _out: &Path) -> Result<(), String> {
                 Err("clang: error: linker command failed".into())
             }
         }

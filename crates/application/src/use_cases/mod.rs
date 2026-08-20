@@ -38,6 +38,7 @@ pub(crate) mod fakes {
         Program::new(vec![Def::Fun(FunDef {
             universals: vec![],
             existentials: vec![],
+            metric: vec![],
             ty_params: vec![],
             name: "f".into(),
             params: vec![],
@@ -95,8 +96,9 @@ pub(crate) mod fakes {
     }
 
     impl ToolchainPort for FakeToolchain {
-        fn link(&self, ir_path: &Path, output: &Path) -> Result<(), String> {
-            self.events.borrow_mut().push(format!("link:{}:{}", ir_path.display(), output.display()));
+        fn link_all(&self, inputs: &[std::path::PathBuf], output: &Path) -> Result<(), String> {
+            let listed: Vec<String> = inputs.iter().map(|i| i.display().to_string()).collect();
+            self.events.borrow_mut().push(format!("link:{}:{}", listed.join(","), output.display()));
             if self.fail { Err("clang failed".into()) } else { Ok(()) }
         }
     }

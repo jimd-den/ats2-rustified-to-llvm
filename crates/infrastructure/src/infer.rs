@@ -482,6 +482,7 @@ fn apply(ty: &Ty, subst: &HashMap<String, Ty>) -> Ty {
         Ty::Name(n) => subst.get(n).cloned().unwrap_or_else(|| ty.clone()),
         Ty::App(n, args) => Ty::App(n.clone(), args.iter().map(|a| apply(a, subst)).collect()),
         Ty::Tuple(items) => Ty::Tuple(items.iter().map(|i| apply(i, subst)).collect()),
+        Ty::Proof(p, v) => Ty::Proof(Box::new(apply(p, subst)), Box::new(apply(v, subst))),
         Ty::Fun(ps, r) => Ty::Fun(ps.iter().map(|p| apply(p, subst)).collect(), Box::new(apply(r, subst))),
         // A type parameter is substituted for a *type*, never for a
         // static index, so the indices ride along untouched.
@@ -501,6 +502,14 @@ fn strip_annotations(ty: &Ty) -> Ty {
         Ty::App(n, args) if args.len() == 1 && matches!(n.as_str(), "INV" | "OUT" | "INVAR") => {
             strip_annotations(&args[0])
         }
+        // An index is a fact *about* a value, never part of what it is.
+        // Choosing which instance of a template to build is entirely a
+        // question of what the value is, so a `list(int, n)` selects the
+        // same instance a `list0(int)` does — and must, or every call on
+        // a length-indexed list stops naming one.
+        Ty::Index(base, _) => strip_annotations(base),
+        // A value carrying a proof is the value.
+        Ty::Proof(_, value) => strip_annotations(value),
         _ => ty.clone(),
     }
 }
@@ -514,6 +523,21 @@ mod tests {
     fn resolve(src: &str) -> Program {
         let p = Parser::parse(src).expect("parse");
         Inferencer::resolve(&p).expect("resolve")
+    }
+
+    #[test]
+    fn a_size_index_does_not_hide_the_instance_a_template_needs() {
+        // `length` is declared over `list0(a)` and called with a
+        // `list(int, n)`, which is the same type carrying its length.
+        // An index is a fact *about* a value, never part of what it is,
+        // so instance selection must look straight through it — or every
+        // call on a length-indexed list stops naming an instance.
+        let p = resolve(
+            "extern fun{a:t@ype} length (xs: list0(a)): int \
+             fun f {n:nat} (xs: list(int, n)): int = length(xs)",
+        );
+        let rendered = format!("{:?}", p.defs());
+        assert!(rendered.contains("Inst(\"length\""), "no instance named:\n{rendered}");
     }
 
     #[test]

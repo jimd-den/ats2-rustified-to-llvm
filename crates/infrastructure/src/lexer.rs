@@ -122,6 +122,18 @@ impl<'a> Scanner<'a> {
                 self.bump();
                 self.push(TokenKind::Arrow, start);
             }
+            // `==` is how the static language spells equality: `{n:int |
+            // i+j == n-1}`.  It is the same relation `=` already means in
+            // an expression, so it collapses to the same token — and it
+            // has to, because two `=` in a row parse as an equality
+            // whose right-hand side is another `=`, which is no
+            // expression at all.  Losing that costs the *whole*
+            // quantifier, sorts included.
+            '=' if self.peek2() == Some('=') => {
+                self.bump();
+                self.bump();
+                self.push(TokenKind::Eq, start);
+            }
             '<' if self.peek2() == Some('=') => {
                 self.bump();
                 self.bump();
@@ -239,14 +251,27 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// Consume a `%{ ... %}` block of foreign code.
+    /// Read a `%{ ... %}` block of foreign code, and keep it.
     ///
-    /// Unterminated is an error rather than a silent run to end of file:
-    /// swallowing the rest of the program would report itself as some
-    /// unrelated thing missing, hundreds of lines away.
+    /// The text is C, which is not this compiler's language and never
+    /// will be — so it is carried through untouched and handed to the
+    /// toolchain, which speaks it. Skipping it silently was the worse
+    /// answer: a program that declares `extern fun f = "ext#f"` and
+    /// defines `f` here would compile and then fail to link, naming a
+    /// symbol whose definition was thrown away three stages earlier.
+    ///
+    /// `%{^` puts the code above the output and `%{$` below; both end at
+    /// `%}`, and the marker is dropped with the opener.  Unterminated is
+    /// an error rather than a silent run to end of file: swallowing the
+    /// rest of the program would report itself as some unrelated thing
+    /// missing, hundreds of lines away.
     fn skip_inline_c(&mut self, start: Pos) {
         self.bump();
         self.bump(); // eat "%{"
+        if matches!(self.peek(), Some('^' | '$' | '#')) {
+            self.bump();
+        }
+        let from = self.pos;
         loop {
             match self.peek() {
                 None => {
@@ -254,8 +279,10 @@ impl<'a> Scanner<'a> {
                     return;
                 }
                 Some('%') if self.peek2() == Some('}') => {
+                    let text = self.src[from..self.pos].to_string();
                     self.bump();
                     self.bump();
+                    self.push(TokenKind::InlineC(text), start);
                     return;
                 }
                 Some(_) => {
@@ -536,15 +563,23 @@ mod tests {
     }
 
     #[test]
-    fn inline_c_is_skipped_whole() {
+    fn inline_c_arrives_whole_and_unlexed() {
         // `%{^ ... %}` is a block of C that ATS passes straight through
-        // to the C compiler.  This compiler emits LLVM IR and never runs
-        // a C compiler, so there is nothing it could do with the block —
-        // but it must not try to *lex* it either, or a stray brace or
+        // to the C compiler.  It must not be *lexed*, or a stray brace or
         // quote inside becomes a syntax error in a program that is
-        // perfectly well-formed ATS.
+        // perfectly well-formed ATS — and it must not be dropped either,
+        // because it is the body of some `extern fun` declared nearby,
+        // and a program without it links to nothing.
         let k = kinds("%{^\nint f (void) { return 1 ; }\n%}\nfun g (): int = 1");
-        assert_eq!(k[0], TokenKind::Fun);
+        assert_eq!(k[0], TokenKind::InlineC("\nint f (void) { return 1 ; }\n".into()));
+        assert_eq!(k[1], TokenKind::Fun, "the ATS after it is lexed as ATS");
+    }
+
+    #[test]
+    fn a_brace_or_quote_inside_inline_c_is_just_a_byte() {
+        let k = kinds("%{\nchar *s = \"}\"; /* { */\n%}\nfun g (): int = 1");
+        assert!(matches!(k[0], TokenKind::InlineC(_)), "{:?}", k[0]);
+        assert_eq!(k[1], TokenKind::Fun);
     }
 
     #[test]
@@ -813,4 +848,28 @@ mod tests {
         let errs = Lexer::lex(r#"` " `"#).expect_err("should fail");
         assert!(errs.len() >= 2, "expected several errors, got {errs:?}");
     }
+
+#[cfg(test)]
+mod equality_tests {
+    use super::*;
+
+    #[test]
+    fn double_equals_is_one_token_and_means_what_one_equals_means() {
+        // The static language writes `==`; the dynamic one writes `=`.
+        // They are the same relation, so they are the same token.
+        let tokens = Lexer::lex("i == j").expect("lex");
+        let kinds: Vec<&TokenKind> = tokens.iter().map(|t| &t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![&TokenKind::Ident("i".into()), &TokenKind::Eq, &TokenKind::Ident("j".into()), &TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn a_single_equals_is_untouched() {
+        let tokens = Lexer::lex("x = 1").expect("lex");
+        assert_eq!(tokens[1].kind, TokenKind::Eq);
+        assert_eq!(tokens[2].kind, TokenKind::IntLit(1));
+    }
+}
 }

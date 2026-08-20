@@ -11,6 +11,7 @@ use std::path::Path;
 
 use ats2_domain::errors::CompileError;
 
+use crate::checking::Strictness;
 use crate::ports::{LlvmEmitterPort, OutputPort, ParserPort, ToolchainPort};
 
 /// Compiles source text into an executable binary.
@@ -19,13 +20,25 @@ pub struct CompileExecutableUseCase<P: ParserPort, E: LlvmEmitterPort, T: Toolch
     emitter: E,
     toolchain: T,
     output: O,
+    /// See [`crate::checking::Strictness`].  Both entry points must
+    /// check, and both must check the same way, or the guarantee depends
+    /// on which one was used.
+    strictness: Strictness,
 }
 
 impl<P: ParserPort, E: LlvmEmitterPort, T: ToolchainPort, O: OutputPort>
     CompileExecutableUseCase<P, E, T, O>
 {
     pub fn new(parser: P, emitter: E, toolchain: T, output: O) -> Self {
-        Self { parser, emitter, toolchain, output }
+        Self { parser, emitter, toolchain, output, strictness: Strictness::default() }
+    }
+
+    /// Compile under a different strictness than the default.  See
+    /// [`crate::checking::Strictness`]: an unproved claim is an error or
+    /// is not, and only the caller knows which it wants.
+    pub fn checking(mut self, strictness: Strictness) -> Self {
+        self.strictness = strictness;
+        self
     }
 
     /// Parse, emit, persist the IR at `ir_path`, and link it to
@@ -35,15 +48,52 @@ impl<P: ParserPort, E: LlvmEmitterPort, T: ToolchainPort, O: OutputPort>
         // See `compile_to_ir`: the static language is checked before it
         // is erased, and both entry points must check, or the guarantee
         // depends on which one was used.
-        let violations = crate::constraints::check_program(&program);
+        // Two disciplines, checked together: what the values *are*, and
+        // whose they are.  Neither says anything about the other, so
+        // both run and the reader sees everything wrong at once rather
+        // than one thing per attempt.
+        let prelude = self.parser.prelude();
+        let mut violations =
+            crate::checking::check_program(&program, &prelude, self.strictness);
+        violations.extend(crate::linearity::check_linearity(&program, &prelude));
         if !violations.is_empty() {
             return Err(violations);
         }
         let ir = self.emitter.emit(&program).map_err(|e| vec![e])?;
         self.output.write(ir_path, &ir).map_err(|m| vec![CompileError::target(m)])?;
-        self.toolchain.link(ir_path, binary_path).map_err(|m| vec![CompileError::target(m)])?;
+        let mut inputs = vec![ir_path.to_path_buf()];
+        // A program that brought its own C compiles to two files.  The
+        // block is the body of some `extern fun` declared beside it, so
+        // it goes to the toolchain together with the IR that calls into
+        // it — written next to the IR, because that is where the other
+        // half of the program already is.
+        if let Some(c) = inline_c(&program) {
+            let c_path = ir_path.with_extension("c");
+            self.output.write(&c_path, &c).map_err(|m| vec![CompileError::target(m)])?;
+            inputs.push(c_path);
+        }
+        self.toolchain
+            .link_all(&inputs, binary_path)
+            .map_err(|m| vec![CompileError::target(m)])?;
         Ok(())
     }
+}
+
+/// Every `%{ ... %}` block the program brought, in the order written.
+///
+/// `None` when there are none, so a program with no foreign code still
+/// compiles to exactly one file and the toolchain is asked for nothing
+/// unusual.
+fn inline_c(program: &ats2_domain::ast::Program) -> Option<String> {
+    let blocks: Vec<&str> = program
+        .defs()
+        .iter()
+        .filter_map(|d| match d {
+            ats2_domain::ast::Def::InlineC(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    (!blocks.is_empty()).then(|| blocks.join("\n"))
 }
 
 #[cfg(test)]

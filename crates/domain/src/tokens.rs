@@ -120,6 +120,12 @@ pub enum TokenKind {
     RBrace,
     Comma,
     Semicolon,
+    /// `%{ ... %}` — a block of C, carried through untouched.
+    ///
+    /// It is not this compiler's language and never will be, so it is
+    /// not lexed further: the toolchain speaks C, and this is how the
+    /// text reaches it.
+    InlineC(String),
     Colon,
     Pipe,
     Dot,

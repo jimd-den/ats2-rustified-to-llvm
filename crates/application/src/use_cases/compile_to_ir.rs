@@ -9,17 +9,29 @@
 
 use ats2_domain::errors::CompileError;
 
+use crate::checking::Strictness;
 use crate::ports::{LlvmEmitterPort, ParserPort};
 
 /// Compiles source text down to canonical textual LLVM IR.
 pub struct CompileToIrUseCase<P: ParserPort, E: LlvmEmitterPort> {
     parser: P,
     emitter: E,
+    /// What to do about a constraint the checker can neither prove nor
+    /// refute.  A *policy*, so it is settable — and set here rather than
+    /// inside the checker, because it is the caller who knows whether an
+    /// unproved claim should stop a build.
+    strictness: Strictness,
 }
 
 impl<P: ParserPort, E: LlvmEmitterPort> CompileToIrUseCase<P, E> {
     pub fn new(parser: P, emitter: E) -> Self {
-        Self { parser, emitter }
+        Self { parser, emitter, strictness: Strictness::default() }
+    }
+
+    /// Compile under a different strictness than the default.
+    pub fn checking(mut self, strictness: Strictness) -> Self {
+        self.strictness = strictness;
+        self
     }
 
     /// Parse then emit.  Any parse error short-circuits: the emitter is
@@ -29,7 +41,14 @@ impl<P: ParserPort, E: LlvmEmitterPort> CompileToIrUseCase<P, E> {
         // The dependent half of the program is checked here, between
         // parsing and emission: it is the last point at which the static
         // language still exists.  Emission erases it, by design.
-        let violations = crate::constraints::check_program(&program);
+        // Two disciplines, checked together: what the values *are*, and
+        // whose they are.  Neither says anything about the other, so
+        // both run and the reader sees everything wrong at once rather
+        // than one thing per attempt.
+        let prelude = self.parser.prelude();
+        let mut violations =
+            crate::checking::check_program(&program, &prelude, self.strictness);
+        violations.extend(crate::linearity::check_linearity(&program, &prelude));
         if !violations.is_empty() {
             return Err(violations);
         }

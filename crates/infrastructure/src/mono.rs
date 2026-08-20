@@ -194,7 +194,7 @@ impl Monomorphiser {
                 Def::Extern(d) => {
                     let params = ctx.rewrite_params(&d.params, &HashMap::new());
                     let ret = ctx.rewrite_ty(&d.ret, &HashMap::new());
-                    defs.push(Def::Extern(ats2_domain::ast::FunDecl { params, ret, ..d.clone() }));
+                    defs.push(Def::Extern(ats2_domain::ast::FunDecl { proof: false, universals: Vec::new(), existentials: Vec::new(), params, ret, ..d.clone() }));
                 }
                 Def::Implement(im) => {
                     let params = ctx.rewrite_params(&im.params, &HashMap::new());
@@ -264,6 +264,10 @@ impl MonoCtx {
     fn rewrite_ty(&mut self, ty: &Ty, subst: &Subst) -> Ty {
         let ty = substitute(ty, subst);
         match &ty {
+            Ty::Proof(p, v) => Ty::Proof(
+                Box::new(self.rewrite_ty(p, subst)),
+                Box::new(self.rewrite_ty(v, subst)),
+            ),
             // `stream(t)` / `stream_vt(t)` — a *suspended* `stream_con(t)`.
             // The suspension is a representation this compiler supplies
             // rather than one the source declares, so the type is
@@ -300,7 +304,7 @@ impl MonoCtx {
     fn rewrite_params(&mut self, params: &[Param], subst: &Subst) -> Vec<Param> {
         params
             .iter()
-            .map(|p| Param { name: p.name.clone(), ty: self.rewrite_ty(&p.ty, subst) })
+            .map(|p| Param { borrowed: false, name: p.name.clone(), ty: self.rewrite_ty(&p.ty, subst) })
             .collect()
     }
 
@@ -330,7 +334,7 @@ impl MonoCtx {
                 fields: c.fields.iter().map(|f| self.rewrite_ty(f, &subst)).collect(),
             })
             .collect();
-        Def::Datatype(DatatypeDef { name: mangle(name, args), ty_params: vec![], ctors })
+        Def::Datatype(DatatypeDef { linear: false, name: mangle(name, args), ty_params: vec![], ctors })
     }
 
     /// Build one instance of a template.
@@ -366,6 +370,7 @@ impl MonoCtx {
             .iter()
             .zip(params.iter().map(Some).chain(std::iter::repeat(None)))
             .map(|(declared, given)| Param {
+                borrowed: false,
                 name: given.map_or_else(|| declared.name.clone(), |g| g.name.clone()),
                 ty: declared.ty.clone(),
             })
@@ -374,6 +379,7 @@ impl MonoCtx {
         let ret = self.rewrite_ty(&t.ret, &subst);
         let body = self.rewrite(&body, &subst)?;
         Ok(Def::Fun(FunDef {
+            metric: Vec::new(),
             ty_params: vec![],
             // Monomorphisation copies a template's body; the static
             // quantifiers belong to the template's declaration, which is
@@ -416,6 +422,16 @@ impl MonoCtx {
     fn rewrite(&mut self, expr: &Expr, subst: &Subst) -> Result<Expr, CompileError> {
         Ok(match expr {
             Expr::Unit | Expr::Uninit | Expr::Wildcard | Expr::IntLit(_) | Expr::CharLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StrLit(_) => expr.clone(),
+            Expr::StaticInst(inner, at) => {
+                Expr::StaticInst(Box::new(self.rewrite(inner, subst)?), at.clone())
+            }
+            Expr::ProofPair(p, v) => Expr::ProofPair(
+                Box::new(self.rewrite(p, subst)?),
+                Box::new(self.rewrite(v, subst)?),
+            ),
+            Expr::Ascribe(inner, ty) => {
+                Expr::Ascribe(Box::new(self.rewrite(inner, subst)?), self.rewrite_ty(ty, subst))
+            }
             Expr::Var(name) => {
                 // A template mentioned with no instantiation cannot be
                 // resolved: say so, rather than emitting a call to a
@@ -518,6 +534,9 @@ impl MonoCtx {
 /// Replace a template's type parameters wherever they appear in a type.
 fn substitute(ty: &Ty, subst: &Subst) -> Ty {
     match ty {
+        Ty::Proof(p, v) => {
+            Ty::Proof(Box::new(substitute(p, subst)), Box::new(substitute(v, subst)))
+        }
         Ty::Name(n) => subst.get(n).cloned().unwrap_or_else(|| ty.clone()),
         Ty::App(n, args) => {
             let args = args.iter().map(|a| substitute(a, subst)).collect();
@@ -562,6 +581,9 @@ fn instance_key(args: &[Ty]) -> String {
 /// A short, stable spelling of a type, for use inside a mangled name.
 fn type_key(ty: &Ty) -> String {
     match ty {
+        // The proof half is erased, so two instances differing only in
+        // it are one instance.
+        Ty::Proof(_, value) => type_key(value),
         Ty::Name(n) => n.clone(),
         Ty::App(n, args) => {
             let inner: Vec<String> = args.iter().map(type_key).collect();

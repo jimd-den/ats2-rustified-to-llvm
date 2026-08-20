@@ -33,6 +33,14 @@ pub enum ErrorKind {
     /// `Emit` because nothing is wrong with the *shape* of the program —
     /// it would lower perfectly well, and be wrong.
     Check,
+    /// A resource discipline the program did not keep: a linear value
+    /// given away twice, or never given away at all.
+    ///
+    /// Distinct from `Check` because it is a different accusation.  A
+    /// `Check` error says the program computes something it promised not
+    /// to; this one says the program is wrong about *ownership*, which
+    /// no amount of arithmetic would ever have revealed.
+    Linear,
     Target,
 }
 
@@ -66,6 +74,11 @@ impl CompileError {
         Self { kind: ErrorKind::Check, span: None, message: message.into() }
     }
 
+    /// A resource the program did not account for.
+    pub fn linear(message: impl Into<String>) -> Self {
+        Self { kind: ErrorKind::Linear, span: None, message: message.into() }
+    }
+
     /// A failure reported by an external target.
     pub fn target(message: impl Into<String>) -> Self {
         Self { kind: ErrorKind::Target, span: None, message: message.into() }
@@ -97,6 +110,7 @@ impl std::fmt::Display for CompileError {
             ErrorKind::Parse => "parse error",
             ErrorKind::Emit => "emit error",
             ErrorKind::Check => "constraint error",
+            ErrorKind::Linear => "resource error",
             ErrorKind::Target => "target error",
         };
         match self.span {

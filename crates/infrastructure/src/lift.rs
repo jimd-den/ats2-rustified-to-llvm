@@ -47,6 +47,8 @@ impl Lifter {
             .defs
             .iter()
             .filter_map(|d| match d {
+                // Not this compiler's language; the toolchain reads it.
+                Def::InlineC(_) => None,
                 Def::Fun(f) => Some(f.name.clone()),
                 Def::Extern(d) => Some(d.name.clone()),
                 Def::Const(c) => Some(c.name.clone()),
@@ -133,6 +135,18 @@ impl LiftCtx {
     fn walk(&mut self, expr: &Expr, scope: &Scope) -> Result<Expr, CompileError> {
         Ok(match expr {
             Expr::Unit | Expr::Uninit | Expr::Wildcard | Expr::IntLit(_) | Expr::CharLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StrLit(_) | Expr::Var(_) | Expr::Inst(..) => expr.clone(),
+            // Static instantiation has no dynamic content; lifting
+            // looks through it and keeps the claim in place.
+            Expr::StaticInst(inner, at) => {
+                Expr::StaticInst(Box::new(self.walk(inner, scope)?), at.clone())
+            }
+            Expr::ProofPair(p, v) => Expr::ProofPair(
+                Box::new(self.walk(p, scope)?),
+                Box::new(self.walk(v, scope)?),
+            ),
+            Expr::Ascribe(inner, ty) => {
+                Expr::Ascribe(Box::new(self.walk(inner, scope)?), ty.clone())
+            }
             Expr::UnaryNeg(e) => Expr::UnaryNeg(Box::new(self.walk(e, scope)?)),
             Expr::BinOp(op, l, r) => Expr::BinOp(*op, Box::new(self.walk(l, scope)?), Box::new(self.walk(r, scope)?)),
             Expr::Index(b, i) => Expr::Index(Box::new(self.walk(b, scope)?), Box::new(self.walk(i, scope)?)),
@@ -220,7 +234,7 @@ impl LiftCtx {
             let ty = scope.get(name).ok_or_else(|| {
                 CompileError::emit(format!("cannot lift a nested function: the type of the captured variable `{name}` is unknown"))
             })?;
-            extra.push(Param { name: name.clone(), ty: ty.clone() });
+            extra.push(Param { borrowed: false, name: name.clone(), ty: ty.clone() });
         }
 
         // Give each sibling a top-level name that is not already taken.
@@ -245,6 +259,7 @@ impl LiftCtx {
             let body = self.walk(&f.body, &inner_scope)?;
             let body = rewrite_calls(&body, &renames, &captured);
             self.lifted.push(Def::Fun(FunDef {
+                metric: Vec::new(),
                 ty_params: f.ty_params.clone(),
                 // A lifted function is the same function with its
                 // captures made explicit, so it keeps what its signature
@@ -295,6 +310,11 @@ pub fn free_variables(expr: &Expr, bound: &mut HashSet<String>, out: &mut BTreeS
 fn free_vars(expr: &Expr, bound: &mut HashSet<String>, out: &mut BTreeSet<String>) {
     match expr {
         Expr::Unit | Expr::Uninit | Expr::Wildcard | Expr::IntLit(_) | Expr::CharLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StrLit(_) | Expr::Inst(..) => {}
+        Expr::StaticInst(inner, _) => free_vars(inner, bound, out),
+        // A proof mentions names, but none of them survives to be
+        // captured: the half that runs is the value.
+        Expr::ProofPair(_, value) => free_vars(value, bound, out),
+        Expr::Ascribe(inner, _) => free_vars(inner, bound, out),
         Expr::Var(n) => {
             if !bound.contains(n) {
                 out.insert(n.clone());
@@ -389,6 +409,9 @@ fn rewrite_calls(expr: &Expr, renames: &HashMap<String, String>, captured: &BTre
     let go = |e: &Expr| rewrite_calls(e, renames, captured);
     match expr {
         Expr::Unit | Expr::Uninit | Expr::Wildcard | Expr::IntLit(_) | Expr::CharLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StrLit(_) | Expr::Inst(..) => expr.clone(),
+        Expr::StaticInst(inner, at) => Expr::StaticInst(Box::new(go(inner)), at.clone()),
+        Expr::ProofPair(p, v) => Expr::ProofPair(Box::new(go(p)), Box::new(go(v))),
+        Expr::Ascribe(inner, ty) => Expr::Ascribe(Box::new(go(inner)), ty.clone()),
         Expr::Var(n) => match renames.get(n) {
             // A bare mention of a lifted function with no captures is
             // still just a name; with captures it would need a closure,

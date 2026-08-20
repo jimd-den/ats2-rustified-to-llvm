@@ -8,6 +8,8 @@
 //! reached exclusively through abstract **port** traits defined here, so
 //! the application layer can be tested with tiny in-memory fakes.
 
+pub mod checking;
 pub mod constraints;
+pub mod linearity;
 pub mod ports;
 pub mod use_cases;

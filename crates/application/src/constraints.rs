@@ -1,9 +1,11 @@
-//! # The constraint checker — the half of ATS that is not code
+//! # The constraint solver — deciding claims, and nothing else
 //!
 //! *Literate note.*  A dependent type is a claim, and a claim nobody
-//! checks is a comment.  `fun fact {n:nat} (x: int n): int` promises that
-//! `fact` is never called on a negative number; this module is what
-//! turns that promise into something the compiler can refuse to believe.
+//! checks is a comment.  [`crate::checking`] is what finds the claims a
+//! program makes; this module is what decides them, and it is kept
+//! separate because the two change for entirely different reasons — one
+//! when the *language* grows, the other when the *arithmetic* does.  The
+//! solver has no idea what a function is.
 //!
 //! The language of claims here is linear arithmetic over the integers,
 //! which is what the corpus actually indexes with: sizes, lengths,
@@ -24,11 +26,9 @@
 //!   `Unknown`, never a failure.  A checker that rejects what it merely
 //!   fails to understand is a checker people turn off.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
-use ats2_domain::ast::{BinOp, Def, Expr, FunDef, Program};
-use ats2_domain::errors::CompileError;
-use ats2_domain::statics::{Quant, SExp};
+use ats2_domain::statics::SExp;
 
 /// What the checker was able to establish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,174 +217,211 @@ fn is_unsatisfiable(system: &[Linear]) -> bool {
     }
 }
 
+/// Every uninterpreted application a term mentions.
+///
+/// These are the terms `linearize` abstracts to an opaque variable: a
+/// named static function such as `fact(n)`, or a product it cannot read.
+fn applications(e: &SExp, out: &mut Vec<SExp>) {
+    if let SExp::App(op, args) = e {
+        if linearize(e).is_some_and(|l| l.terms.len() == 1 && l.terms.contains_key(&opaque_name(e)))
+            && !out.contains(e)
+        {
+            out.push(e.clone());
+        }
+        let _ = op;
+        args.iter().for_each(|a| applications(a, out));
+    }
+}
+
+/// The one thing every function satisfies, whatever else it does: equal
+/// arguments, equal results.
+///
+/// `stacst fact: int -> int` gives the solver a function it knows nothing
+/// about, and abstraction alone makes `fact(n)` and `fact(0)` two
+/// unrelated variables — so `n == 0` and `fact(0) == 1` would say nothing
+/// about `fact(n)`, and an inductive proof would discharge its step and
+/// fail on its base.
+///
+/// So: whenever two applications share a head and their arguments are
+/// *provably* equal under the hypotheses, the equation between them
+/// joins the system.  The proof of equality uses the arithmetic already
+/// there, which is what lets `fact(n-1)` meet `fact(2)` when `n` is
+/// three.  It is done once rather than to a fixpoint: a second round
+/// buys nothing the corpus asks for, and an unbounded one is a way to
+/// spend an afternoon inside a compiler.
+fn congruences(hyps: &[SExp], goal: Option<&SExp>, base: &[Linear]) -> Vec<Linear> {
+    let mut terms = Vec::new();
+    for h in hyps {
+        applications(h, &mut terms);
+    }
+    if let Some(g) = goal {
+        applications(g, &mut terms);
+    }
+    let proves = |claim: &Linear| {
+        // `claim >= 0` is entailed when denying it is impossible.
+        let mut sys = base.to_vec();
+        sys.push(claim.scale(-1).add(&Linear::constant(-1)));
+        is_unsatisfiable(&sys)
+    };
+    let mut out = Vec::new();
+    for (i, a) in terms.iter().enumerate() {
+        for b in terms.iter().skip(i + 1) {
+            let (SExp::App(fa, xs), SExp::App(fb, ys)) = (a, b) else { continue };
+            if fa != fb || xs.len() != ys.len() {
+                continue;
+            }
+            let agree = xs.iter().zip(ys).all(|(x, y)| {
+                match (linearize(x), linearize(y)) {
+                    (Some(x), Some(y)) => {
+                        let d = x.sub(&y);
+                        proves(&d) && proves(&d.scale(-1))
+                    }
+                    _ => false,
+                }
+            });
+            if agree {
+                let d = Linear::var(opaque_name(a)).sub(&Linear::var(opaque_name(b)));
+                out.push(d.clone());
+                out.push(d.scale(-1));
+            }
+        }
+    }
+    out
+}
+
+/// The alternative readings a hypothesis has, when it has more than one.
+///
+/// `a != b` is `a < b` or `a > b`: a disjunction, which a conjunctive
+/// system cannot hold.  Dropping it is sound but costs the fact that
+/// makes every `if i = 0 then ... else f(i-1)` legal — in the else
+/// branch, `i >= 0` and `i != 0` together say `i >= 1`, and without the
+/// second the recursion is unprovable.
+///
+/// So it is kept, as cases.  A system with `k` such hypotheses is `2^k`
+/// systems, which is why the number taken is capped: past the cap the
+/// remainder is simply dropped, exactly as before, and the answer is
+/// weaker rather than wrong.
+fn alternatives(e: &SExp) -> Option<Vec<Vec<Linear>>> {
+    let SExp::App(op, args) = e else { return None };
+    match (op.as_str(), args.len()) {
+        ("!=", 2) => {
+            let lt = atoms(&SExp::App("<".into(), args.clone()))?;
+            let gt = atoms(&SExp::App(">".into(), args.clone()))?;
+            Some(vec![lt, gt])
+        }
+        ("||", 2) => Some(vec![atoms(&args[0])?, atoms(&args[1])?]),
+        _ => None,
+    }
+}
+
+/// Split the hypotheses into what every case shares and the cases
+/// themselves.
+///
+/// Returns one system per combination; a claim holds only if it holds in
+/// all of them.
+fn case_systems(hyps: &[SExp]) -> Vec<Vec<Linear>> {
+    /// Past this many split hypotheses the combinations stop being worth
+    /// their time; the rest are dropped, which weakens the answer and
+    /// cannot falsify it.
+    const MAX_SPLITS: usize = 4;
+    let mut shared = Vec::new();
+    let mut splits: Vec<Vec<Vec<Linear>>> = Vec::new();
+    for h in hyps {
+        if let Some(a) = atoms(h) {
+            shared.extend(a);
+        } else if let Some(cases) = alternatives(h) {
+            if splits.len() < MAX_SPLITS {
+                splits.push(cases);
+            }
+        }
+    }
+    let mut systems = vec![shared];
+    for cases in splits {
+        systems = systems
+            .iter()
+            .flat_map(|base| {
+                cases.iter().map(|case| {
+                    let mut next = base.clone();
+                    next.extend(case.iter().cloned());
+                    next
+                })
+            })
+            .collect();
+    }
+    systems
+}
+
 /// Whether the hypotheses are jointly impossible.
 ///
 /// Worth asking on its own: a branch whose hypotheses contradict is a
 /// branch that cannot run, and reporting that is more useful than
 /// silently proving every claim inside it.
 pub fn is_contradictory(hyps: &[SExp]) -> bool {
-    let mut system = Vec::new();
-    for h in hyps {
-        match atoms(h) {
-            Some(a) => system.extend(a),
-            None => continue,
-        }
-    }
-    is_unsatisfiable(&system)
+    // Impossible in every case is impossible.
+    case_systems(hyps).iter().all(|s| is_unsatisfiable(s))
 }
 
 /// Does `hyps` entail `goal`?
 pub fn entails(hyps: &[SExp], goal: &SExp) -> Verdict {
-    let mut base = Vec::new();
-    for h in hyps {
-        if let Some(a) = atoms(h) {
-            base.extend(a);
+    // A disjunction cannot be held as a conjunctive system, but it can be
+    // *decided* by cases: it holds if either half does, and it is false
+    // only if both are.  Splitting here rather than in `atoms` is what
+    // keeps the system a conjunction while still deciding the goals a
+    // lexicographic termination metric produces, which are disjunctions
+    // by their nature.
+    if let SExp::App(op, args) = goal {
+        if op == "||" && args.len() == 2 {
+            let (left, right) = (entails(hyps, &args[0]), entails(hyps, &args[1]));
+            return match (left, right) {
+                (Verdict::Proved, _) | (_, Verdict::Proved) => Verdict::Proved,
+                (Verdict::Refuted, Verdict::Refuted) => Verdict::Refuted,
+                _ => Verdict::Unknown,
+            };
         }
     }
     let Some(goal_atoms) = atoms(goal) else { return Verdict::Unknown };
     let Some(negated) = negations(goal) else { return Verdict::Unknown };
 
-    // Proved when every way of denying the goal is impossible.
-    let proved = negated.iter().all(|n| {
-        let mut sys = base.clone();
-        sys.push(n.clone());
-        is_unsatisfiable(&sys)
+    // One system per case the hypotheses leave open.  A claim holds only
+    // if it holds in all of them, and is false only if it fails in all.
+    let systems: Vec<Vec<Linear>> = case_systems(hyps)
+        .into_iter()
+        .map(|mut base| {
+            // What the hypotheses say about the *functions* they
+            // mention, which abstraction alone throws away.
+            let extra = congruences(hyps, Some(goal), &base);
+            base.extend(extra);
+            base
+        })
+        .collect();
+
+    // Proved when, in every case, every way of denying the goal is
+    // impossible.
+    let proved = systems.iter().all(|base| {
+        negated.iter().all(|n| {
+            let mut sys = base.clone();
+            sys.push(n.clone());
+            is_unsatisfiable(&sys)
+        })
     });
     if proved {
         return Verdict::Proved;
     }
-    // Refuted when asserting the goal is itself impossible.
-    let mut with_goal = base;
-    with_goal.extend(goal_atoms);
-    if is_unsatisfiable(&with_goal) {
+    // Refuted when asserting the goal is impossible in every case.
+    let refuted = systems.iter().all(|base| {
+        let mut with_goal = base.clone();
+        with_goal.extend(goal_atoms.iter().cloned());
+        is_unsatisfiable(&with_goal)
+    });
+    if refuted {
         return Verdict::Refuted;
     }
     Verdict::Unknown
 }
 
-/// Check every call in a program against the promises its callee's
-/// signature makes.
-///
-/// The walk is deliberately one-sided.  An index it cannot infer is not
-/// an error — most arguments in real code have indices that depend on
-/// facts a branch established, and this checker does not yet read
-/// branches.  Only a call whose violation is *provable* is reported, so
-/// turning the checker on cannot reject a program that was correct.
-pub fn check_program(program: &Program) -> Vec<CompileError> {
-    let mut sigs: HashMap<&str, &FunDef> = HashMap::new();
-    for def in program.defs() {
-        if let Def::Fun(f) = def {
-            sigs.insert(f.name.as_str(), f);
-        }
-    }
-    let mut out = Vec::new();
-    for def in program.defs() {
-        // `implement main0 () = ...` is a body like any other, and it is
-        // where a program's outermost calls are written, so leaving it
-        // unchecked would leave the common case unchecked.
-        let (universals, params, body) = match def {
-            Def::Fun(f) => (f.universals.as_slice(), f.params.as_slice(), &f.body),
-            Def::Implement(im) => (&[][..], im.params.as_slice(), &im.body),
-            _ => continue,
-        };
-        // What this body may assume: whatever its own signature demands
-        // of its callers.
-        let hyps: Vec<SExp> = universals.iter().flat_map(Quant::hypotheses).collect();
-        // What each parameter's index is called.
-        let mut env: HashMap<String, SExp> = HashMap::new();
-        for p in params {
-            if let [idx] = p.ty.indices() {
-                env.insert(p.name.clone(), idx.clone());
-            }
-        }
-        check_expr(body, &env, &hyps, &sigs, &mut out);
-    }
-    out
-}
-
-/// The static term an expression's value is known to equal, if any.
-fn index_of(e: &Expr, env: &HashMap<String, SExp>) -> Option<SExp> {
-    Some(match e {
-        Expr::IntLit(n) => SExp::IntLit(*n),
-        Expr::Var(n) => env.get(n)?.clone(),
-        Expr::UnaryNeg(x) => SExp::App("~".into(), vec![index_of(x, env)?]),
-        Expr::BinOp(op, l, r) => SExp::App(
-            match op {
-                BinOp::Add => "+",
-                BinOp::Sub => "-",
-                BinOp::Mul => "*",
-                BinOp::Div => "/",
-                BinOp::Mod => "%",
-                _ => return None,
-            }
-            .into(),
-            vec![index_of(l, env)?, index_of(r, env)?],
-        ),
-        _ => return None,
-    })
-}
-
-fn check_expr(
-    e: &Expr,
-    env: &HashMap<String, SExp>,
-    hyps: &[SExp],
-    sigs: &HashMap<&str, &FunDef>,
-    out: &mut Vec<CompileError>,
-) {
-    if let Expr::Call(callee, args) = e {
-        if let Expr::Var(name) = &**callee {
-            if let Some(target) = sigs.get(name.as_str()) {
-                check_call(name, target, args, env, hyps, out);
-            }
-        }
-    }
-    e.each_subexpr(&mut |sub| check_expr(sub, env, hyps, sigs, out));
-}
-
-/// One call, against one signature.
-fn check_call(
-    name: &str,
-    target: &FunDef,
-    args: &[Expr],
-    env: &HashMap<String, SExp>,
-    hyps: &[SExp],
-    out: &mut Vec<CompileError>,
-) {
-    // Instantiate the callee's static variables from the arguments.  A
-    // parameter indexed by a bare variable pins that variable to the
-    // argument's index; a more elaborate index would need unification,
-    // which this checker does not attempt.
-    let mut subst: Vec<(String, SExp)> = Vec::new();
-    for (p, a) in target.params.iter().zip(args) {
-        let [SExp::Var(sv)] = p.ty.indices() else { continue };
-        let Some(idx) = index_of(a, env) else { continue };
-        subst.push((sv.clone(), idx));
-    }
-    if subst.is_empty() {
-        return;
-    }
-    for q in &target.universals {
-        for h in q.hypotheses() {
-            // Only obligations whose variables the call actually pinned
-            // down can be judged.
-            if h.vars().iter().any(|v| !subst.iter().any(|(k, _)| k == v)) {
-                continue;
-            }
-            let goal = h.substitute(&subst);
-            if entails(hyps, &goal) == Verdict::Refuted {
-                out.push(CompileError::check(format!(
-                    "`{name}` accepts only arguments for which `{h}` holds, and this call needs `{goal}`, which is false"
-                )));
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ats2_domain::ast::{BinOp, Def, Expr, FunDef, Param, Ty};
-    use ats2_domain::statics::{Quant, SExp, Sort};
 
     fn v(n: &str) -> SExp { SExp::Var(n.into()) }
     fn i(n: i64) -> SExp { SExp::IntLit(n) }
@@ -429,6 +466,75 @@ mod tests {
     }
 
     #[test]
+    fn an_uninterpreted_function_agrees_with_itself_on_equal_arguments() {
+        // `stacst fact: int -> int` gives the solver a function it knows
+        // nothing about — except the one thing every function satisfies:
+        // equal arguments, equal results.  Without it, `fact(0) == 1`
+        // and `n == 0` say nothing about `fact(n)`, and an inductive
+        // proof discharges its step and fails on its base.
+        let hyps = vec![
+            app("==", SExp::App("fact".into(), vec![i(0)]), i(1)),
+            app("==", v("n"), i(0)),
+        ];
+        let goal = app("==", i(1), SExp::App("fact".into(), vec![v("n")]));
+        assert_eq!(entails(&hyps, &goal), Verdict::Proved);
+    }
+
+    #[test]
+    fn an_uninterpreted_function_says_nothing_when_the_arguments_may_differ() {
+        // Congruence is not a licence to identify everything: `fact(n)`
+        // and `fact(0)` agree only when `n` is nought.
+        let hyps = vec![app("==", SExp::App("fact".into(), vec![i(0)]), i(1))];
+        let goal = app("==", i(1), SExp::App("fact".into(), vec![v("n")]));
+        assert_ne!(entails(&hyps, &goal), Verdict::Proved);
+    }
+
+    #[test]
+    fn congruence_reaches_arguments_that_are_equal_only_by_arithmetic() {
+        // `fact(n-1)` and `fact(2)` are the same term when `n` is three,
+        // and nothing in the source ever writes that equality down.
+        let hyps = vec![
+            app("==", v("n"), i(3)),
+            app("==", SExp::App("f".into(), vec![app("-", v("n"), i(1))]), i(7)),
+        ];
+        let goal = app("==", SExp::App("f".into(), vec![i(2)]), i(7));
+        assert_eq!(entails(&hyps, &goal), Verdict::Proved);
+    }
+
+    #[test]
+    fn congruence_holds_for_functions_of_several_arguments() {
+        let hyps = vec![
+            app("==", v("a"), v("b")),
+            app("==", SExp::App("g".into(), vec![v("a"), i(1)]), i(5)),
+        ];
+        let goal = app("==", SExp::App("g".into(), vec![v("b"), i(1)]), i(5));
+        assert_eq!(entails(&hyps, &goal), Verdict::Proved);
+    }
+
+    #[test]
+    fn a_hypothesis_of_inequality_is_split_rather_than_discarded() {
+        // `i >= 0` and `i != 0` say `i >= 1`, which is what makes the
+        // recursive call in every `if i = 0 then ... else f(i-1)` legal.
+        // `!=` is a disjunction, so a conjunctive system cannot hold it —
+        // but it can be *decided* by taking each side in turn.
+        let hyps = vec![app(">=", v("i"), i(0)), app("!=", v("i"), i(0))];
+        assert_eq!(entails(&hyps, &app(">=", app("-", v("i"), i(1)), i(0))), Verdict::Proved);
+    }
+
+    #[test]
+    fn splitting_a_hypothesis_does_not_prove_what_only_one_side_gives() {
+        // `i != 0` alone leaves `i` free to be negative.
+        let hyps = vec![app("!=", v("i"), i(0))];
+        assert_ne!(entails(&hyps, &app(">=", v("i"), i(1))), Verdict::Proved);
+    }
+
+    #[test]
+    fn a_branch_whose_two_sides_are_both_impossible_is_unreachable() {
+        let hyps = vec![app("==", v("i"), i(0)), app("!=", v("i"), i(0))];
+        assert!(is_contradictory(&hyps));
+    }
+
+    #[test]
     fn a_nonlinear_term_is_abstracted_rather_than_misread() {
         // m*n is opaque, but it is *consistently* opaque, so a goal that
         // only needs it to equal itself still goes through.
@@ -438,86 +544,44 @@ mod tests {
     }
 
     #[test]
+    fn a_disjunction_is_proved_when_either_half_is() {
+        // A lexicographic metric decreases when the first component
+        // does, *or* when it stays equal and the second does.  That is a
+        // disjunction, and a solver that could only hold conjunctions
+        // would report every lexicographic recursion as unproved.
+        let hyps = vec![app(">", v("n"), i(5))];
+        let goal = SExp::App(
+            "||".into(),
+            vec![app("<", v("n"), i(0)), app(">", v("n"), i(3))],
+        );
+        assert_eq!(entails(&hyps, &goal), Verdict::Proved);
+    }
+
+    #[test]
+    fn a_disjunction_neither_half_of_which_holds_is_not_proved() {
+        let hyps = vec![app("==", v("n"), i(4))];
+        let goal = SExp::App(
+            "||".into(),
+            vec![app("<", v("n"), i(0)), app(">", v("n"), i(9))],
+        );
+        assert_ne!(entails(&hyps, &goal), Verdict::Proved);
+    }
+
+    #[test]
+    fn a_disjunction_both_halves_of_which_are_impossible_is_refuted() {
+        let hyps = vec![app("==", v("n"), i(4))];
+        let goal = SExp::App(
+            "||".into(),
+            vec![app("<", v("n"), i(0)), app(">", v("n"), i(9))],
+        );
+        // `n` is four, so neither disjunct can hold: the claim is false,
+        // not merely unproved.
+        assert_eq!(entails(&hyps, &goal), Verdict::Refuted);
+    }
+
+    #[test]
     fn a_form_outside_the_fragment_is_unknown_not_an_error() {
         let hyps = vec![];
         assert_eq!(entails(&hyps, &app("!=", v("n"), i(0))), Verdict::Unknown);
-    }
-
-    fn errors_for(src_defs: Vec<ats2_domain::ast::Def>) -> Vec<String> {
-        let p = ats2_domain::ast::Program::new(src_defs);
-        check_program(&p).into_iter().map(|e| e.message).collect()
-    }
-
-    /// `fun f {n:nat} (x: int n): int`
-    fn nat_taking_fn(name: &str, body: Expr) -> Def {
-        Def::Fun(FunDef {
-            ty_params: vec![],
-            universals: vec![Quant { vars: vec![("n".into(), Sort::Nat)], guard: None }],
-            existentials: vec![],
-            name: name.into(),
-            params: vec![Param {
-                name: "x".into(),
-                ty: Ty::Index(Box::new(Ty::Name("int".into())), vec![v("n")]),
-            }],
-            ret: Ty::Name("int".into()),
-            body,
-        })
-    }
-
-    #[test]
-    fn calling_a_nat_indexed_function_with_a_negative_literal_is_refused() {
-        // `f` promises to accept only non-negative arguments; `f(~1)`
-        // breaks that promise, and this is the whole reason the static
-        // language is kept.
-        let caller = Def::Fun(FunDef {
-            ty_params: vec![],
-            universals: vec![],
-            existentials: vec![],
-            name: "g".into(),
-            params: vec![],
-            ret: Ty::Name("int".into()),
-            body: Expr::Call(Box::new(Expr::Var("f".into())), vec![Expr::IntLit(-1)]),
-        });
-        let errs = errors_for(vec![nat_taking_fn("f", Expr::IntLit(0)), caller]);
-        assert_eq!(errs.len(), 1, "{errs:?}");
-        assert!(errs[0].contains("f"), "{errs:?}");
-        assert!(errs[0].contains(">= 0"), "{errs:?}");
-    }
-
-    #[test]
-    fn a_call_that_honours_the_promise_is_accepted() {
-        let caller = Def::Fun(FunDef {
-            ty_params: vec![],
-            universals: vec![],
-            existentials: vec![],
-            name: "g".into(),
-            params: vec![],
-            ret: Ty::Name("int".into()),
-            body: Expr::Call(Box::new(Expr::Var("f".into())), vec![Expr::IntLit(3)]),
-        });
-        assert!(errors_for(vec![nat_taking_fn("f", Expr::IntLit(0)), caller]).is_empty());
-    }
-
-    #[test]
-    fn a_call_whose_index_is_not_known_is_left_alone() {
-        // The recursive call passes `x - 1`, which is only non-negative
-        // when `x > 0` — a fact the checker does not have here.  It must
-        // stay silent rather than reject a valid program.
-        let f = nat_taking_fn(
-            "f",
-            Expr::Call(
-                Box::new(Expr::Var("f".into())),
-                vec![Expr::BinOp(BinOp::Sub, Box::new(Expr::Var("x".into())), Box::new(Expr::IntLit(1)))],
-            ),
-        );
-        assert!(errors_for(vec![f]).is_empty());
-    }
-
-    #[test]
-    fn contradictory_hypotheses_are_reported_rather_than_proving_everything() {
-        // A body reachable only under `n > 0 && n < 0` is dead code, and
-        // saying "everything is proved here" would hide that.
-        let hyps = vec![app(">", v("n"), i(0)), app("<", v("n"), i(0))];
-        assert!(is_contradictory(&hyps));
     }
 }

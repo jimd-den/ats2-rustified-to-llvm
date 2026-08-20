@@ -44,6 +44,11 @@ for d in "${DIRS[@]}"; do
     ll=$WORK/$b.ll
     exe=$WORK/$b
 
+    # No `--permissive` here.  The dependent checker's strict reading —
+    # refuse anything it cannot prove — accepts all thirty-six, so the
+    # score is measured the honest way: every file below is one this
+    # compiler both proved and ran.  The hatch still exists for programs
+    # that need it; the corpus is no longer one of them.
     if ! "$BIN" "$f" --ir "$ll" >/dev/null 2>"$WORK/err"; then
       ecomp=$((ecomp + 1))
       echo "COMPILE  $b :: $(grep -m1 . "$WORK/err" | cut -c1-140)" >> "$WORK/report.txt"

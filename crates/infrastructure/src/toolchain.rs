@@ -22,9 +22,9 @@ use ats2_application::ports::ToolchainPort;
 pub struct ClangToolchain;
 
 impl ToolchainPort for ClangToolchain {
-    fn link(&self, ir_path: &Path, output: &Path) -> Result<(), String> {
+    fn link_all(&self, inputs: &[std::path::PathBuf], output: &Path) -> Result<(), String> {
         let result = Command::new("clang")
-            .arg(ir_path)
+            .args(inputs)
             .arg("-o")
             .arg(output)
             .output()

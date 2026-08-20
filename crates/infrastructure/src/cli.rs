@@ -13,6 +13,7 @@
 
 use std::path::PathBuf;
 
+use ats2_application::checking::Strictness;
 use ats2_application::use_cases::{CompileExecutableUseCase, CompileToIrUseCase};
 
 use ats2_application::ports::{DiagnosticsPort, OutputPort};
@@ -28,16 +29,25 @@ pub struct CliArgs {
     pub source: PathBuf,
     pub ir: Option<PathBuf>,
     pub binary: Option<PathBuf>,
+    /// What to do about a constraint that is neither proved nor refuted.
+    ///
+    /// Strict by default, because that is what "checked" means.  The
+    /// `--permissive` hatch exists because a solver is finished later
+    /// than the language it reasons about, and a program the checker
+    /// merely cannot follow is not a program that is wrong.
+    pub strictness: Strictness,
 }
 
 impl CliArgs {
     /// Parse argv (without the program name).  Usage:
-    /// `ats2llvm <file.dats> [--ir <file.ll>] [--bin <executable>]`
+    /// `ats2llvm <file.dats> [--ir <file.ll>] [--bin <executable>]
+    ///           [--strict | --permissive]`
     /// With `--bin` but no `--ir`, the IR is written next to the binary.
     pub fn parse_args(args: &[String]) -> Result<CliArgs, String> {
         let mut source: Option<PathBuf> = None;
         let mut ir: Option<PathBuf> = None;
         let mut binary: Option<PathBuf> = None;
+        let mut strictness = Strictness::default();
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
@@ -51,6 +61,8 @@ impl CliArgs {
                     let value = args.get(i).ok_or("`--bin` needs a value")?;
                     binary = Some(PathBuf::from(value));
                 }
+                "--permissive" => strictness = Strictness::Permissive,
+                "--strict" => strictness = Strictness::Strict,
                 flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
                 file => {
                     if source.is_some() {
@@ -67,7 +79,7 @@ impl CliArgs {
             default.push(".ll");
             ir = Some(PathBuf::from(default));
         }
-        Ok(CliArgs { source, ir, binary })
+        Ok(CliArgs { source, ir, binary, strictness })
     }
 }
 
@@ -94,14 +106,17 @@ pub fn run(args: Vec<String>) -> i32 {
 /// Print a usage error and return the usage exit code.
 fn usage_error(message: &str) -> i32 {
     eprintln!("ats2llvm: {message}");
-    eprintln!("usage: ats2llvm <file.dats> [--ir <file.ll>] [--bin <executable>]");
+    eprintln!(
+        "usage: ats2llvm <file.dats> [--ir <file.ll>] [--bin <executable>] [--permissive]"
+    );
     2
 }
 
 /// The `--bin` route: compile to IR, persist it, link it.
 fn build_binary(source: &str, cli: &CliArgs, binary: &std::path::Path, diag: &StderrDiagnostics) -> i32 {
     let ir_path = cli.ir.as_ref().expect("parse_args guarantees an IR path");
-    let uc = CompileExecutableUseCase::new(Parser, LlvmIrEmitter, ClangToolchain, FileOutput);
+    let uc = CompileExecutableUseCase::new(Parser, LlvmIrEmitter, ClangToolchain, FileOutput)
+        .checking(cli.strictness);
     match uc.execute(source, ir_path, binary) {
         Ok(()) => {
             diag.info(&format!("wrote IR      {}", ir_path.display()));
@@ -117,7 +132,7 @@ fn build_binary(source: &str, cli: &CliArgs, binary: &std::path::Path, diag: &St
 
 /// The IR route: compile source text down to IR, then persist or print.
 fn build_ir(source: &str, cli: &CliArgs, diag: &StderrDiagnostics) -> i32 {
-    let uc = CompileToIrUseCase::new(Parser, LlvmIrEmitter);
+    let uc = CompileToIrUseCase::new(Parser, LlvmIrEmitter).checking(cli.strictness);
     match uc.execute(source) {
         Ok(ir) => match &cli.ir {
             Some(ir_path) => match FileOutput.write(ir_path, &ir) {
@@ -150,6 +165,28 @@ mod tests {
     fn parse(args: &[&str]) -> Result<CliArgs, String> {
         let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         CliArgs::parse_args(&owned)
+    }
+
+    #[test]
+    fn checking_is_strict_unless_the_caller_says_otherwise() {
+        // The default has to be the honest one: a checker that forgives
+        // what it cannot prove is not checking anything.
+        assert_eq!(parse(&["hello.dats"]).expect("parse").strictness, Strictness::Strict);
+    }
+
+    #[test]
+    fn permissive_asks_for_only_the_provably_false_to_be_refused() {
+        // The escape hatch: a program the checker merely cannot reason
+        // about still builds, so a corpus can be adopted before the
+        // solver is finished.
+        let a = parse(&["hello.dats", "--permissive"]).expect("parse");
+        assert_eq!(a.strictness, Strictness::Permissive);
+        assert_eq!(a.source, PathBuf::from("hello.dats"));
+    }
+
+    #[test]
+    fn strict_may_be_asked_for_by_name() {
+        assert_eq!(parse(&["--strict", "hello.dats"]).expect("parse").strictness, Strictness::Strict);
     }
 
     #[test]
