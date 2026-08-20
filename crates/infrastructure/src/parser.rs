@@ -722,7 +722,7 @@ impl ParseCtx<'_> {
                 }
                 Ok(())
             }
-            TokenKind::Ident(name) if name == "praxi" || name == "prfun" => {
+            TokenKind::Ident(name) if name == "praxi" || name == "prfun" || name == "prfn" => {
                 let save = self.pos;
                 if let Ok(decl) = self.parse_extern_decl() {
                     out.push(Def::Extern(decl));
@@ -971,6 +971,9 @@ impl ParseCtx<'_> {
                 // `datavtype` begins a definition even though it is not
                 // a keyword token, so the skip stops on it too.
                 TokenKind::Ident(w) if w == "datavtype" => return,
+                // `fnx`/`prfn`/`prfun` begin a definition even though they
+                // are identifiers to the lexer, so skipping stops on them.
+                _ if self.at_fun_def_keyword() => return,
                 _ => {
                     let before = self.pos;
                     self.advance();
@@ -983,9 +986,11 @@ impl ParseCtx<'_> {
     }
 
     fn parse_def(&mut self) -> Result<Def, CompileError> {
+        if self.at_fun_def_keyword() {
+            return self.parse_fun_def();
+        }
         match self.peek().kind {
             TokenKind::Datatype => self.parse_datatype_def(),
-            TokenKind::Fun | TokenKind::Fn => self.parse_fun_def(),
             TokenKind::Implement => self.parse_implement_def(),
             _ => Err(self.error_here("expected a definition")),
         }
@@ -1286,7 +1291,22 @@ impl ParseCtx<'_> {
     /// its parameters and its result — and differ only in that nothing
     /// they describe survives to run time.
     fn at_proof_keyword(&self) -> bool {
-        matches!(&self.peek().kind, TokenKind::Ident(w) if w == "praxi" || w == "prfun")
+        matches!(
+            &self.peek().kind,
+            TokenKind::Ident(w) if w == "praxi" || w == "prfun" || w == "prfn"
+        )
+    }
+
+    /// Whether the next token begins a function *definition* — one of the
+    /// spellings ATS uses for a name with a body.  `fnx` is the
+    /// named-recursive form; the proof spellings are recognised too, and
+    /// `parse_fun_def` knows how to mark them.
+    fn at_fun_def_keyword(&self) -> bool {
+        matches!(self.peek().kind, TokenKind::Fun | TokenKind::Fn)
+            || matches!(
+                &self.peek().kind,
+                TokenKind::Ident(w) if w == "fnx" || w == "prfn" || w == "prfun"
+            )
     }
 
     fn parse_extern_decl(&mut self) -> Result<FunDecl, CompileError> {
@@ -3554,7 +3574,7 @@ impl ParseCtx<'_> {
         let mut binds = Vec::new();
         let mut funs = Vec::new();
         loop {
-            if matches!(self.peek().kind, TokenKind::Fun | TokenKind::Fn) {
+            if self.at_fun_def_keyword() {
                 let Def::Fun(f) = self.parse_fun_def()? else {
                     unreachable!("parse_fun_def yields a Fun")
                 };
@@ -7264,6 +7284,36 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
             }
             other => panic!("expected an ExtVal, got {other:?}"),
         }
+    }
+    #[test]
+    fn a_local_fnx_is_a_function_definition() {
+        // `fnx` is ATS's named-recursion spelling of `fun`.  Inside a
+        // `let` it declares a function like any other — a loop written
+        // that way is how real ATS counts itself down — and it used to
+        // make the parser look for the `in` that never came.
+        let body = impl_body(
+            "implement main0 () = let fnx loop (n: int): int = \
+             if n = 0 then 0 else loop (n - 1) in loop (3) end",
+        );
+        match body {
+            Expr::LetFun(funs, _) => {
+                assert_eq!(funs.len(), 1);
+                assert_eq!(funs[0].name, "loop");
+            }
+            other => panic!("expected a LetFun, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_top_level_fnx_is_a_function_definition() {
+        let program = Parser::parse(
+            "fnx loop (n: int): int = if n = 0 then 0 else loop (n - 1)",
+        )
+        .expect("parse");
+        let Def::Fun(f) = &program.defs()[0] else {
+            panic!("expected a fun def");
+        };
+        assert_eq!(f.name, "loop");
     }
 
 }
