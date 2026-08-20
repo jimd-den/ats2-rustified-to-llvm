@@ -1185,11 +1185,37 @@ impl ParseCtx<'_> {
     /// are none.  The `of`-less spelling `Cons(int, list)` is accepted as
     /// well, since the subset used it before and both read clearly.
     fn parse_ctor(&mut self) -> Result<Ctor, CompileError> {
+        // `| {n:nat} btnode (a, n) of (int(n), a)` — an indexed
+        // constructor declares its index variables in braces before its
+        // name.  The quantifier is static (it only constrains the field
+        // types), so it is read and dropped and the constructor is read.
+        while self.at(&TokenKind::LBrace) {
+            self.skip_balanced(&TokenKind::LBrace, &TokenKind::RBrace);
+        }
         let name = self.expect_ident("expected a constructor name")?;
         self.skip_static_annotations();
+        // `C (i1, i2) of (fields)` — the parens before `of` are the
+        // constructor's *static indices*, not its value fields.  They are
+        // read ahead of `of`, and when `of` follows, they are dropped and
+        // only the fields are kept.
+        if self.at(&TokenKind::LParen) {
+            let save = self.pos;
+            self.skip_balanced(&TokenKind::LParen, &TokenKind::RParen);
+            if self.at(&TokenKind::Of) {
+                self.advance();
+                return self.parse_ctor_fields(name);
+            }
+            self.pos = save;
+        }
         if self.at(&TokenKind::Of) {
             self.advance();
         }
+        self.parse_ctor_fields(name)
+    }
+
+    /// The value fields of a constructor, whether written `C of (a, b)`,
+    /// `C of a`, the of-less `C(a, b)`, or `C of ()`.
+    fn parse_ctor_fields(&mut self, name: String) -> Result<Ctor, CompileError> {
         let fields = if self.at(&TokenKind::LParen) {
             self.advance();
             // `of ()` — no fields at all.
@@ -5235,6 +5261,23 @@ mod tests {
         assert_eq!(d.ctors.len(), 2);
         assert_eq!(d.ctors[0].name, "BTnil");
         assert_eq!(d.ctors[1].name, "BTcons");
+    }
+
+    #[test]
+    fn a_constructor_quantified_over_its_indices_is_read() {
+        // `| {n:nat} btnode (a, n) of (int(n), a)` — an indexed
+        // constructor whose index variables are declared in braces before
+        // its name.  The quantifier is static, so it is skipped and the
+        // constructor read, with its fields.
+        let p = Parser::parse(
+            "datatype btree(a) = BTleaf | {n:nat} BTnode (a, n) of (int(n), a)\n",
+        )
+        .expect("parse");
+        let Def::Datatype(d) = &p.defs()[0] else {
+            panic!("got {:?}", &p.defs()[0])
+        };
+        assert_eq!(d.ctors[1].name, "BTnode");
+        assert_eq!(d.ctors[1].fields.len(), 2);
     }
 
     // --- template arguments in braces ------------------------------
