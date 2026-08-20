@@ -104,6 +104,14 @@ pub struct CallFacts {
     pub assumptions: Vec<SExp>,
     /// The callee's arithmetic variables that this call did not determine.
     pub undetermined: Vec<String>,
+    /// What those variables are called in [`Self::result_indices`].
+    ///
+    /// `undetermined` records what the *callee* named them; these are
+    /// the unspellable names they were renamed to.  Keeping them is what
+    /// lets a caller who knows the answer the call was supposed to give
+    /// work backwards to them — a nullary proof constructor determines
+    /// its own variables from nowhere else.
+    pub renamed: Vec<String>,
     /// The metric, instantiated at this call — what a recursive call must
     /// be shown to have decreased.
     pub metric: Vec<SExp>,
@@ -260,8 +268,19 @@ impl Signature {
         // turns "I could not work this out" into `Unknown` instead of
         // into a refutation drawn from facts about a different variable
         // entirely — the one wrong answer a checker may never give.
+        let renaming: Vec<(String, SExp)> = undetermined
+            .iter()
+            .map(|v| (v.clone(), fresh.var(v)))
+            .collect();
+        let renamed: Vec<String> = renaming
+            .iter()
+            .filter_map(|(_, e)| match e {
+                SExp::Var(n) => Some(n.clone()),
+                _ => None,
+            })
+            .collect();
         let mut subst = m.subst();
-        subst.extend(undetermined.iter().map(|v| (v.clone(), fresh.var(v))));
+        subst.extend(renaming);
 
         // The debt: what the quantifiers demand, plus what matching could
         // not settle by binding.  Both are read in the caller's terms.
@@ -316,6 +335,7 @@ impl Signature {
             result_ty,
             assumptions,
             undetermined,
+            renamed,
             metric,
             result_indices,
             witnesses,

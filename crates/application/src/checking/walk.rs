@@ -240,16 +240,33 @@ impl<'a> Walk<'a> {
     /// reports the program's mistakes, not its own ignorance.
     fn derives(&mut self, ret: &Ty, body: &Expr, name: &str, env: &mut IndexEnv) {
         let promised = proposition_indices(ret).unwrap_or_default();
-        let supplied = self.proof_indices(body, env);
+        let (supplied, open) = self.proof_indices(body, env);
         if promised.is_empty() || supplied.len() != promised.len() {
             return;
         }
+        // A derivation may carry variables of its own that nothing
+        // determined.  `MULbas` witnesses `{n:int} MUL(0, n, 0)` and
+        // takes no argument, so `n` comes back unspellable and the
+        // demand reads `n == n%0` — unprovable, and refused under the
+        // strict policy, which is every nullary proof constructor with a
+        // quantifier of its own.
+        //
+        // The proposition being promised is where the answer is.  The
+        // constructor is universally quantified over those variables, so
+        // reading them off the promise is instantiating it, not assuming
+        // it: whatever `MUL(0, n, 0)` the caller asked for, that is the
+        // `n` the derivation was offered at.
+        let mut m = Match::default();
+        for (p, a) in promised.iter().zip(&supplied) {
+            m.against(a, p, &open);
+        }
+        let subst = m.subst();
         let origin = Origin::Return {
             function: name.to_string(),
         };
         for (p, a) in promised.iter().zip(&supplied) {
             self.demand(
-                SExp::App("==".into(), vec![p.clone(), a.clone()]),
+                SExp::App("==".into(), vec![p.clone(), a.substitute(&subst)]),
                 origin.clone(),
                 env,
             );
@@ -328,7 +345,7 @@ impl<'a> Walk<'a> {
             // need division, and reading it out of the proposition needs
             // only a match.  This is what a `dataprop` is for.
             Expr::ProofPair(proof, value) => {
-                let supplied = self.proof_indices(proof, env);
+                let (supplied, _) = self.proof_indices(proof, env);
                 let mut m = Match::default();
                 if let (Some(promised), false) = (&promise.proposition, supplied.is_empty()) {
                     for (p, a) in promised.iter().zip(&supplied) {
@@ -395,15 +412,23 @@ impl<'a> Walk<'a> {
     /// A proof is not a value and has no single index: `FACT(n, n*r)`
     /// proves a claim about two numbers, and both are what the promised
     /// proposition is matched against.
-    fn proof_indices(&mut self, e: &Expr, env: &mut IndexEnv) -> Vec<SExp> {
+    /// Every index a proof term is indexed by, and the variables of its
+    /// own that are still open.
+    ///
+    /// A derivation may carry variables the call could not determine —
+    /// `{n:int} MULbas (0, n, 0)` has one, and no argument to read it
+    /// from.  They come back under unspellable names, and naming them is
+    /// what lets the caller determine them from the proposition it
+    /// promised.
+    fn proof_indices(&mut self, e: &Expr, env: &mut IndexEnv) -> (Vec<SExp>, Vec<String>) {
         if let Expr::Var(name) = e {
-            return env.indices_of(name);
+            return (env.indices_of(name), Vec::new());
         }
         self.last_call = None;
         self.expr(e, env);
         self.last_call
             .take()
-            .map(|f| f.result_indices)
+            .map(|f| (f.result_indices, f.renamed))
             .unwrap_or_default()
     }
 

@@ -516,3 +516,66 @@ fn an_inductive_step_that_claims_too_much_is_refused() {
     ));
     assert!(!errs.is_empty(), "a false inductive step was accepted");
 }
+
+/// Multiplication as a proposition — `MUL(m, n, p)` for `m * n == p`.
+///
+/// The point of it is the inductive constructor: it establishes
+/// `MUL(m+1, n, p+n)`, so a caller who wants `MUL(m+1, n, (m+1)*n)` owes
+/// the equation `p + n == (m+1)*n` with `p` standing for `m*n`. That is
+/// multiplying out, and nothing else.
+const MUL: &str = "\
+dataprop MUL (int, int, int) = \
+| {n:int} MULbas (0, n, 0) of () \
+| {m:nat} {n:int} {p:int} MULind (m+1, n, p+n) of (MUL (m, n, p)) \
+";
+
+#[test]
+fn an_induction_over_a_product_is_a_proof() {
+    // The obligation is `m*n + n == (m+1)*n`, which is true of every
+    // integer pair and needs no arithmetic beyond multiplying out. It
+    // was `Unknown` before, because `m*n` and `(m+1)*n` were abstracted
+    // to two variables named after their printed forms and nothing
+    // related them — so under the strict reading, which is the default,
+    // this proof was refused.
+    let errs = check(&format!(
+        "{MUL} prfun step {{m:nat}} {{n:int}} \
+         (pf: MUL (m, n, m*n)): MUL (m+1, n, (m+1)*n) = MULind (pf)"
+    ));
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn an_induction_over_a_product_that_claims_too_much_is_refused() {
+    // The same derivation, promising `(m+1)*n + 1`.  Multiplying out
+    // has to make false claims *more* visible, not fewer: a solver that
+    // proved this one would be worse than the abstraction it replaced.
+    let errs = check(&format!(
+        "{MUL} prfun step {{m:nat}} {{n:int}} \
+         (pf: MUL (m, n, m*n)): MUL (m+1, n, (m+1)*n+1) = MULind (pf)"
+    ));
+    assert!(!errs.is_empty(), "a false inductive step was accepted");
+}
+
+#[test]
+fn a_product_written_the_other_way_round_is_the_same_product() {
+    // `MULbas` establishes `MUL(0, n, 0)`.  Asking it for `MUL(0, n, 0)`
+    // with the zero spelled `n*0` is the same request, and used to be a
+    // different one.
+    let errs = check(&format!(
+        "{MUL} prfun base {{n:int}} (): MUL (0, n, n*0) = MULbas ()"
+    ));
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn zz_probe_mul_shapes() {
+    for (label, src) in [
+        ("plain 0", "prfun base {n:int} (): MUL (0, n, 0) = MULbas ()"),
+        ("n*0", "prfun base {n:int} (): MUL (0, n, n*0) = MULbas ()"),
+        ("0*n", "prfun base {n:int} (): MUL (0, n, 0*n) = MULbas ()"),
+        ("concrete", "prfun base (): MUL (0, 7, 0) = MULbas ()"),
+        ("concrete n*0", "prfun base (): MUL (0, 7, 7*0) = MULbas ()"),
+    ] {
+        println!("{label:>14}: {:?}", check(&format!("{MUL} {src}")));
+    }
+}

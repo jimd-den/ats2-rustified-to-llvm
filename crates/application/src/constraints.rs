@@ -41,10 +41,47 @@ pub enum Verdict {
     Unknown,
 }
 
-/// A linear form `sum(coeff * var) + constant`, read as `>= 0`.
+/// A product of atoms, in a canonical order.
+///
+/// This is the thing a [`Linear`] is linear *in*.  A plain variable is a
+/// monomial of one; `m*n` is a monomial of two, and so is `n*m`, because
+/// the atoms are sorted.  That sorting is the whole point: abstracting a
+/// product to its printed form made those two spellings unrelated
+/// variables, and no one who wrote both in one file would expect that.
+///
+/// An atom is a static variable, or the printed form of a term the
+/// solver cannot read at all — `fact(n)` and its kind.  Those are opaque
+/// but stably opaque, exactly as before, and now they multiply like
+/// anything else.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Mono(Vec<String>);
+
+impl Mono {
+    fn atom(name: impl Into<String>) -> Mono {
+        Mono(vec![name.into()])
+    }
+
+    /// The product of two monomials, canonical again.
+    fn times(&self, other: &Mono) -> Mono {
+        let mut atoms = self.0.clone();
+        atoms.extend(other.0.iter().cloned());
+        atoms.sort();
+        Mono(atoms)
+    }
+}
+
+/// A polynomial `sum(coeff * monomial) + constant`, read as `>= 0`.
+///
+/// It is still solved as though it were linear — each distinct monomial
+/// is eliminated as if it were a free variable of its own.  That is the
+/// same abstraction as before, and sound for the same reason: treating
+/// `m*n` as unconstrained by `m` and `n` admits *more* solutions, and a
+/// system with no solutions under a relaxation had none to begin with.
+/// What multiplying out adds is that terms which are equal really do
+/// come out equal, which the printed form could not manage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Linear {
-    terms: BTreeMap<String, i64>,
+    terms: BTreeMap<Mono, i64>,
     konst: i64,
 }
 
@@ -56,39 +93,112 @@ impl Linear {
         }
     }
 
-    fn var(name: String) -> Linear {
+    fn var(mono: Mono) -> Linear {
         let mut terms = BTreeMap::new();
-        terms.insert(name, 1);
+        terms.insert(mono, 1);
         Linear { terms, konst: 0 }
     }
 
-    fn scale(&self, k: i64) -> Linear {
-        Linear {
-            terms: self.terms.iter().map(|(v, c)| (v.clone(), c * k)).collect(),
-            konst: self.konst * k,
+    /// Every arithmetic result is checked, and `None` means *out of
+    /// range* rather than any claim about the program.
+    ///
+    /// Exact integer arithmetic overflows, and it overflows soonest
+    /// inside the elimination below, where coefficients multiply once
+    /// per round.  Wrapping would turn a large constant into a false
+    /// proof, and panicking would turn it into a compiler crash; a
+    /// solver that shrugs and answers `Unknown` is the only one of the
+    /// three that is both honest and usable.
+    fn scale(&self, k: i64) -> Option<Linear> {
+        let mut terms = BTreeMap::new();
+        for (v, c) in &self.terms {
+            let scaled = c.checked_mul(k)?;
+            if scaled != 0 {
+                terms.insert(v.clone(), scaled);
+            }
         }
+        Some(Linear {
+            terms,
+            konst: self.konst.checked_mul(k)?,
+        })
     }
 
-    fn add(&self, other: &Linear) -> Linear {
+    fn add(&self, other: &Linear) -> Option<Linear> {
         let mut terms = self.terms.clone();
         for (v, c) in &other.terms {
             let e = terms.entry(v.clone()).or_insert(0);
-            *e += c;
+            *e = e.checked_add(*c)?;
             if *e == 0 {
                 terms.remove(v);
             }
         }
-        Linear {
+        Some(Linear {
             terms,
-            konst: self.konst + other.konst,
+            konst: self.konst.checked_add(other.konst)?,
+        })
+    }
+
+    fn sub(&self, other: &Linear) -> Option<Linear> {
+        self.add(&other.scale(-1)?)
+    }
+
+    /// The product of two polynomials, multiplied out.
+    ///
+    /// This is what makes `(n+1)*m` and `n*m + m` the same term, which
+    /// is the shape every induction over a product has.
+    fn mul(&self, other: &Linear) -> Option<Linear> {
+        let mut out = Linear::constant(self.konst.checked_mul(other.konst)?);
+        let mut term = |mono: Mono, coeff: i64| -> Option<()> {
+            if coeff != 0 {
+                let e = out.terms.entry(mono.clone()).or_insert(0);
+                *e = e.checked_add(coeff)?;
+                if *e == 0 {
+                    out.terms.remove(&mono);
+                }
+            }
+            Some(())
+        };
+        for (m, c) in &self.terms {
+            for (n, d) in &other.terms {
+                term(m.times(n), c.checked_mul(*d)?)?;
+            }
+            term(m.clone(), c.checked_mul(other.konst)?)?;
+        }
+        for (n, d) in &other.terms {
+            term(n.clone(), self.konst.checked_mul(*d)?)?;
+        }
+        Some(out)
+    }
+
+    /// The same constraint with the common factor divided out.
+    ///
+    /// `2a + 4b + 6 >= 0` says exactly what `a + 2b + 3 >= 0` says, and
+    /// says it in numbers a third the size.  That matters because
+    /// elimination multiplies coefficients together once per variable
+    /// removed, so without this the arithmetic runs out of range on
+    /// systems that are otherwise perfectly ordinary.
+    ///
+    /// When the factor divides the terms but not the constant, the
+    /// constant is *floored* rather than left alone: over the integers
+    /// `2a + 3 >= 0` is `a >= -1.5` is `a >= -1`, which is a stronger
+    /// claim and a true one.  It is the same trick as reading `n > 0` as
+    /// `n >= 1`, one level down.
+    fn reduced(&self) -> Linear {
+        let mut g = 0i64;
+        for c in self.terms.values() {
+            g = gcd(g, *c);
+        }
+        if g <= 1 {
+            return self.clone();
+        }
+        Linear {
+            terms: self.terms.iter().map(|(v, c)| (v.clone(), c / g)).collect(),
+            // Floor division, which for a negative constant means
+            // rounding away from zero — `div_euclid` is exactly that.
+            konst: self.konst.div_euclid(g),
         }
     }
 
-    fn sub(&self, other: &Linear) -> Linear {
-        self.add(&other.scale(-1))
-    }
-
-    fn coeff(&self, var: &str) -> i64 {
+    fn coeff(&self, var: &Mono) -> i64 {
         self.terms.get(var).copied().unwrap_or(0)
     }
 
@@ -106,24 +216,19 @@ impl Linear {
 fn linearize(e: &SExp) -> Option<Linear> {
     match e {
         SExp::IntLit(n) => Some(Linear::constant(*n)),
-        SExp::Var(n) => Some(Linear::var(n.clone())),
+        SExp::Var(n) => Some(Linear::var(Mono::atom(n.clone()))),
         SExp::BoolLit(_) => None,
         SExp::App(op, args) => match (op.as_str(), args.len()) {
-            ("+", 2) => Some(linearize(&args[0])?.add(&linearize(&args[1])?)),
-            ("-", 2) => Some(linearize(&args[0])?.sub(&linearize(&args[1])?)),
-            ("~", 1) => Some(linearize(&args[0])?.scale(-1)),
-            ("*", 2) => {
-                let l = linearize(&args[0]);
-                let r = linearize(&args[1]);
-                match (l, r) {
-                    // A product with a constant side stays linear.
-                    (Some(a), Some(b)) if a.terms.is_empty() => Some(b.scale(a.konst)),
-                    (Some(a), Some(b)) if b.terms.is_empty() => Some(a.scale(b.konst)),
-                    // Anything else is opaque, but *stably* opaque.
-                    _ => Some(Linear::var(opaque_name(e))),
-                }
-            }
-            _ => Some(Linear::var(opaque_name(e))),
+            ("+", 2) => linearize(&args[0])?.add(&linearize(&args[1])?),
+            ("-", 2) => linearize(&args[0])?.sub(&linearize(&args[1])?),
+            ("~", 1) => linearize(&args[0])?.scale(-1),
+            // Multiplied out, rather than abstracted away.  Both sides
+            // are polynomials already, so the product is one too — and
+            // the monomials it produces are canonical, which is what
+            // makes `m*n` and `n*m` the same term and `(n+1)*m` the same
+            // term as `n*m + m`.
+            ("*", 2) => linearize(&args[0])?.mul(&linearize(&args[1])?),
+            _ => Some(Linear::var(Mono::atom(opaque_name(e)))),
         },
     }
 }
@@ -137,6 +242,17 @@ fn opaque_name(e: &SExp) -> String {
     format!("#{e}")
 }
 
+/// The greatest common divisor, on magnitudes, with `gcd(0, n) == |n|`.
+fn gcd(a: i64, b: i64) -> i64 {
+    let (mut a, mut b) = (a.saturating_abs(), b.saturating_abs());
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
+    }
+    a
+}
+
 /// A conjunction of `Linear >= 0` atoms, or `None` if the proposition
 /// falls outside the fragment.
 fn atoms(e: &SExp) -> Option<Vec<Linear>> {
@@ -147,29 +263,31 @@ fn atoms(e: &SExp) -> Option<Vec<Linear>> {
             out.extend(atoms(&args[1])?);
             Some(out)
         }
-        (">=", 2) => Some(vec![linearize(&args[0])?.sub(&linearize(&args[1])?)]),
+        (">=", 2) => Some(vec![difference(&args[0], &args[1])?]),
         // Over the integers `a > b` is `a - b - 1 >= 0`.  Tightening
         // here is what lets the rational elimination below decide goals
         // that are only true because the variables are whole numbers.
         (">", 2) => Some(vec![
-            linearize(&args[0])?
-                .sub(&linearize(&args[1])?)
-                .add(&Linear::constant(-1)),
+            difference(&args[0], &args[1])?.add(&Linear::constant(-1))?,
         ]),
-        ("<=", 2) => Some(vec![linearize(&args[1])?.sub(&linearize(&args[0])?)]),
+        ("<=", 2) => Some(vec![difference(&args[1], &args[0])?]),
         ("<", 2) => Some(vec![
-            linearize(&args[1])?
-                .sub(&linearize(&args[0])?)
-                .add(&Linear::constant(-1)),
+            difference(&args[1], &args[0])?.add(&Linear::constant(-1))?,
         ]),
         ("==", 2) | ("=", 2) => {
-            let d = linearize(&args[0])?.sub(&linearize(&args[1])?);
-            Some(vec![d.clone(), d.scale(-1)])
+            let d = difference(&args[0], &args[1])?;
+            Some(vec![d.scale(-1)?, d])
         }
         // `!=` and `||` are disjunctions, which a conjunctive system
         // cannot hold.  Dropping them costs strength, not soundness.
         _ => None,
     }
+}
+
+/// `a - b` as a polynomial, or `None` if either side is unreadable or
+/// the arithmetic will not fit.
+fn difference(a: &SExp, b: &SExp) -> Option<Linear> {
+    linearize(a)?.sub(&linearize(b)?)
 }
 
 /// The negations of a proposition, as alternatives.
@@ -178,12 +296,10 @@ fn atoms(e: &SExp) -> Option<Vec<Linear>> {
 /// single-atom systems, each of which must be refuted separately.
 fn negations(e: &SExp) -> Option<Vec<Linear>> {
     // `¬(L >= 0)` is `L <= -1`, i.e. `-L - 1 >= 0`.
-    Some(
-        atoms(e)?
-            .into_iter()
-            .map(|l| l.scale(-1).add(&Linear::constant(-1)))
-            .collect(),
-    )
+    atoms(e)?
+        .into_iter()
+        .map(|l| l.scale(-1)?.add(&Linear::constant(-1)))
+        .collect()
 }
 
 /// Whether a system of `>= 0` constraints has no rational solution.
@@ -219,10 +335,18 @@ fn is_unsatisfiable(system: &[Linear]) -> bool {
         let mut next = zero;
         for p in &pos {
             for n in &neg {
-                // Scale both so the variable cancels exactly.
+                // Scale both so the variable cancels exactly, then
+                // divide out whatever factor the two happened to share.
+                // A combination whose arithmetic will not fit is simply
+                // dropped: a system missing a constraint has *more*
+                // solutions, so if the remainder is still unsatisfiable
+                // the original certainly was.
                 let a = p.coeff(&var);
                 let b = -n.coeff(&var);
-                next.push(p.scale(b).add(&n.scale(a)));
+                let combined = p.scale(b).and_then(|p| n.scale(a).and_then(|n| p.add(&n)));
+                if let Some(l) = combined {
+                    next.push(l.reduced());
+                }
             }
         }
         if next.len() > BUDGET {
@@ -238,7 +362,8 @@ fn is_unsatisfiable(system: &[Linear]) -> bool {
 /// named static function such as `fact(n)`, or a product it cannot read.
 fn applications(e: &SExp, out: &mut Vec<SExp>) {
     if let SExp::App(op, args) = e {
-        if linearize(e).is_some_and(|l| l.terms.len() == 1 && l.terms.contains_key(&opaque_name(e)))
+        if linearize(e)
+            .is_some_and(|l| l.terms.len() == 1 && l.terms.contains_key(&Mono::atom(opaque_name(e))))
             && !out.contains(e)
         {
             out.push(e.clone());
@@ -275,7 +400,11 @@ fn congruences(hyps: &[SExp], goal: Option<&SExp>, base: &[Linear]) -> Vec<Linea
     let proves = |claim: &Linear| {
         // `claim >= 0` is entailed when denying it is impossible.
         let mut sys = base.to_vec();
-        sys.push(claim.scale(-1).add(&Linear::constant(-1)));
+        let Some(denial) = claim.scale(-1).and_then(|c| c.add(&Linear::constant(-1))) else {
+            // Out of range, so nothing was shown.
+            return false;
+        };
+        sys.push(denial);
         is_unsatisfiable(&sys)
     };
     let mut out = Vec::new();
@@ -290,17 +419,21 @@ fn congruences(hyps: &[SExp], goal: Option<&SExp>, base: &[Linear]) -> Vec<Linea
             let agree = xs
                 .iter()
                 .zip(ys)
-                .all(|(x, y)| match (linearize(x), linearize(y)) {
-                    (Some(x), Some(y)) => {
-                        let d = x.sub(&y);
-                        proves(&d) && proves(&d.scale(-1))
+                .all(|(x, y)| match difference(x, y) {
+                    Some(d) => {
+                        d.scale(-1).is_some_and(|m| proves(&d) && proves(&m))
                     }
-                    _ => false,
+                    None => false,
                 });
             if agree {
-                let d = Linear::var(opaque_name(a)).sub(&Linear::var(opaque_name(b)));
-                out.push(d.clone());
-                out.push(d.scale(-1));
+                let d = Linear::var(Mono::atom(opaque_name(a)))
+                    .sub(&Linear::var(Mono::atom(opaque_name(b))));
+                if let Some(d) = d {
+                    if let Some(m) = d.scale(-1) {
+                        out.push(d);
+                        out.push(m);
+                    }
+                }
             }
         }
     }
@@ -576,6 +709,65 @@ mod tests {
         let hyps = vec![app(">=", app("*", v("m"), v("n")), i(0))];
         let goal = app(">=", app("+", app("*", v("m"), v("n")), i(1)), i(0));
         assert_eq!(entails(&hyps, &goal), Verdict::Proved);
+    }
+
+    #[test]
+    fn a_product_is_the_same_product_written_backwards() {
+        // Abstracting on the printed form made `m*n` and `n*m` two
+        // unrelated variables, which is a loss of strength nobody
+        // writing the two spellings in one file would expect.
+        let hyps = vec![app("==", app("*", v("m"), v("n")), i(6))];
+        let goal = app("==", app("*", v("n"), v("m")), i(6));
+        assert_eq!(entails(&hyps, &goal), Verdict::Proved);
+    }
+
+    #[test]
+    fn a_product_over_a_sum_is_the_sum_of_the_products() {
+        // `(n+1)*m == n*m + m` is true of every integer pair and needs
+        // no arithmetic beyond multiplying out.  It is also the exact
+        // shape of an inductive step over a product, which is why it is
+        // worth having: `fact(n+1) == (n+1)*fact(n)` is unprovable
+        // without it.
+        let lhs = app("*", app("+", v("n"), i(1)), v("m"));
+        let rhs = app("+", app("*", v("n"), v("m")), v("m"));
+        assert_eq!(entails(&[], &app("==", lhs, rhs)), Verdict::Proved);
+    }
+
+    #[test]
+    fn a_product_of_three_does_not_care_how_it_was_bracketed() {
+        let left = app("*", app("*", v("a"), v("b")), v("c"));
+        let right = app("*", v("a"), app("*", v("b"), v("c")));
+        assert_eq!(entails(&[], &app("==", left, right)), Verdict::Proved);
+    }
+
+    #[test]
+    fn a_square_is_not_confused_with_its_root() {
+        // Multiplying out must not quietly make `n*n` into `n`: the
+        // whole value of the normal form is that distinct monomials
+        // stay distinct.
+        let goal = app("==", app("*", v("n"), v("n")), v("n"));
+        assert_ne!(entails(&[], &goal), Verdict::Proved);
+    }
+
+    #[test]
+    fn what_multiplying_out_cannot_reach_is_still_unknown() {
+        // `m >= 0 && n >= 0` implies `m*n >= 0`, and no amount of
+        // rearranging says so — it needs the sign rule for products,
+        // which this solver does not have.  Unknown, never Refuted: a
+        // solver that called this false would be lying.
+        let hyps = vec![app(">=", v("m"), i(0)), app(">=", v("n"), i(0))];
+        let goal = app(">=", app("*", v("m"), v("n")), i(0));
+        assert_eq!(entails(&hyps, &goal), Verdict::Unknown);
+    }
+
+    #[test]
+    fn a_product_too_big_to_hold_is_unknown_rather_than_a_panic() {
+        // Multiplying out is exact arithmetic on `i64`, and exact
+        // arithmetic overflows.  A compiler that panics on a large
+        // literal is worse than one that shrugs at it.
+        let big = i(i64::MAX / 2);
+        let goal = app(">=", app("*", big.clone(), app("*", big.clone(), v("n"))), i(0));
+        assert_eq!(entails(&[], &goal), Verdict::Unknown);
     }
 
     #[test]
