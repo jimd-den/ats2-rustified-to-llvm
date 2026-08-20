@@ -32,7 +32,14 @@ struct Scanner<'a> {
 
 impl<'a> Scanner<'a> {
     fn new(src: &'a str) -> Self {
-        Self { src, pos: 0, line: 1, col: 1, tokens: Vec::new(), errors: Vec::new() }
+        Self {
+            src,
+            pos: 0,
+            line: 1,
+            col: 1,
+            tokens: Vec::new(),
+            errors: Vec::new(),
+        }
     }
 
     /// The character at the cursor, if any.
@@ -86,7 +93,8 @@ impl<'a> Scanner<'a> {
             self.skip_trivia();
             let start = self.pos();
             let Some(c) = self.peek() else {
-                self.tokens.push(Token::new(TokenKind::Eof, Span::new(start, start)));
+                self.tokens
+                    .push(Token::new(TokenKind::Eof, Span::new(start, start)));
                 return;
             };
             self.scan_token(c, start);
@@ -100,7 +108,10 @@ impl<'a> Scanner<'a> {
         match c {
             'a'..='z' | 'A'..='Z' | '_' => self.scan_identifier(start),
             // `$break`, `$UN`, `$delay`: in ATS the `$` opens a name.
-            '$' if self.peek2().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') => {
+            '$' if self
+                .peek2()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_') =>
+            {
                 self.bump();
                 self.scan_identifier(start)
             }
@@ -218,7 +229,10 @@ impl<'a> Scanner<'a> {
             '#' => TokenKind::Hash,
             _ => {
                 self.bump();
-                self.error(Span::new(start, self.pos()), format!("unexpected character `{c}`"));
+                self.error(
+                    Span::new(start, self.pos()),
+                    format!("unexpected character `{c}`"),
+                );
                 return;
             }
         };
@@ -230,7 +244,9 @@ impl<'a> Scanner<'a> {
     fn skip_trivia(&mut self) {
         loop {
             match self.peek() {
-                Some(' ') | Some('\t') | Some('\r') | Some('\n') => { self.bump(); }
+                Some(' ') | Some('\t') | Some('\r') | Some('\n') => {
+                    self.bump();
+                }
                 Some('/') if self.peek2() == Some('/') => self.skip_line_comment(),
                 Some('(') if self.peek2() == Some('*') => {
                     let start = self.pos();
@@ -314,7 +330,9 @@ impl<'a> Scanner<'a> {
                     self.bump();
                     depth -= 1;
                 }
-                _ => { self.bump(); }
+                _ => {
+                    self.bump();
+                }
             }
         }
     }
@@ -400,7 +418,10 @@ impl<'a> Scanner<'a> {
             let text = text.to_string();
             return match text.parse::<f64>() {
                 Ok(v) => self.push(TokenKind::FloatLit(FloatBits::new(v)), start),
-                Err(_) => self.error(self.span_from(start), format!("`{text}` is not a valid number")),
+                Err(_) => self.error(
+                    self.span_from(start),
+                    format!("`{text}` is not a valid number"),
+                ),
             };
         }
         // A width/signedness suffix (`0ull`, `10L`, `3u`) says nothing to a
@@ -408,26 +429,44 @@ impl<'a> Scanner<'a> {
         let text = text.to_string();
         let suffix_begin = self.pos;
         while let Some(c) = self.peek() {
-            if matches!(c, 'u' | 'U' | 'l' | 'L') { self.bump(); } else { break; }
+            if matches!(c, 'u' | 'U' | 'l' | 'L') {
+                self.bump();
+            } else {
+                break;
+            }
         }
         let _ = suffix_begin;
         if let Some(c) = self.peek() {
             if c.is_ascii_alphanumeric() || c == '_' {
-                self.error(self.span_from(start), format!("invalid integer literal `{text}`"));
+                self.error(
+                    self.span_from(start),
+                    format!("invalid integer literal `{text}`"),
+                );
                 return;
             }
         }
-        let value = if is_hex { i64::from_str_radix(&text[2..], 16) } else { text.parse::<i64>() };
+        let value = if is_hex {
+            i64::from_str_radix(&text[2..], 16)
+        } else {
+            text.parse::<i64>()
+        };
         match value {
             Ok(v) => self.push(TokenKind::IntLit(v), start),
-            Err(_) => self.error(self.span_from(start), format!("integer literal `{text}` is out of range")),
+            Err(_) => self.error(
+                self.span_from(start),
+                format!("integer literal `{text}` is out of range"),
+            ),
         }
     }
 
     /// Consume every consecutive digit of the current literal.
     fn consume_digits(&mut self, hex: bool) {
         while let Some(c) = self.peek() {
-            let ok = if hex { c.is_ascii_hexdigit() } else { c.is_ascii_digit() };
+            let ok = if hex {
+                c.is_ascii_hexdigit()
+            } else {
+                c.is_ascii_digit()
+            };
             if ok {
                 self.bump();
             } else {
@@ -458,7 +497,9 @@ impl<'a> Scanner<'a> {
                     }
                     self.bump();
                 }
-                Some(_) => { self.bump(); }
+                Some(_) => {
+                    self.bump();
+                }
             }
         }
         let raw = &self.src[start.offset + 1..self.pos - 1];
@@ -470,7 +511,10 @@ impl<'a> Scanner<'a> {
     fn scan_char(&mut self, start: Pos) {
         self.bump(); // opening quote
         let byte = match self.peek() {
-            None => { self.error(self.span_from(start), "unterminated character literal"); return; }
+            None => {
+                self.error(self.span_from(start), "unterminated character literal");
+                return;
+            }
             Some('\\') => {
                 self.bump();
                 let Some(e) = self.bump() else {
@@ -478,7 +522,10 @@ impl<'a> Scanner<'a> {
                     return;
                 };
                 match e {
-                    'n' => b'\n', 't' => b'\t', 'r' => b'\r', '0'..='7' => {
+                    'n' => b'\n',
+                    't' => b'\t',
+                    'r' => b'\r',
+                    '0'..='7' => {
                         // an octal escape: up to three digits, `'\000'`
                         let mut v = e as u32 - '0' as u32;
                         while let Some(d @ '0'..='7') = self.peek() {
@@ -491,16 +538,28 @@ impl<'a> Scanner<'a> {
                         }
                         v as u8
                     }
-                    '\\' => b'\\', '\'' => b'\'', '"' => b'"', 'a' => 7, 'b' => 8, 'f' => 12, 'v' => 11,
+                    '\\' => b'\\',
+                    '\'' => b'\'',
+                    '"' => b'"',
+                    'a' => 7,
+                    'b' => 8,
+                    'f' => 12,
+                    'v' => 11,
                     other => {
-                        self.error(self.span_from(start), format!("unknown character escape `\\{other}`"));
+                        self.error(
+                            self.span_from(start),
+                            format!("unknown character escape `\\{other}`"),
+                        );
                         return;
                     }
                 }
             }
             Some(c) => {
                 if !c.is_ascii() {
-                    self.error(self.span_from(start), "only ASCII character literals are supported");
+                    self.error(
+                        self.span_from(start),
+                        "only ASCII character literals are supported",
+                    );
                     return;
                 }
                 self.bump();
@@ -508,7 +567,10 @@ impl<'a> Scanner<'a> {
             }
         };
         if self.peek() != Some('\'') {
-            self.error(self.span_from(start), "expected `'` to close the character literal");
+            self.error(
+                self.span_from(start),
+                "expected `'` to close the character literal",
+            );
             return;
         }
         self.bump();
@@ -559,7 +621,11 @@ mod tests {
     use ats2_domain::errors::ErrorKind;
 
     fn kinds(source: &str) -> Vec<TokenKind> {
-        Lexer::lex(source).expect("lex").into_iter().map(|t| t.kind).collect()
+        Lexer::lex(source)
+            .expect("lex")
+            .into_iter()
+            .map(|t| t.kind)
+            .collect()
     }
 
     #[test]
@@ -571,7 +637,10 @@ mod tests {
         // because it is the body of some `extern fun` declared nearby,
         // and a program without it links to nothing.
         let k = kinds("%{^\nint f (void) { return 1 ; }\n%}\nfun g (): int = 1");
-        assert_eq!(k[0], TokenKind::InlineC("\nint f (void) { return 1 ; }\n".into()));
+        assert_eq!(
+            k[0],
+            TokenKind::InlineC("\nint f (void) { return 1 ; }\n".into())
+        );
         assert_eq!(k[1], TokenKind::Fun, "the ATS after it is lexed as ATS");
     }
 
@@ -610,14 +679,26 @@ mod tests {
 
     #[test]
     fn keywords_are_recognized_as_keywords_not_identifiers() {
-        let k = kinds("datatype fun implement if then else let in end lam val true false andalso orelse mod");
+        let k = kinds(
+            "datatype fun implement if then else let in end lam val true false andalso orelse mod",
+        );
         let expected = vec![
-            TokenKind::Datatype, TokenKind::Fun, TokenKind::Implement,
-            TokenKind::If, TokenKind::Then, TokenKind::Else,
-            TokenKind::Let, TokenKind::In, TokenKind::End,
-            TokenKind::Lam, TokenKind::Val,
-            TokenKind::True, TokenKind::False,
-            TokenKind::Andalso, TokenKind::Orelse, TokenKind::Mod,
+            TokenKind::Datatype,
+            TokenKind::Fun,
+            TokenKind::Implement,
+            TokenKind::If,
+            TokenKind::Then,
+            TokenKind::Else,
+            TokenKind::Let,
+            TokenKind::In,
+            TokenKind::End,
+            TokenKind::Lam,
+            TokenKind::Val,
+            TokenKind::True,
+            TokenKind::False,
+            TokenKind::Andalso,
+            TokenKind::Orelse,
+            TokenKind::Mod,
             TokenKind::Eof,
         ];
         assert_eq!(k, expected);
@@ -762,16 +843,35 @@ mod tests {
     fn lexes_the_full_operator_and_punctuation_vocabulary() {
         let k = kinds("+ - * / ~ = <> < <= > >= -> => ( ) [ ] { } , ; : | . ! _ @ $ #");
         let expected = vec![
-            TokenKind::Plus, TokenKind::Minus, TokenKind::Star, TokenKind::Slash, TokenKind::Tilde,
-            TokenKind::Eq, TokenKind::Ne, TokenKind::Lt, TokenKind::Le,
-            TokenKind::Gt, TokenKind::Ge, TokenKind::Arrow, TokenKind::FatArrow,
-            TokenKind::LParen, TokenKind::RParen,
-            TokenKind::LBracket, TokenKind::RBracket,
-            TokenKind::LBrace, TokenKind::RBrace,
-            TokenKind::Comma, TokenKind::Semicolon, TokenKind::Colon,
-            TokenKind::Pipe, TokenKind::Dot, TokenKind::Bang,
+            TokenKind::Plus,
+            TokenKind::Minus,
+            TokenKind::Star,
+            TokenKind::Slash,
+            TokenKind::Tilde,
+            TokenKind::Eq,
+            TokenKind::Ne,
+            TokenKind::Lt,
+            TokenKind::Le,
+            TokenKind::Gt,
+            TokenKind::Ge,
+            TokenKind::Arrow,
+            TokenKind::FatArrow,
+            TokenKind::LParen,
+            TokenKind::RParen,
+            TokenKind::LBracket,
+            TokenKind::RBracket,
+            TokenKind::LBrace,
+            TokenKind::RBrace,
+            TokenKind::Comma,
+            TokenKind::Semicolon,
+            TokenKind::Colon,
+            TokenKind::Pipe,
+            TokenKind::Dot,
+            TokenKind::Bang,
             TokenKind::Underscore,
-            TokenKind::At, TokenKind::Dollar, TokenKind::Hash,
+            TokenKind::At,
+            TokenKind::Dollar,
+            TokenKind::Hash,
             TokenKind::Eof,
         ];
         assert_eq!(k, expected);
@@ -794,7 +894,11 @@ mod tests {
     fn every_stream_ends_in_exactly_one_eof() {
         for source in ["", "42", "fun f(): int = 1", "(* c *)"] {
             let tokens = Lexer::lex(source).expect("lex");
-            assert_eq!(tokens.last().expect("stream").kind, TokenKind::Eof, "src: {source}");
+            assert_eq!(
+                tokens.last().expect("stream").kind,
+                TokenKind::Eof,
+                "src: {source}"
+            );
             let eofs = tokens.iter().filter(|t| t.kind == TokenKind::Eof).count();
             assert_eq!(eofs, 1, "src: {source}");
         }
@@ -825,7 +929,10 @@ mod tests {
     fn spans_cover_a_multi_line_program() {
         let src = "fun f(): int =\n  1\n";
         let tokens = Lexer::lex(src).expect("lex");
-        let one = tokens.iter().find(|t| t.kind == TokenKind::IntLit(1)).expect("1");
+        let one = tokens
+            .iter()
+            .find(|t| t.kind == TokenKind::IntLit(1))
+            .expect("1");
         assert_eq!(one.span.start.line, 2);
         assert_eq!(one.span.start.column, 3);
     }
@@ -849,27 +956,32 @@ mod tests {
         assert!(errs.len() >= 2, "expected several errors, got {errs:?}");
     }
 
-#[cfg(test)]
-mod equality_tests {
-    use super::*;
+    #[cfg(test)]
+    mod equality_tests {
+        use super::*;
 
-    #[test]
-    fn double_equals_is_one_token_and_means_what_one_equals_means() {
-        // The static language writes `==`; the dynamic one writes `=`.
-        // They are the same relation, so they are the same token.
-        let tokens = Lexer::lex("i == j").expect("lex");
-        let kinds: Vec<&TokenKind> = tokens.iter().map(|t| &t.kind).collect();
-        assert_eq!(
-            kinds,
-            vec![&TokenKind::Ident("i".into()), &TokenKind::Eq, &TokenKind::Ident("j".into()), &TokenKind::Eof]
-        );
-    }
+        #[test]
+        fn double_equals_is_one_token_and_means_what_one_equals_means() {
+            // The static language writes `==`; the dynamic one writes `=`.
+            // They are the same relation, so they are the same token.
+            let tokens = Lexer::lex("i == j").expect("lex");
+            let kinds: Vec<&TokenKind> = tokens.iter().map(|t| &t.kind).collect();
+            assert_eq!(
+                kinds,
+                vec![
+                    &TokenKind::Ident("i".into()),
+                    &TokenKind::Eq,
+                    &TokenKind::Ident("j".into()),
+                    &TokenKind::Eof
+                ]
+            );
+        }
 
-    #[test]
-    fn a_single_equals_is_untouched() {
-        let tokens = Lexer::lex("x = 1").expect("lex");
-        assert_eq!(tokens[1].kind, TokenKind::Eq);
-        assert_eq!(tokens[2].kind, TokenKind::IntLit(1));
+        #[test]
+        fn a_single_equals_is_untouched() {
+            let tokens = Lexer::lex("x = 1").expect("lex");
+            assert_eq!(tokens[1].kind, TokenKind::Eq);
+            assert_eq!(tokens[2].kind, TokenKind::IntLit(1));
+        }
     }
-}
 }

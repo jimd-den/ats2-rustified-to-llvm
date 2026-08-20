@@ -13,8 +13,8 @@
 //! The compilation *process* lives in the application layer; the domain
 //! only describes the *data* that process consumes and produces.
 
-pub mod tokens;
-pub mod errors;
 pub mod ast;
-pub mod statics;
+pub mod errors;
 pub mod obligation;
+pub mod statics;
+pub mod tokens;

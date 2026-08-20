@@ -52,7 +52,10 @@ pub enum Def {
     Val(ValDef),
     /// `overload * with f` — the function to try when an operator's
     /// operands do not fit it natively.
-    Overload { op: String, func: String },
+    Overload {
+        op: String,
+        func: String,
+    },
     /// `#define NAME value` — a compile-time constant.  It is not a
     /// function and occupies no storage: every mention of `NAME` is
     /// replaced by `value` at emission time.
@@ -130,6 +133,13 @@ pub struct FunDef {
     pub params: Vec<Param>,
     pub ret: Ty,
     pub body: Expr,
+    /// Whether this defines a *proof* rather than a function.
+    ///
+    /// A `prfun` has a body like any other definition, and the body is
+    /// a derivation: the checker must read it, because a proof nobody
+    /// checks is an axiom wearing a proof's clothes.  The emitter must
+    /// not, because a proof occupies no storage and runs at no time.
+    pub proof: bool,
 }
 
 /// `implement main0() = body` (in this foundation: the program entry).
@@ -252,13 +262,17 @@ impl Ty {
             Ty::Proof(_, value) => value.erased(),
             Ty::Name(_) => self.clone(),
             Ty::App(n, args) => Ty::App(n.clone(), args.iter().map(Ty::erased).collect()),
-            Ty::Fun(args, ret) => {
-                Ty::Fun(args.iter().map(Ty::erased).collect(), Box::new(ret.erased()))
-            }
+            Ty::Fun(args, ret) => Ty::Fun(
+                args.iter().map(Ty::erased).collect(),
+                Box::new(ret.erased()),
+            ),
             Ty::Tuple(items) => Ty::Tuple(items.iter().map(Ty::erased).collect()),
-            Ty::Record(fields) => {
-                Ty::Record(fields.iter().map(|(n, t)| (n.clone(), t.erased())).collect())
-            }
+            Ty::Record(fields) => Ty::Record(
+                fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), t.erased()))
+                    .collect(),
+            ),
         }
     }
 
@@ -308,7 +322,17 @@ pub enum BinOp {
 impl BinOp {
     /// Whether this operator yields a `bool` rather than an `int`.
     pub fn is_comparison(self) -> bool {
-        matches!(self, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Andalso | BinOp::Orelse)
+        matches!(
+            self,
+            BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Le
+                | BinOp::Gt
+                | BinOp::Ge
+                | BinOp::Andalso
+                | BinOp::Orelse
+        )
     }
 }
 
@@ -520,7 +544,6 @@ impl Expr {
             }
         }
     }
-
 }
 
 /// A pattern: the left-hand side of a `case` arm.
@@ -566,7 +589,11 @@ impl Pattern {
 
     fn collect_names(&self, out: &mut Vec<String>) {
         match self {
-            Pattern::Wildcard | Pattern::Int(_) | Pattern::Char(_) | Pattern::Bool(_) | Pattern::Str(_) => {}
+            Pattern::Wildcard
+            | Pattern::Int(_)
+            | Pattern::Char(_)
+            | Pattern::Bool(_)
+            | Pattern::Str(_) => {}
             Pattern::Var(n) => out.push(n.clone()),
             Pattern::Ctor(_, fields) => {
                 for f in fields {
@@ -635,7 +662,11 @@ mod tests {
     }
 
     fn param(name: &str, t: &str) -> Param {
-        Param { name: name.to_string(), ty: ty(t), borrowed: false }
+        Param {
+            name: name.to_string(),
+            ty: ty(t),
+            borrowed: false,
+        }
     }
 
     fn int(n: i64) -> Expr {
@@ -654,16 +685,17 @@ mod tests {
             Def::Fun(FunDef {
                 universals: vec![],
                 existentials: vec![],
-            metric: vec![],
-            ty_params: vec![],
+                metric: vec![],
+                ty_params: vec![],
                 name: "f".into(),
                 params: vec![],
                 ret: ty("int"),
                 body: int(1),
+                proof: false,
             }),
             Def::Implement(ImplementDef {
-            ty_params: vec![],
-            instance: vec![],
+                ty_params: vec![],
+                instance: vec![],
                 name: "main0".into(),
                 params: vec![],
                 ret: None,
@@ -684,8 +716,14 @@ mod tests {
             name: "list".into(),
             ty_params: vec!["a".into()],
             ctors: vec![
-                Ctor { name: "nil".into(), fields: vec![] },
-                Ctor { name: "cons".into(), fields: vec![ty("a"), ty("list")] },
+                Ctor {
+                    name: "nil".into(),
+                    fields: vec![],
+                },
+                Ctor {
+                    name: "cons".into(),
+                    fields: vec![ty("a"), ty("list")],
+                },
             ],
         };
         assert_eq!(d.name, "list");
@@ -708,14 +746,12 @@ mod tests {
             params: vec![param("x", "int"), param("y", "int")],
             ret: ty("int"),
             body: Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(var("y"))),
+            proof: false,
         };
         assert_eq!(f.params.len(), 2);
         assert_eq!(f.params[1].name, "y");
         assert_eq!(f.ret, ty("int"));
-        assert!(matches!(
-            f.body,
-            Expr::BinOp(BinOp::Add, _, _)
-        ));
+        assert!(matches!(f.body, Expr::BinOp(BinOp::Add, _, _)));
     }
 
     #[test]
@@ -746,7 +782,10 @@ mod tests {
     fn type_application_carries_a_name_and_arguments() {
         let applied = Ty::App("list".into(), vec![ty("a")]);
         assert_eq!(applied, Ty::App("list".into(), vec![Ty::Name("a".into())]));
-        let nested = Ty::App("list".into(), vec![Ty::App("pair".into(), vec![ty("a"), ty("b")])]);
+        let nested = Ty::App(
+            "list".into(),
+            vec![Ty::App("pair".into(), vec![ty("a"), ty("b")])],
+        );
         assert!(matches!(nested, Ty::App(_, args) if args.len() == 1));
     }
 
@@ -775,7 +814,11 @@ mod tests {
             Expr::UnaryNeg(Box::new(int(1))),
             Expr::BinOp(BinOp::Add, Box::new(int(1)), Box::new(int(2))),
             Expr::Call(Box::new(var("f")), vec![int(1)]),
-            Expr::IfThenElse(Box::new(Expr::BoolLit(true)), Box::new(int(1)), Box::new(int(2))),
+            Expr::IfThenElse(
+                Box::new(Expr::BoolLit(true)),
+                Box::new(int(1)),
+                Box::new(int(2)),
+            ),
             Expr::Let(vec![], Box::new(int(1))),
             Expr::Lam(vec![param("x", "int")], None, Box::new(var("x"))),
             Expr::MacroCall("println!".into(), vec![Expr::StrLit("hi".into())]),
@@ -790,9 +833,19 @@ mod tests {
     #[test]
     fn every_binop_variant_is_constructible() {
         let ops: Vec<BinOp> = vec![
-            BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div, BinOp::Mod,
-            BinOp::Eq, BinOp::Ne, BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge,
-            BinOp::Andalso, BinOp::Orelse,
+            BinOp::Add,
+            BinOp::Sub,
+            BinOp::Mul,
+            BinOp::Div,
+            BinOp::Mod,
+            BinOp::Eq,
+            BinOp::Ne,
+            BinOp::Lt,
+            BinOp::Le,
+            BinOp::Gt,
+            BinOp::Ge,
+            BinOp::Andalso,
+            BinOp::Orelse,
         ];
         assert_eq!(ops.len(), 13);
         assert!(ops.iter().all(|o| *o != BinOp::Add || o == &BinOp::Add));
@@ -807,7 +860,10 @@ mod tests {
 
     #[test]
     fn a_variable_pattern_binds_its_name() {
-        assert_eq!(Pattern::Var("x".into()).bound_names(), vec!["x".to_string()]);
+        assert_eq!(
+            Pattern::Var("x".into()).bound_names(),
+            vec!["x".to_string()]
+        );
     }
 
     #[test]
@@ -840,7 +896,9 @@ mod tests {
                 (Pattern::Var("other".into()), Expr::IntLit(1)),
             ],
         );
-        let Expr::Case(scrutinee, arms) = &c else { panic!("expected a case") };
+        let Expr::Case(scrutinee, arms) = &c else {
+            panic!("expected a case")
+        };
         assert_eq!(**scrutinee, Expr::Var("xs".into()));
         assert_eq!(arms.len(), 2);
     }
@@ -850,13 +908,27 @@ mod tests {
     #[test]
     fn a_let_bind_is_immutable_by_default() {
         // `val x = 1` binds a value; `var x = 1` binds a *cell*.
-        let bind = LetBind { opened: Vec::new(), proof: false, name: Some("x".into()), ty: None, value: Expr::IntLit(1), mutable: false };
+        let bind = LetBind {
+            opened: Vec::new(),
+            proof: false,
+            name: Some("x".into()),
+            ty: None,
+            value: Expr::IntLit(1),
+            mutable: false,
+        };
         assert!(!bind.mutable);
     }
 
     #[test]
     fn a_var_binding_is_marked_mutable() {
-        let bind = LetBind { opened: Vec::new(), proof: false, name: Some("x".into()), ty: Some(ty("int")), value: Expr::IntLit(0), mutable: true };
+        let bind = LetBind {
+            opened: Vec::new(),
+            proof: false,
+            name: Some("x".into()),
+            ty: Some(ty("int")),
+            value: Expr::IntLit(0),
+            mutable: true,
+        };
         assert!(bind.mutable);
         assert_eq!(bind.name.as_deref(), Some("x"));
     }
@@ -864,7 +936,9 @@ mod tests {
     #[test]
     fn assignment_names_its_target_and_its_value() {
         let a = Expr::Assign("count".into(), Box::new(Expr::IntLit(7)));
-        let Expr::Assign(name, value) = &a else { panic!("expected an assignment") };
+        let Expr::Assign(name, value) = &a else {
+            panic!("expected an assignment")
+        };
         assert_eq!(name, "count");
         assert_eq!(**value, Expr::IntLit(7));
     }
@@ -875,7 +949,9 @@ mod tests {
             Box::new(Expr::BoolLit(true)),
             Box::new(Expr::MacroCall("println!".into(), vec![])),
         );
-        let Expr::While(cond, body) = &w else { panic!("expected a while loop") };
+        let Expr::While(cond, body) = &w else {
+            panic!("expected a while loop")
+        };
         assert_eq!(**cond, Expr::BoolLit(true));
         assert_eq!(**body, Expr::MacroCall("println!".into(), vec![]));
     }
@@ -885,11 +961,17 @@ mod tests {
         // `for (i := 0; i < 3; i := i + 1) body`
         let f = Expr::For(
             Box::new(Expr::Assign("i".into(), Box::new(Expr::IntLit(0)))),
-            Box::new(Expr::BinOp(BinOp::Lt, Box::new(Expr::Var("i".into())), Box::new(Expr::IntLit(3)))),
+            Box::new(Expr::BinOp(
+                BinOp::Lt,
+                Box::new(Expr::Var("i".into())),
+                Box::new(Expr::IntLit(3)),
+            )),
             Box::new(Expr::Assign("i".into(), Box::new(Expr::IntLit(1)))),
             Box::new(Expr::Unit),
         );
-        let Expr::For(init, cond, step, body) = &f else { panic!("expected a for loop") };
+        let Expr::For(init, cond, step, body) = &f else {
+            panic!("expected a for loop")
+        };
         assert_eq!(**init, Expr::Assign("i".into(), Box::new(Expr::IntLit(0))));
         assert!(matches!(**cond, Expr::BinOp(BinOp::Lt, _, _)));
         assert_eq!(**step, Expr::Assign("i".into(), Box::new(Expr::IntLit(1))));
@@ -921,6 +1003,7 @@ mod tests {
             params: vec![],
             ret: ty("int"),
             body: int(1),
+            proof: false,
         })]);
         let b = a.clone();
         assert_eq!(a, b);
@@ -935,8 +1018,8 @@ mod tests {
             Def::Fun(FunDef {
                 universals: vec![],
                 existentials: vec![],
-            metric: vec![],
-            ty_params: vec![],
+                metric: vec![],
+                ty_params: vec![],
                 name: "fact".into(),
                 params: vec![param("n", "int")],
                 ret: ty("int"),
@@ -946,26 +1029,37 @@ mod tests {
                     Box::new(Expr::BinOp(
                         BinOp::Mul,
                         Box::new(var("n")),
-                        Box::new(Expr::Call(Box::new(var("fact")), vec![
-                            Expr::BinOp(BinOp::Sub, Box::new(var("n")), Box::new(int(1))),
-                        ])),
+                        Box::new(Expr::Call(
+                            Box::new(var("fact")),
+                            vec![Expr::BinOp(
+                                BinOp::Sub,
+                                Box::new(var("n")),
+                                Box::new(int(1)),
+                            )],
+                        )),
                     )),
                 ),
+                proof: false,
             }),
             Def::Implement(ImplementDef {
-            ty_params: vec![],
-            instance: vec![],
+                ty_params: vec![],
+                instance: vec![],
                 name: "main0".into(),
                 params: vec![],
                 ret: None,
                 body: Expr::MacroCall(
                     "println!".into(),
-                    vec![Expr::StrLit("fact(5) = ".into()), Expr::Call(Box::new(var("fact")), vec![int(5)])],
+                    vec![
+                        Expr::StrLit("fact(5) = ".into()),
+                        Expr::Call(Box::new(var("fact")), vec![int(5)]),
+                    ],
                 ),
             }),
         ]);
         assert_eq!(program.defs().len(), 2);
-        let Def::Fun(fact) = &program.defs()[0] else { panic!("expected fun") };
+        let Def::Fun(fact) = &program.defs()[0] else {
+            panic!("expected fun")
+        };
         assert_eq!(fact.name, "fact");
         assert_eq!(fact.params[0].name, "n");
     }

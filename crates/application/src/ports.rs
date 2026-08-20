@@ -132,6 +132,7 @@ mod contract_tests {
             params: vec![],
             ret: Ty::Name("int".into()),
             body: Expr::IntLit(1),
+            proof: false,
         })])
     }
 
@@ -156,14 +157,19 @@ mod contract_tests {
     impl crate::ports::ToolchainPort for FakeToolchain {
         fn link_all(&self, inputs: &[std::path::PathBuf], output: &Path) -> Result<(), String> {
             let first = inputs.first().cloned().unwrap_or_default();
-            self.linked.borrow_mut().push((first.to_string_lossy().into_owned(), output.to_string_lossy().into_owned()));
+            self.linked.borrow_mut().push((
+                first.to_string_lossy().into_owned(),
+                output.to_string_lossy().into_owned(),
+            ));
             Ok(())
         }
     }
 
     impl crate::ports::OutputPort for FakeOutput {
         fn write(&self, path: &Path, contents: &str) -> Result<(), String> {
-            self.writes.borrow_mut().push((path.to_string_lossy().into_owned(), contents.to_string()));
+            self.writes
+                .borrow_mut()
+                .push((path.to_string_lossy().into_owned(), contents.to_string()));
             Ok(())
         }
     }
@@ -181,11 +187,17 @@ mod contract_tests {
     // --- contract tests below stay readable)
 
     fn fake_parser() -> FakeParser {
-        FakeParser { calls: RefCell::new(0), last_source: RefCell::new(None) }
+        FakeParser {
+            calls: RefCell::new(0),
+            last_source: RefCell::new(None),
+        }
     }
 
     fn fake_emitter() -> FakeEmitter {
-        FakeEmitter { calls: RefCell::new(0), last_program: RefCell::new(None) }
+        FakeEmitter {
+            calls: RefCell::new(0),
+            last_program: RefCell::new(None),
+        }
     }
 
     // --- parser port contract --------------------------------------
@@ -197,7 +209,10 @@ mod contract_tests {
         let program = port.parse("fun f(): int = 1").expect("parse");
         assert_eq!(program.defs().len(), 1);
         assert_eq!(*parser.calls.borrow(), 1);
-        assert_eq!(parser.last_source.borrow().as_deref(), Some("fun f(): int = 1"));
+        assert_eq!(
+            parser.last_source.borrow().as_deref(),
+            Some("fun f(): int = 1")
+        );
     }
 
     #[test]
@@ -223,7 +238,10 @@ mod contract_tests {
         let ir = port.emit(&canned_program()).expect("emit");
         assert_eq!(ir, "define i64 @f() { ret i64 1 }");
         assert_eq!(*emitter.calls.borrow(), 1);
-        assert_eq!(emitter.last_program.borrow().as_ref(), Some(&canned_program()));
+        assert_eq!(
+            emitter.last_program.borrow().as_ref(),
+            Some(&canned_program())
+        );
     }
 
     #[test]
@@ -243,7 +261,9 @@ mod contract_tests {
 
     #[test]
     fn toolchain_port_links_named_paths() {
-        let toolchain = FakeToolchain { linked: RefCell::new(vec![]) };
+        let toolchain = FakeToolchain {
+            linked: RefCell::new(vec![]),
+        };
         let port: &dyn crate::ports::ToolchainPort = &toolchain;
         let r = port.link(Path::new("out.ll"), Path::new("a.out"));
         assert!(r.is_ok());
@@ -262,7 +282,8 @@ mod contract_tests {
         }
         let port: &dyn crate::ports::ToolchainPort = &FailingToolchain;
         assert_eq!(
-            port.link(Path::new("a.ll"), Path::new("a.out")).unwrap_err(),
+            port.link(Path::new("a.ll"), Path::new("a.out"))
+                .unwrap_err(),
             "clang: error: linker command failed"
         );
     }
@@ -271,13 +292,18 @@ mod contract_tests {
 
     #[test]
     fn output_port_writes_named_text() {
-        let output = FakeOutput { writes: RefCell::new(vec![]) };
+        let output = FakeOutput {
+            writes: RefCell::new(vec![]),
+        };
         let port: &dyn crate::ports::OutputPort = &output;
         let r = port.write(Path::new("out.ll"), "define void @main()");
         assert!(r.is_ok());
         let writes = output.writes.borrow();
         assert_eq!(writes.len(), 1);
-        assert_eq!(writes[0], ("out.ll".to_string(), "define void @main()".to_string()));
+        assert_eq!(
+            writes[0],
+            ("out.ll".to_string(), "define void @main()".to_string())
+        );
     }
 
     #[test]

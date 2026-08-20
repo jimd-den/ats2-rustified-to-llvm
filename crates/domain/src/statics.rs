@@ -128,9 +128,10 @@ impl SExp {
                 .map(|(_, v)| v.clone())
                 .unwrap_or_else(|| self.clone()),
             SExp::IntLit(_) | SExp::BoolLit(_) => self.clone(),
-            SExp::App(f, args) => {
-                SExp::App(f.clone(), args.iter().map(|a| a.substitute(subst)).collect())
-            }
+            SExp::App(f, args) => SExp::App(
+                f.clone(),
+                args.iter().map(|a| a.substitute(subst)).collect(),
+            ),
         }
     }
 }
@@ -143,10 +144,14 @@ impl fmt::Display for SExp {
             SExp::Var(n) => write!(f, "{n}"),
             SExp::IntLit(n) => write!(f, "{n}"),
             SExp::BoolLit(b) => write!(f, "{b}"),
-            SExp::App(op, args) if args.len() == 2 && !op.chars().next().is_some_and(char::is_alphabetic) => {
+            SExp::App(op, args)
+                if args.len() == 2 && !op.chars().next().is_some_and(char::is_alphabetic) =>
+            {
                 write!(f, "{} {op} {}", args[0], args[1])
             }
-            SExp::App(op, args) if args.len() == 1 && !op.chars().next().is_some_and(char::is_alphabetic) => {
+            SExp::App(op, args)
+                if args.len() == 1 && !op.chars().next().is_some_and(char::is_alphabetic) =>
+            {
                 write!(f, "{op}{}", args[0])
             }
             SExp::App(op, args) => {
@@ -174,7 +179,11 @@ impl Quant {
     /// Everything a body may assume, given this quantifier: the guard,
     /// plus whatever the sorts themselves promise.
     pub fn hypotheses(&self) -> Vec<SExp> {
-        let mut out: Vec<SExp> = self.vars.iter().filter_map(|(n, s)| s.refinement(n)).collect();
+        let mut out: Vec<SExp> = self
+            .vars
+            .iter()
+            .filter_map(|(n, s)| s.refinement(n))
+            .collect();
         out.extend(self.guard.clone());
         out
     }
@@ -188,11 +197,17 @@ mod tests {
     fn nat_and_pos_are_int_with_a_predicate() {
         assert_eq!(
             Sort::from_name("nat").refinement("n"),
-            Some(SExp::App(">=".into(), vec![SExp::Var("n".into()), SExp::IntLit(0)]))
+            Some(SExp::App(
+                ">=".into(),
+                vec![SExp::Var("n".into()), SExp::IntLit(0)]
+            ))
         );
         assert_eq!(
             Sort::from_name("pos").refinement("n"),
-            Some(SExp::App(">".into(), vec![SExp::Var("n".into()), SExp::IntLit(0)]))
+            Some(SExp::App(
+                ">".into(),
+                vec![SExp::Var("n".into()), SExp::IntLit(0)]
+            ))
         );
         assert_eq!(Sort::from_name("int").refinement("n"), None);
         assert!(Sort::from_name("nat").is_arithmetic());
@@ -203,7 +218,10 @@ mod tests {
     fn a_quantifier_offers_its_sorts_predicates_as_hypotheses() {
         let q = Quant {
             vars: vec![("m".into(), Sort::Nat), ("n".into(), Sort::Int)],
-            guard: Some(SExp::App(">".into(), vec![SExp::Var("m".into()), SExp::Var("n".into())])),
+            guard: Some(SExp::App(
+                ">".into(),
+                vec![SExp::Var("m".into()), SExp::Var("n".into())],
+            )),
         };
         let h = q.hypotheses();
         assert_eq!(h.len(), 2); // `m >= 0` from the sort, and the guard

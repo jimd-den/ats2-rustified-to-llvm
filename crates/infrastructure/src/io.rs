@@ -27,7 +27,11 @@ mod tests {
 
     fn temp_path(tag: &str) -> std::path::PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("ats2llvm-io-test-{tag}-{}-{}", std::process::id(), n))
+        std::env::temp_dir().join(format!(
+            "ats2llvm-io-test-{tag}-{}-{}",
+            std::process::id(),
+            n
+        ))
     }
 
     #[test]

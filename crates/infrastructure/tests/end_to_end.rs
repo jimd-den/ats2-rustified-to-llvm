@@ -76,7 +76,12 @@ fn the_emitted_ir_executes_under_lli() {
     std::fs::write(&ir_path, &ir).expect("write ir");
     let out = Command::new("lli").arg(&ir_path).output().expect("run lli");
     let _ = std::fs::remove_file(&ir_path);
-    assert!(out.status.success(), "lli failed:\n{}\nstderr: {}", ir, String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "lli failed:\n{}\nstderr: {}",
+        ir,
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(stdout, "fact(5) = 120\n", "unexpected output: {stdout:?}");
 }
@@ -114,12 +119,19 @@ fn a_program_that_brought_its_own_c_is_compiled_with_it() {
     let ir = dir.join("foreign.ll");
     let bin = dir.join("foreign");
     let uc = CompileExecutableUseCase::new(Parser, LlvmIrEmitter, ClangToolchain, FileOutput);
-    uc.execute(source, &ir, &bin).expect("the program should build");
+    uc.execute(source, &ir, &bin)
+        .expect("the program should build");
 
     // The C was written where the IR is, because that is where the other
     // half of the program already is.
-    assert!(ir.with_extension("c").exists(), "the C block was not written out");
+    assert!(
+        ir.with_extension("c").exists(),
+        "the C block was not written out"
+    );
 
     let out = Command::new(&bin).output().expect("run the linked program");
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "triple 14 = 42");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "triple 14 = 42"
+    );
 }

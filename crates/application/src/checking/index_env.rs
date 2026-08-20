@@ -174,7 +174,7 @@ impl IndexEnv {
 mod tests {
     use super::*;
     use ats2_domain::ast::Ty;
-use ats2_domain::statics::{SExp, Sort};
+    use ats2_domain::statics::{SExp, Sort};
 
     #[test]
     fn a_parameter_is_known_by_the_static_term_that_indexes_it() {
@@ -200,7 +200,10 @@ use ats2_domain::statics::{SExp, Sort};
         // hypothesis: declaring the variable is what puts it in scope.
         let mut env = IndexEnv::new();
         env.declare("n", &Sort::Nat);
-        assert!(env.hyps().contains(&SExp::App(">=".into(), vec![SExp::Var("n".into()), SExp::IntLit(0)])));
+        assert!(env.hyps().contains(&SExp::App(
+            ">=".into(),
+            vec![SExp::Var("n".into()), SExp::IntLit(0)]
+        )));
     }
 
     #[test]
@@ -265,13 +268,21 @@ use ats2_domain::statics::{SExp, Sort};
         env.forget("x");
         let after = env.index_of("x");
         assert_ne!(after, Some(SExp::IntLit(3)));
-        assert!(after.is_some(), "the cell still has *some* value, just an unknown one");
+        assert!(
+            after.is_some(),
+            "the cell still has *some* value, just an unknown one"
+        );
     }
 
     #[test]
     fn fresh_names_cannot_collide_with_names_the_source_wrote() {
         let mut env = IndexEnv::new();
-        let SExp::Var(name) = env.fresh("n") else { panic!("a variable") };
-        assert!(name.contains('%'), "fresh names must be unspellable in ATS: {name}");
+        let SExp::Var(name) = env.fresh("n") else {
+            panic!("a variable")
+        };
+        assert!(
+            name.contains('%'),
+            "fresh names must be unspellable in ATS: {name}"
+        );
     }
 }

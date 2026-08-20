@@ -81,7 +81,11 @@ pub struct Arg {
 
 impl Arg {
     pub fn value(term: SExp) -> Arg {
-        Arg { value: Some(term), size: None, ty: None }
+        Arg {
+            value: Some(term),
+            size: None,
+            ty: None,
+        }
     }
 
     pub fn unknown() -> Arg {
@@ -139,15 +143,23 @@ impl Signature {
         if ty_args.is_empty() || ty_args.len() != self.ty_params.len() {
             return self.clone();
         }
-        let subst: HashMap<String, Ty> =
-            self.ty_params.iter().cloned().zip(ty_args.iter().cloned()).collect();
+        let subst: HashMap<String, Ty> = self
+            .ty_params
+            .iter()
+            .cloned()
+            .zip(ty_args.iter().cloned())
+            .collect();
         Signature {
             name: self.name.clone(),
             // Its parameters are chosen; it abstracts over nothing now.
             ty_params: Vec::new(),
             universals: self.universals.clone(),
             existentials: self.existentials.clone(),
-            params: self.params.iter().map(|p| substitute_ty(p, &subst)).collect(),
+            params: self
+                .params
+                .iter()
+                .map(|p| substitute_ty(p, &subst))
+                .collect(),
             borrowed: self.borrowed.clone(),
             ret: substitute_ty(&self.ret, &subst),
             metric: self.metric.clone(),
@@ -237,8 +249,11 @@ impl Signature {
                 },
             }
         }
-        let undetermined: Vec<String> =
-            vars.iter().filter(|v| m.get(v).is_none()).cloned().collect();
+        let undetermined: Vec<String> = vars
+            .iter()
+            .filter(|v| m.get(v).is_none())
+            .cloned()
+            .collect();
         // A variable the call did not determine is still the *callee's*
         // variable, and it must not be readable as the caller's one of
         // the same name.  Renaming it to something unspellable is what
@@ -281,8 +296,12 @@ impl Signature {
             result_subst.extend(renaming);
         }
 
-        let result_indices: Vec<SExp> =
-            self.ret.indices().iter().map(|t| t.substitute(&result_subst)).collect();
+        let result_indices: Vec<SExp> = self
+            .ret
+            .indices()
+            .iter()
+            .map(|t| t.substitute(&result_subst))
+            .collect();
         // A value has one index; a proof has one per number its
         // proposition is about, and none of them is "the" result.
         let result = match result_indices.as_slice() {
@@ -438,7 +457,10 @@ impl CtorTable {
                 }
                 table.by_datatype.insert(
                     d.name.clone(),
-                    (d.ty_params.clone(), d.ctors.iter().map(|c| c.fields.clone()).collect()),
+                    (
+                        d.ty_params.clone(),
+                        d.ctors.iter().map(|c| c.fields.clone()).collect(),
+                    ),
                 );
             }
         }
@@ -505,12 +527,11 @@ pub fn substitute_indices(ty: &Ty, subst: &[(String, SExp)]) -> Ty {
             Box::new(substitute_indices(base, subst)),
             idx.iter().map(|t| t.substitute(subst)).collect(),
         ),
-        Ty::App(n, args) => {
-            Ty::App(n.clone(), args.iter().map(|a| substitute_indices(a, subst)).collect())
-        }
-        Ty::Tuple(items) => {
-            Ty::Tuple(items.iter().map(|i| substitute_indices(i, subst)).collect())
-        }
+        Ty::App(n, args) => Ty::App(
+            n.clone(),
+            args.iter().map(|a| substitute_indices(a, subst)).collect(),
+        ),
+        Ty::Tuple(items) => Ty::Tuple(items.iter().map(|i| substitute_indices(i, subst)).collect()),
         Ty::Proof(p, v) => Ty::Proof(
             Box::new(substitute_indices(p, subst)),
             Box::new(substitute_indices(v, subst)),
@@ -520,7 +541,9 @@ pub fn substitute_indices(ty: &Ty, subst: &[(String, SExp)]) -> Ty {
             Box::new(substitute_indices(r, subst)),
         ),
         Ty::Record(fs) => Ty::Record(
-            fs.iter().map(|(n, t)| (n.clone(), substitute_indices(t, subst))).collect(),
+            fs.iter()
+                .map(|(n, t)| (n.clone(), substitute_indices(t, subst)))
+                .collect(),
         ),
         Ty::Name(_) => ty.clone(),
     }
@@ -530,21 +553,25 @@ pub fn substitute_indices(ty: &Ty, subst: &[(String, SExp)]) -> Ty {
 fn substitute_ty(ty: &Ty, subst: &HashMap<String, Ty>) -> Ty {
     match ty {
         Ty::Name(n) => subst.get(n).cloned().unwrap_or_else(|| ty.clone()),
-        Ty::App(n, args) => {
-            Ty::App(n.clone(), args.iter().map(|a| substitute_ty(a, subst)).collect())
-        }
+        Ty::App(n, args) => Ty::App(
+            n.clone(),
+            args.iter().map(|a| substitute_ty(a, subst)).collect(),
+        ),
         Ty::Tuple(items) => Ty::Tuple(items.iter().map(|i| substitute_ty(i, subst)).collect()),
         Ty::Index(base, idx) => Ty::Index(Box::new(substitute_ty(base, subst)), idx.clone()),
-        Ty::Proof(p, v) => {
-            Ty::Proof(Box::new(substitute_ty(p, subst)), Box::new(substitute_ty(v, subst)))
-        }
+        Ty::Proof(p, v) => Ty::Proof(
+            Box::new(substitute_ty(p, subst)),
+            Box::new(substitute_ty(v, subst)),
+        ),
         Ty::Fun(ps, r) => Ty::Fun(
             ps.iter().map(|p| substitute_ty(p, subst)).collect(),
             Box::new(substitute_ty(r, subst)),
         ),
-        Ty::Record(fs) => {
-            Ty::Record(fs.iter().map(|(n, t)| (n.clone(), substitute_ty(t, subst))).collect())
-        }
+        Ty::Record(fs) => Ty::Record(
+            fs.iter()
+                .map(|(n, t)| (n.clone(), substitute_ty(t, subst)))
+                .collect(),
+        ),
     }
 }
 
@@ -608,28 +635,42 @@ pub fn declared_for(
 ) -> (Vec<Quant>, Vec<ats2_domain::ast::Param>, Vec<Quant>, Ty) {
     let ret = im.ret.clone();
     let Some(sig) = sig else {
-        return (Vec::new(), im.params.clone(), Vec::new(), ret.unwrap_or(Ty::Name("void".into())));
+        return (
+            Vec::new(),
+            im.params.clone(),
+            Vec::new(),
+            ret.unwrap_or(Ty::Name("void".into())),
+        );
     };
     let params = im
         .params
         .iter()
         .enumerate()
-        .map(|(i, p)| match (p.ty.indices().is_empty(), sig.params.get(i)) {
-            (true, Some(declared)) => {
-                // A borrow is the declaration's word too: an
-                // implementation that repeats only the names inherits
-                // whether each one was lent or given.
-                ats2_domain::ast::Param {
-                    name: p.name.clone(),
-                    ty: declared.clone(),
-                    borrowed: p.borrowed,
+        .map(
+            |(i, p)| match (p.ty.indices().is_empty(), sig.params.get(i)) {
+                (true, Some(declared)) => {
+                    // A borrow is the declaration's word too: an
+                    // implementation that repeats only the names inherits
+                    // whether each one was lent or given.
+                    ats2_domain::ast::Param {
+                        name: p.name.clone(),
+                        ty: declared.clone(),
+                        borrowed: p.borrowed,
+                    }
                 }
-            }
-            _ => p.clone(),
-        })
+                _ => p.clone(),
+            },
+        )
         .collect();
-    let ret = ret.filter(|t| !t.indices().is_empty()).unwrap_or_else(|| sig.ret.clone());
-    (sig.universals.clone(), params, sig.existentials.clone(), ret)
+    let ret = ret
+        .filter(|t| !t.indices().is_empty())
+        .unwrap_or_else(|| sig.ret.clone());
+    (
+        sig.universals.clone(),
+        params,
+        sig.existentials.clone(),
+        ret,
+    )
 }
 
 /// What `main0`'s two parameters are, statically.
@@ -673,7 +714,9 @@ pub fn claim_of(ty: &Ty) -> Option<SExp> {
             _ => None,
         };
     }
-    let Ty::Index(base, indices) = ty else { return None };
+    let Ty::Index(base, indices) = ty else {
+        return None;
+    };
     let name = match &**base {
         Ty::Name(n) => n.as_str(),
         Ty::App(n, _) => n.as_str(),
@@ -682,11 +725,15 @@ pub fn claim_of(ty: &Ty) -> Option<SExp> {
     let me = SExp::Var(SELF.into());
     let rel = |op: &str, k: &SExp| SExp::App(op.into(), vec![me.clone(), k.clone()]);
     if is_singleton_indexed(base) {
-        let [only] = indices.as_slice() else { return None };
+        let [only] = indices.as_slice() else {
+            return None;
+        };
         return Some(rel("==", only));
     }
     let (flavour, bound) = split_refinement(name)?;
-    let [limit] = indices.as_slice() else { return None };
+    let [limit] = indices.as_slice() else {
+        return None;
+    };
     let claim = rel(bound, limit);
     // `natLt(n)` is `0 <= i < n`, and the lower half is the half that
     // makes a subscript safe.
@@ -726,8 +773,23 @@ pub fn is_singleton_indexed(base: &Ty) -> bool {
     };
     matches!(
         name,
-        "int" | "uint" | "bool" | "char" | "size_t" | "ssize_t" | "sint" | "lint" | "llint"
-            | "nat" | "pos" | "g0int" | "g1int" | "g0uint" | "g1uint" | "double" | "float"
+        "int"
+            | "uint"
+            | "bool"
+            | "char"
+            | "size_t"
+            | "ssize_t"
+            | "sint"
+            | "lint"
+            | "llint"
+            | "nat"
+            | "pos"
+            | "g0int"
+            | "g1int"
+            | "g0uint"
+            | "g1uint"
+            | "double"
+            | "float"
     )
 }
 
@@ -737,17 +799,28 @@ mod tests {
     use ats2_domain::ast::{Def, FunDef, Param, Program};
     use ats2_domain::statics::Sort;
 
-    fn v(n: &str) -> SExp { SExp::Var(n.into()) }
-    fn i(n: i64) -> SExp { SExp::IntLit(n) }
-    fn app(op: &str, a: SExp, b: SExp) -> SExp { SExp::App(op.into(), vec![a, b]) }
-    fn int_of(idx: SExp) -> Ty { Ty::Index(Box::new(Ty::Name("int".into())), vec![idx]) }
+    fn v(n: &str) -> SExp {
+        SExp::Var(n.into())
+    }
+    fn i(n: i64) -> SExp {
+        SExp::IntLit(n)
+    }
+    fn app(op: &str, a: SExp, b: SExp) -> SExp {
+        SExp::App(op.into(), vec![a, b])
+    }
+    fn int_of(idx: SExp) -> Ty {
+        Ty::Index(Box::new(Ty::Name("int".into())), vec![idx])
+    }
 
     /// `fun f {n:nat} (x: int n): int (n+1)`
     fn succ_sig() -> Signature {
         Signature {
             name: "f".into(),
             ty_params: vec![],
-            universals: vec![Quant { vars: vec![("n".into(), Sort::Nat)], guard: None }],
+            universals: vec![Quant {
+                vars: vec![("n".into(), Sort::Nat)],
+                guard: None,
+            }],
             existentials: vec![],
             params: vec![int_of(v("n"))],
             borrowed: Vec::new(),
@@ -791,14 +864,19 @@ mod tests {
             name: "g".into(),
             ty_params: vec![],
             universals: vec![],
-            existentials: vec![Quant { vars: vec![("r".into(), Sort::Nat)], guard: None }],
+            existentials: vec![Quant {
+                vars: vec![("r".into(), Sort::Nat)],
+                guard: None,
+            }],
             params: vec![],
             borrowed: Vec::new(),
             ret: int_of(v("r")),
             metric: vec![],
         };
         let facts = sig.at_call(&[], &[], &Fresh::default());
-        let Some(SExp::Var(name)) = facts.result.clone() else { panic!("a variable result") };
+        let Some(SExp::Var(name)) = facts.result.clone() else {
+            panic!("a variable result")
+        };
         assert_ne!(name, "r", "the caller must not be able to name the witness");
         assert_eq!(facts.assumptions, vec![app(">=", SExp::Var(name), i(0))]);
     }
@@ -827,14 +905,21 @@ mod tests {
         let sig = Signature {
             name: "pair".into(),
             ty_params: vec![],
-            universals: vec![Quant { vars: vec![("n".into(), Sort::Int)], guard: None }],
+            universals: vec![Quant {
+                vars: vec![("n".into(), Sort::Int)],
+                guard: None,
+            }],
             existentials: vec![],
             params: vec![int_of(v("n")), int_of(v("n"))],
             borrowed: Vec::new(),
             ret: Ty::Name("int".into()),
             metric: vec![],
         };
-        let facts = sig.at_call(&[], &[Arg::value(v("a")), Arg::value(v("b"))], &Fresh::default());
+        let facts = sig.at_call(
+            &[],
+            &[Arg::value(v("a")), Arg::value(v("b"))],
+            &Fresh::default(),
+        );
         assert!(facts.demands.contains(&app("==", v("a"), v("b"))));
     }
 
@@ -844,14 +929,24 @@ mod tests {
             "==".into(),
             vec![
                 SExp::App("fact".into(), vec![v("n")]),
-                app("*", v("n"), SExp::App("fact".into(), vec![app("-", v("n"), i(1))])),
+                app(
+                    "*",
+                    v("n"),
+                    SExp::App("fact".into(), vec![app("-", v("n"), i(1))]),
+                ),
             ],
         );
         Signature {
             name: "ax".into(),
             ty_params: vec![],
-            universals: vec![Quant { vars: vec![("n".into(), Sort::Pos)], guard: None }],
-            existentials: vec![Quant { vars: vec![], guard: Some(claim) }],
+            universals: vec![Quant {
+                vars: vec![("n".into(), Sort::Pos)],
+                guard: None,
+            }],
+            existentials: vec![Quant {
+                vars: vec![],
+                guard: Some(claim),
+            }],
             params: vec![],
             borrowed: Vec::new(),
             ret: Ty::Name("void".into()),
@@ -893,7 +988,10 @@ mod tests {
             name: "f".into(),
             ty_params: vec![],
             universals: vec![],
-            existentials: vec![Quant { vars: vec![("r".into(), Sort::Nat)], guard: None }],
+            existentials: vec![Quant {
+                vars: vec![("r".into(), Sort::Nat)],
+                guard: None,
+            }],
             params: vec![],
             borrowed: Vec::new(),
             ret: int_of(v("r")),
@@ -920,7 +1018,11 @@ mod tests {
             ret: Ty::Name("int".into()),
             metric: vec![],
         };
-        let facts = sig.at_call(&[], &[Arg::value(app("-", v("i"), i(1)))], &Fresh::default());
+        let facts = sig.at_call(
+            &[],
+            &[Arg::value(app("-", v("i"), i(1)))],
+            &Fresh::default(),
+        );
         assert_eq!(facts.demands, vec![app(">=", app("-", v("i"), i(1)), i(0))]);
     }
 
@@ -932,7 +1034,10 @@ mod tests {
         let sig = Signature {
             name: "len".into(),
             ty_params: vec![],
-            universals: vec![Quant { vars: vec![("n".into(), Sort::Nat)], guard: None }],
+            universals: vec![Quant {
+                vars: vec![("n".into(), Sort::Nat)],
+                guard: None,
+            }],
             existentials: vec![],
             params: vec![Ty::Index(Box::new(Ty::Name("string".into())), vec![v("n")])],
             borrowed: Vec::new(),
@@ -941,7 +1046,11 @@ mod tests {
         };
         let facts = sig.at_call(
             &[],
-            &[Arg { value: Some(v("s")), size: Some(v("k")), ty: None }],
+            &[Arg {
+                value: Some(v("s")),
+                size: Some(v("k")),
+                ty: None,
+            }],
             &Fresh::default(),
         );
         assert_eq!(facts.result, Some(v("k")));
@@ -954,16 +1063,31 @@ mod tests {
         // only the outermost pair leaves `n` undetermined, and every
         // promise about the result unprovable.
         let listed = |inner: Ty| Ty::App("list0".into(), vec![inner]);
-        let inner = |k: SExp| Ty::Index(Box::new(Ty::App("list0".into(), vec![Ty::Name("int".into())])), vec![k]);
+        let inner = |k: SExp| {
+            Ty::Index(
+                Box::new(Ty::App("list0".into(), vec![Ty::Name("int".into())])),
+                vec![k],
+            )
+        };
         let mut m = Match::default();
-        match_types(&listed(inner(v("n"))), &listed(inner(v("k"))), &["n".to_string()], &mut m);
+        match_types(
+            &listed(inner(v("n"))),
+            &listed(inner(v("k"))),
+            &["n".to_string()],
+            &mut m,
+        );
         assert_eq!(m.get("n"), Some(v("k")));
     }
 
     #[test]
     fn matching_two_types_of_different_shapes_claims_nothing() {
         let mut m = Match::default();
-        match_types(&Ty::Name("int".into()), &Ty::App("list0".into(), vec![]), &["n".to_string()], &mut m);
+        match_types(
+            &Ty::Name("int".into()),
+            &Ty::App("list0".into(), vec![]),
+            &["n".to_string()],
+            &mut m,
+        );
         assert!(m.get("n").is_none());
         assert!(m.equations.is_empty());
     }
@@ -984,10 +1108,22 @@ mod tests {
         // is zero.
         let ty = |n: &str, a: SExp| Ty::Index(Box::new(Ty::Name(n.into())), vec![a]);
         let self_ = SExp::Var(SELF.into());
-        assert_eq!(claim_of(&ty("intGte", i(0))), Some(app(">=", self_.clone(), i(0))));
-        assert_eq!(claim_of(&ty("intGt", v("k"))), Some(app(">", self_.clone(), v("k"))));
-        assert_eq!(claim_of(&ty("intLt", v("k"))), Some(app("<", self_.clone(), v("k"))));
-        assert_eq!(claim_of(&ty("sizeLte", v("k"))), Some(app("<=", self_.clone(), v("k"))));
+        assert_eq!(
+            claim_of(&ty("intGte", i(0))),
+            Some(app(">=", self_.clone(), i(0)))
+        );
+        assert_eq!(
+            claim_of(&ty("intGt", v("k"))),
+            Some(app(">", self_.clone(), v("k")))
+        );
+        assert_eq!(
+            claim_of(&ty("intLt", v("k"))),
+            Some(app("<", self_.clone(), v("k")))
+        );
+        assert_eq!(
+            claim_of(&ty("sizeLte", v("k"))),
+            Some(app("<=", self_.clone(), v("k")))
+        );
     }
 
     #[test]
@@ -1034,7 +1170,11 @@ mod tests {
                 "==".into(),
                 vec![
                     SExp::App("fact".into(), vec![i(3)]),
-                    app("*", i(3), SExp::App("fact".into(), vec![app("-", i(3), i(1))])),
+                    app(
+                        "*",
+                        i(3),
+                        SExp::App("fact".into(), vec![app("-", i(3), i(1))])
+                    ),
                 ]
             )]
         );
@@ -1049,8 +1189,14 @@ mod tests {
             name: "f".into(),
             ty_params: vec![],
             universals: vec![
-                Quant { vars: vec![("a".into(), Sort::Type)], guard: None },
-                Quant { vars: vec![("n".into(), Sort::Nat)], guard: None },
+                Quant {
+                    vars: vec![("a".into(), Sort::Type)],
+                    guard: None,
+                },
+                Quant {
+                    vars: vec![("n".into(), Sort::Nat)],
+                    guard: None,
+                },
             ],
             existentials: vec![],
             params: vec![],
@@ -1087,7 +1233,10 @@ mod tests {
         let facts = succ_sig().at_call(&[], &[Arg::unknown()], &Fresh::default());
         assert_eq!(facts.demands.len(), 1);
         let goal = facts.demands[0].to_string();
-        assert!(goal.contains('%'), "the callee's variable was left nameable: {goal}");
+        assert!(
+            goal.contains('%'),
+            "the callee's variable was left nameable: {goal}"
+        );
         assert!(!goal.starts_with("n >="), "{goal}");
     }
 
@@ -1099,7 +1248,10 @@ mod tests {
         let sig = Signature {
             name: "loop".into(),
             ty_params: vec![],
-            universals: vec![Quant { vars: vec![("j".into(), Sort::Nat)], guard: None }],
+            universals: vec![Quant {
+                vars: vec![("j".into(), Sort::Nat)],
+                guard: None,
+            }],
             existentials: vec![],
             params: vec![int_of(v("j"))],
             borrowed: Vec::new(),
@@ -1107,7 +1259,11 @@ mod tests {
             metric: vec![v("j")],
         };
         let facts = sig.at_call(&[], &[Arg::unknown()], &Fresh::default());
-        assert_ne!(facts.metric, vec![v("j")], "the metric names the caller's own `j`");
+        assert_ne!(
+            facts.metric,
+            vec![v("j")],
+            "the metric names the caller's own `j`"
+        );
     }
 
     #[test]
@@ -1117,7 +1273,10 @@ mod tests {
         let sig = Signature {
             name: "id".into(),
             ty_params: vec![],
-            universals: vec![Quant { vars: vec![("a".into(), Sort::Type)], guard: None }],
+            universals: vec![Quant {
+                vars: vec![("a".into(), Sort::Type)],
+                guard: None,
+            }],
             existentials: vec![],
             params: vec![Ty::Name("a".into())],
             borrowed: Vec::new(),
@@ -1134,15 +1293,26 @@ mod tests {
         let program = Program::new(vec![Def::Fun(FunDef {
             metric: vec![],
             ty_params: vec![],
-            universals: vec![Quant { vars: vec![("n".into(), Sort::Nat)], guard: None }],
+            universals: vec![Quant {
+                vars: vec![("n".into(), Sort::Nat)],
+                guard: None,
+            }],
             existentials: vec![],
             name: "fact".into(),
-            params: vec![Param { borrowed: false, name: "x".into(), ty: int_of(v("n")) }],
+            params: vec![Param {
+                borrowed: false,
+                name: "x".into(),
+                ty: int_of(v("n")),
+            }],
             ret: Ty::Name("int".into()),
             body: Expr::IntLit(1),
+            proof: false,
         })]);
         let table = SigTable::of(&program);
-        assert_eq!(table.get("fact").map(|s| s.name.clone()), Some("fact".into()));
+        assert_eq!(
+            table.get("fact").map(|s| s.name.clone()),
+            Some("fact".into())
+        );
         assert!(table.get("nope").is_none());
     }
 
@@ -1158,12 +1328,22 @@ mod tests {
             proof: false,
             name: "ext".into(),
             ty_params: vec![],
-            universals: vec![Quant { vars: vec![("n".into(), Sort::Nat)], guard: None }],
+            universals: vec![Quant {
+                vars: vec![("n".into(), Sort::Nat)],
+                guard: None,
+            }],
             existentials: vec![],
-            params: vec![Param { borrowed: false, name: "x".into(), ty: int_of(v("n")) }],
+            params: vec![Param {
+                borrowed: false,
+                name: "x".into(),
+                ty: int_of(v("n")),
+            }],
             ret: Ty::Name("int".into()),
         })]);
-        let sig = SigTable::of(&program).get("ext").expect("a signature").clone();
+        let sig = SigTable::of(&program)
+            .get("ext")
+            .expect("a signature")
+            .clone();
         let facts = sig.at_call(&[], &[Arg::value(i(-1))], &Fresh::default());
         assert_eq!(facts.demands, vec![app(">=", i(-1), i(0))]);
         assert!(facts.undetermined.is_empty(), "{:?}", facts.undetermined);
@@ -1180,7 +1360,11 @@ mod tests {
             ty_params: vec![],
             universals: vec![],
             existentials: vec![],
-            params: vec![Param { borrowed: false, name: "x".into(), ty: Ty::Name("int".into()) }],
+            params: vec![Param {
+                borrowed: false,
+                name: "x".into(),
+                ty: Ty::Name("int".into()),
+            }],
             ret: Ty::Name("int".into()),
         })]);
         assert!(SigTable::of(&program).get("sqrt").is_some());

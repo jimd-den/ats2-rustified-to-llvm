@@ -6,15 +6,15 @@
 //! `std::io`, `std::process` and platform tools.  Domain data flows in and
 //! out; no domain file ever learns where it came from.
 
-pub mod lexer;
-pub mod parser;
-pub mod infer;
-pub mod prelude;
-pub mod lift;
-pub mod mono;
-pub mod llvm_ir;
 pub mod adapters;
-pub mod io;
-pub mod diagnostics;
-pub mod toolchain;
 pub mod cli;
+pub mod diagnostics;
+pub mod infer;
+pub mod io;
+pub mod lexer;
+pub mod lift;
+pub mod llvm_ir;
+pub mod mono;
+pub mod parser;
+pub mod prelude;
+pub mod toolchain;

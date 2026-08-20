@@ -16,12 +16,12 @@ use std::path::PathBuf;
 use ats2_application::checking::Strictness;
 use ats2_application::use_cases::{CompileExecutableUseCase, CompileToIrUseCase};
 
-use ats2_application::ports::{DiagnosticsPort, OutputPort};
 use crate::diagnostics::StderrDiagnostics;
 use crate::io::FileOutput;
 use crate::llvm_ir::LlvmIrEmitter;
 use crate::parser::Parser;
 use crate::toolchain::ClangToolchain;
+use ats2_application::ports::{DiagnosticsPort, OutputPort};
 
 /// The parsed command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,7 +79,12 @@ impl CliArgs {
             default.push(".ll");
             ir = Some(PathBuf::from(default));
         }
-        Ok(CliArgs { source, ir, binary, strictness })
+        Ok(CliArgs {
+            source,
+            ir,
+            binary,
+            strictness,
+        })
     }
 }
 
@@ -106,14 +111,17 @@ pub fn run(args: Vec<String>) -> i32 {
 /// Print a usage error and return the usage exit code.
 fn usage_error(message: &str) -> i32 {
     eprintln!("ats2llvm: {message}");
-    eprintln!(
-        "usage: ats2llvm <file.dats> [--ir <file.ll>] [--bin <executable>] [--permissive]"
-    );
+    eprintln!("usage: ats2llvm <file.dats> [--ir <file.ll>] [--bin <executable>] [--permissive]");
     2
 }
 
 /// The `--bin` route: compile to IR, persist it, link it.
-fn build_binary(source: &str, cli: &CliArgs, binary: &std::path::Path, diag: &StderrDiagnostics) -> i32 {
+fn build_binary(
+    source: &str,
+    cli: &CliArgs,
+    binary: &std::path::Path,
+    diag: &StderrDiagnostics,
+) -> i32 {
     let ir_path = cli.ir.as_ref().expect("parse_args guarantees an IR path");
     let uc = CompileExecutableUseCase::new(Parser, LlvmIrEmitter, ClangToolchain, FileOutput)
         .checking(cli.strictness);
@@ -157,7 +165,6 @@ fn build_ir(source: &str, cli: &CliArgs, diag: &StderrDiagnostics) -> i32 {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,7 +178,10 @@ mod tests {
     fn checking_is_strict_unless_the_caller_says_otherwise() {
         // The default has to be the honest one: a checker that forgives
         // what it cannot prove is not checking anything.
-        assert_eq!(parse(&["hello.dats"]).expect("parse").strictness, Strictness::Strict);
+        assert_eq!(
+            parse(&["hello.dats"]).expect("parse").strictness,
+            Strictness::Strict
+        );
     }
 
     #[test]
@@ -186,7 +196,12 @@ mod tests {
 
     #[test]
     fn strict_may_be_asked_for_by_name() {
-        assert_eq!(parse(&["--strict", "hello.dats"]).expect("parse").strictness, Strictness::Strict);
+        assert_eq!(
+            parse(&["--strict", "hello.dats"])
+                .expect("parse")
+                .strictness,
+            Strictness::Strict
+        );
     }
 
     #[test]

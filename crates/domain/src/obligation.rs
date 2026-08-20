@@ -68,7 +68,12 @@ pub struct Obligation {
 
 impl Obligation {
     pub fn new(hyps: Vec<SExp>, goal: SExp, origin: Origin) -> Self {
-        Obligation { hyps, goal, origin, span: None }
+        Obligation {
+            hyps,
+            goal,
+            origin,
+            span: None,
+        }
     }
 
     /// The sentence a diagnostic prints when this obligation is not met.
@@ -103,18 +108,44 @@ mod tests {
     fn the_origin_says_why_rather_than_what() {
         // A solver can print the goal; only the walk knows it came from a
         // call, and a diagnostic without that is a diagnostic nobody can act on.
-        let o = Obligation::new(vec![], goal(), Origin::Call { callee: "fact".into() });
+        let o = Obligation::new(
+            vec![],
+            goal(),
+            Origin::Call {
+                callee: "fact".into(),
+            },
+        );
         assert_eq!(o.describe(), "the call to `fact` requires `n >= 0`");
     }
 
     #[test]
     fn each_origin_names_itself_in_a_sentence() {
         let cases = [
-            (Origin::Return { function: "f".into() }, "the result of `f`"),
-            (Origin::Metric { function: "f".into() }, "the recursion in `f`"),
-            (Origin::Bound { subject: "xs".into() }, "the subscript into `xs`"),
+            (
+                Origin::Return {
+                    function: "f".into(),
+                },
+                "the result of `f`",
+            ),
+            (
+                Origin::Metric {
+                    function: "f".into(),
+                },
+                "the recursion in `f`",
+            ),
+            (
+                Origin::Bound {
+                    subject: "xs".into(),
+                },
+                "the subscript into `xs`",
+            ),
             (Origin::Annotation, "the annotation"),
-            (Origin::Exhaustive { subject: "x".into() }, "the match on `x`"),
+            (
+                Origin::Exhaustive {
+                    subject: "x".into(),
+                },
+                "the match on `x`",
+            ),
         ];
         for (origin, text) in cases {
             assert_eq!(origin.to_string(), text);

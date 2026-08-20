@@ -1,7 +1,10 @@
-use ats2_domain::statics::{Quant, SExp, Sort};
-use ats2_domain::ast::{BinOp, ConstDef, Ctor, DatatypeDef, Def, Expr, FunDecl, FunDef, ImplementDef, LetBind, Param, Pattern, Program, Ty, ValDef};
+use ats2_domain::ast::{
+    BinOp, ConstDef, Ctor, DatatypeDef, Def, Expr, FunDecl, FunDef, ImplementDef, LetBind, Param,
+    Pattern, Program, Ty, ValDef,
+};
 use ats2_domain::errors::CompileError;
-use std::collections::HashMap;
+use ats2_domain::statics::{Quant, SExp, Sort};
+use std::collections::{HashMap, HashSet};
 
 use ats2_domain::tokens::{Pos, Span, Token, TokenKind};
 
@@ -23,10 +26,26 @@ impl Parser {
     pub fn parse_tokens(tokens: &[Token]) -> Result<Program, Vec<CompileError>> {
         if tokens.is_empty() {
             let span = Span::new(Pos::new(1, 1, 0), Pos::new(1, 1, 0));
-            return Err(vec![CompileError::parse(span, "empty token stream (missing EOF)")]);
+            return Err(vec![CompileError::parse(
+                span,
+                "empty token stream (missing EOF)",
+            )]);
         }
-        let mut ctx =
-            ParseCtx { tokens, pos: 0, macros: HashMap::new(), typedefs: HashMap::new(), pending: Vec::new(), gensym: 0, type_vars: Vec::new(), macro_funs: HashMap::new(), macro_depth: 0, cons_name: "cons".into(), renames: HashMap::new(), typedef_families: HashMap::new() };
+        let mut ctx = ParseCtx {
+            tokens,
+            pos: 0,
+            macros: HashMap::new(),
+            typedefs: HashMap::new(),
+            pending: Vec::new(),
+            gensym: 0,
+            type_vars: Vec::new(),
+            macro_funs: HashMap::new(),
+            macro_depth: 0,
+            cons_name: "cons".into(),
+            renames: HashMap::new(),
+            typedef_families: HashMap::new(),
+            props: HashSet::new(),
+        };
         ctx.parse_program()
     }
 }
@@ -41,12 +60,40 @@ impl Parser {
 fn is_skippable_directive(word: &str) -> bool {
     matches!(
         word,
-        "staload" | "dynload" | "typedef" | "abstype" | "absvtype" | "abst0ype"
-            | "abstbox" | "abstflat" | "sortdef" | "stadef" | "stacst" | "assume"
-            | "overload" | "macdef" | "extern" | "static" | "praxi" | "prfun" | "prval"
-            | "dataprop" | "dataview" | "datasort" | "propdef"
-            | "viewdef" | "vtypedef" | "symintr" | "infix" | "infixl" | "infixr"
-            | "prefix" | "postfix" | "nonfix" | "classdec" | "exception"
+        "staload"
+            | "dynload"
+            | "typedef"
+            | "abstype"
+            | "absvtype"
+            | "abst0ype"
+            | "abstbox"
+            | "abstflat"
+            | "sortdef"
+            | "stadef"
+            | "stacst"
+            | "assume"
+            | "overload"
+            | "macdef"
+            | "extern"
+            | "static"
+            | "praxi"
+            | "prfun"
+            | "prval"
+            | "dataprop"
+            | "dataview"
+            | "datasort"
+            | "propdef"
+            | "viewdef"
+            | "vtypedef"
+            | "symintr"
+            | "infix"
+            | "infixl"
+            | "infixr"
+            | "prefix"
+            | "postfix"
+            | "nonfix"
+            | "classdec"
+            | "exception"
     )
 }
 
@@ -76,7 +123,10 @@ enum BindKind {
 /// means the program's own guarantee about its data is broken.
 fn must_match(value: Expr, pattern: Pattern, rest: Expr) -> Expr {
     let exit = Expr::Call(Box::new(Expr::Var("exit".into())), vec![Expr::IntLit(1)]);
-    Expr::Case(Box::new(value), vec![(pattern, rest), (Pattern::Wildcard, exit)])
+    Expr::Case(
+        Box::new(value),
+        vec![(pattern, rest), (Pattern::Wildcard, exit)],
+    )
 }
 
 /// Substitute each macro argument for its parameter throughout a macro
@@ -98,8 +148,15 @@ fn splice_macro_args(expr: &Expr, params: &[String], args: &[Expr]) -> Expr {
         E::StaticInst(inner, at) => E::StaticInst(Box::new(sub(inner)), at.clone()),
         E::ProofPair(p, v) => E::ProofPair(Box::new(sub(p)), Box::new(sub(v))),
         E::Ascribe(inner, ty) => E::Ascribe(Box::new(sub(inner)), ty.clone()),
-        E::Wildcard | E::Unit | E::Uninit | E::IntLit(_) | E::CharLit(_) | E::FloatLit(_)
-        | E::BoolLit(_) | E::StrLit(_) | E::Inst(..) => expr.clone(),
+        E::Wildcard
+        | E::Unit
+        | E::Uninit
+        | E::IntLit(_)
+        | E::CharLit(_)
+        | E::FloatLit(_)
+        | E::BoolLit(_)
+        | E::StrLit(_)
+        | E::Inst(..) => expr.clone(),
         E::UnaryNeg(e) => E::UnaryNeg(Box::new(sub(e))),
         E::BinOp(op, l, r) => E::BinOp(*op, Box::new(sub(l)), Box::new(sub(r))),
         E::TupleLit(items) => E::TupleLit(items.iter().map(sub).collect()),
@@ -108,11 +165,16 @@ fn splice_macro_args(expr: &Expr, params: &[String], args: &[Expr]) -> Expr {
         E::Store(p, v) => E::Store(Box::new(sub(p)), Box::new(sub(v))),
         E::Deref(e) => E::Deref(Box::new(sub(e))),
         E::Proj(e, i) => E::Proj(Box::new(sub(e)), *i),
-        E::IfThenElse(c, t, e) => E::IfThenElse(Box::new(sub(c)), Box::new(sub(t)), Box::new(sub(e))),
+        E::IfThenElse(c, t, e) => {
+            E::IfThenElse(Box::new(sub(c)), Box::new(sub(t)), Box::new(sub(e)))
+        }
         E::Let(binds, body) => E::Let(
             binds
                 .iter()
-                .map(|b| LetBind { value: sub(&b.value), ..b.clone() })
+                .map(|b| LetBind {
+                    value: sub(&b.value),
+                    ..b.clone()
+                })
                 .collect(),
             Box::new(sub(body)),
         ),
@@ -122,7 +184,12 @@ fn splice_macro_args(expr: &Expr, params: &[String], args: &[Expr]) -> Expr {
             E::RecordLit(fields.iter().map(|(n, v)| (n.clone(), sub(v))).collect())
         }
         E::LetFun(funs, body) => E::LetFun(
-            funs.iter().map(|f| FunDef { body: sub(&f.body), ..f.clone() }).collect(),
+            funs.iter()
+                .map(|f| FunDef {
+                    body: sub(&f.body),
+                    ..f.clone()
+                })
+                .collect(),
             Box::new(sub(body)),
         ),
         // Assigning to a name is not a splice this subset ever sees —
@@ -160,8 +227,8 @@ fn indexed_base(name: &str) -> Option<&'static str> {
     Some(match name {
         "int" | "intGt" | "intGte" | "intLt" | "intLte" | "intBtw" | "intBtwe" | "nat"
         | "natLt" | "natLte" | "natGt" | "natGte" | "pos" | "Nat" | "Pos" => "int",
-        "uint" | "uintGt" | "uintGte" | "uintLt" | "uintLte" | "size_t" | "ssize_t"
-        | "sizeGt" | "sizeGte" | "sizeLt" | "sizeLte" | "sizeBtw" | "sizeBtwe" => "int",
+        "uint" | "uintGt" | "uintGte" | "uintLt" | "uintLte" | "size_t" | "ssize_t" | "sizeGt"
+        | "sizeGte" | "sizeLt" | "sizeLte" | "sizeBtw" | "sizeBtwe" => "int",
         "string" => "string",
         "bool" => "bool",
         "char" => "char",
@@ -175,7 +242,10 @@ fn indexed_base(name: &str) -> Option<&'static str> {
 }
 
 fn is_index_sort(sort: &str) -> bool {
-    matches!(sort, "int" | "nat" | "pos" | "bool" | "addr" | "eff" | "cls" | "sta" | "size")
+    matches!(
+        sort,
+        "int" | "nat" | "pos" | "bool" | "addr" | "eff" | "cls" | "sta" | "size"
+    )
 }
 
 /// Read a dynamic expression as a static term.
@@ -193,9 +263,10 @@ fn sexp_of_expr(e: &Expr) -> Option<SExp> {
         Expr::BoolLit(b) => SExp::BoolLit(*b),
         Expr::Var(n) => SExp::Var(n.clone()),
         Expr::UnaryNeg(x) => SExp::App("~".into(), vec![sexp_of_expr(x)?]),
-        Expr::BinOp(op, l, r) => {
-            SExp::App(static_op(*op)?.into(), vec![sexp_of_expr(l)?, sexp_of_expr(r)?])
-        }
+        Expr::BinOp(op, l, r) => SExp::App(
+            static_op(*op)?.into(),
+            vec![sexp_of_expr(l)?, sexp_of_expr(r)?],
+        ),
         // `max(m, n)`, `min(m, n)` — a static function, applied.
         Expr::Call(f, args) => {
             let Expr::Var(name) = &**f else { return None };
@@ -275,16 +346,20 @@ fn zero_of(ty: &Ty) -> Option<Expr> {
 fn substitute_type(ty: &Ty, subst: &HashMap<String, Ty>) -> Ty {
     match ty {
         Ty::Name(n) => subst.get(n).cloned().unwrap_or_else(|| ty.clone()),
-        Ty::App(n, args) => {
-            Ty::App(n.clone(), args.iter().map(|a| substitute_type(a, subst)).collect())
-        }
+        Ty::App(n, args) => Ty::App(
+            n.clone(),
+            args.iter().map(|a| substitute_type(a, subst)).collect(),
+        ),
         Ty::Tuple(items) => Ty::Tuple(items.iter().map(|i| substitute_type(i, subst)).collect()),
         Ty::Proof(p, v) => Ty::Proof(
             Box::new(substitute_type(p, subst)),
             Box::new(substitute_type(v, subst)),
         ),
         Ty::Record(fields) => Ty::Record(
-            fields.iter().map(|(n, t)| (n.clone(), substitute_type(t, subst))).collect(),
+            fields
+                .iter()
+                .map(|(n, t)| (n.clone(), substitute_type(t, subst)))
+                .collect(),
         ),
         Ty::Fun(ps, r) => Ty::Fun(
             ps.iter().map(|p| substitute_type(p, subst)).collect(),
@@ -306,14 +381,29 @@ pub const TOPLEVEL_STATEMENT: &str = "$stmt";
 
 /// Wrap a body in its nested function definitions, if it has any.
 fn wrap_funs(funs: Vec<FunDef>, body: Expr) -> Expr {
-    if funs.is_empty() { body } else { Expr::LetFun(funs, Box::new(body)) }
+    if funs.is_empty() {
+        body
+    } else {
+        Expr::LetFun(funs, Box::new(body))
+    }
 }
 
 /// A fallback token used when the cursor runs past the end of a hand-made
 /// stream (the lexer always terminates with `Eof`, so this is a guard).
 const EOF_TOKEN: Token = Token {
     kind: TokenKind::Eof,
-    span: Span { start: Pos { line: 0, column: 0, offset: 0 }, end: Pos { line: 0, column: 0, offset: 0 } },
+    span: Span {
+        start: Pos {
+            line: 0,
+            column: 0,
+            offset: 0,
+        },
+        end: Pos {
+            line: 0,
+            column: 0,
+            offset: 0,
+        },
+    },
 };
 
 /// The parsing cursor: a position into a token slice plus the accumulated
@@ -346,6 +436,15 @@ struct ParseCtx<'a> {
     /// substitution rather than a lookup, and the arguments are only
     /// known at the use site.
     typedef_families: HashMap<String, (Vec<String>, Ty)>,
+    /// The propositions a `dataprop` or `dataview` has declared.
+    ///
+    /// `FACT(0, 1)` and `list(int)` are the same shape on the page, and
+    /// nothing but the declaration tells them apart.  Without it a
+    /// proposition's arguments are read as *types* — and `0` is not one,
+    /// so the indices the proof is about are dropped and every
+    /// proposition collapses to the bare name `FACT`, which every
+    /// derivation proves equally well.
+    props: HashSet<String>,
     /// `#define cons stream_vt_cons` — one name standing for another.
     ///
     /// Distinct from `macros`, which maps a name to an *expression*: a
@@ -410,7 +509,10 @@ impl ParseCtx<'_> {
 
     fn expect_ident(&mut self, what: &str) -> Result<String, CompileError> {
         match self.peek().kind.clone() {
-            TokenKind::Ident(name) => { self.advance(); Ok(name) }
+            TokenKind::Ident(name) => {
+                self.advance();
+                Ok(name)
+            }
             _ => Err(self.error_here(what)),
         }
     }
@@ -529,12 +631,17 @@ impl ParseCtx<'_> {
                                 self.gensym += 1;
                                 format!("{TOPLEVEL_STATEMENT}{}", self.gensym)
                             });
-                            out.push(Def::Val(ValDef { name, ty: bind.ty, value: bind.value }));
+                            out.push(Def::Val(ValDef {
+                                name,
+                                ty: bind.ty,
+                                value: bind.value,
+                            }));
                         }
                         // A pattern at the top level has no remainder to
                         // scope over, so it cannot be lowered here.
                         BindKind::Pattern(..) => {
-                            return Err(self.error_here("a pattern binding is not supported at the top level"))
+                            return Err(self
+                                .error_here("a pattern binding is not supported at the top level"));
                         }
                     }
                     if rec_form && matches!(&self.peek().kind, TokenKind::Ident(w) if w == "and") {
@@ -557,11 +664,12 @@ impl ParseCtx<'_> {
             TokenKind::Var => {
                 self.advance(); // `var`
                 let BindKind::Simple(bind) = self.parse_val_bind(true)? else {
-                    return Err(self.error_here("a pattern binding is not supported at the top level"));
+                    return Err(
+                        self.error_here("a pattern binding is not supported at the top level")
+                    );
                 };
                 if let Some(name) = bind.name {
-                    let value =
-                        Expr::Call(Box::new(Expr::Var("ref".into())), vec![bind.value]);
+                    let value = Expr::Call(Box::new(Expr::Var("ref".into())), vec![bind.value]);
                     // An annotated `var x: int = e` is a `ref(int)`, so the
                     // annotation survives the rewrite instead of being
                     // thrown away and rediscovered from the initializer.
@@ -608,6 +716,18 @@ impl ParseCtx<'_> {
                     out.push(Def::Extern(decl));
                     return Ok(());
                 }
+                // A `prfun` with a derivation behind it is not a
+                // declaration that failed to parse — it is a definition,
+                // and the `=` the declaration form choked on is the one
+                // that introduces the proof term.  Reading it as a
+                // definition is what keeps the difference between a
+                // proof and an axiom: the checker gets a body to hold
+                // against the proposition, rather than a promise.
+                self.pos = save;
+                if let Ok(def) = self.parse_fun_def() {
+                    out.push(def);
+                    return Ok(());
+                }
                 self.pos = save;
                 self.skip_directive();
                 Ok(())
@@ -615,7 +735,9 @@ impl ParseCtx<'_> {
             TokenKind::Ident(name) if name == "extern" || name == "static" => {
                 let save = self.pos;
                 self.advance();
-                if self.at_proof_keyword() || matches!(self.peek().kind, TokenKind::Fun | TokenKind::Fn) {
+                if self.at_proof_keyword()
+                    || matches!(self.peek().kind, TokenKind::Fun | TokenKind::Fn)
+                {
                     if let Ok(decl) = self.parse_extern_decl() {
                         out.push(Def::Extern(decl));
                         return Ok(());
@@ -627,7 +749,9 @@ impl ParseCtx<'_> {
                 // declaration as a definition.
                 self.pos = save;
                 self.advance(); // `extern`
-                if self.at_proof_keyword() || matches!(self.peek().kind, TokenKind::Fun | TokenKind::Fn) {
+                if self.at_proof_keyword()
+                    || matches!(self.peek().kind, TokenKind::Fun | TokenKind::Fn)
+                {
                     self.advance();
                 }
                 self.skip_directive();
@@ -697,7 +821,10 @@ impl ParseCtx<'_> {
         self.advance(); // `#`
         let word = match self.peek().kind.clone() {
             TokenKind::Ident(w) => w,
-            _ => { self.skip_directive(); return Ok(()); }
+            _ => {
+                self.skip_directive();
+                return Ok(());
+            }
         };
         self.advance();
         if word != "define" {
@@ -827,7 +954,12 @@ impl ParseCtx<'_> {
                 self.advance();
                 ctors.push(self.parse_ctor()?);
             }
-            Ok(Def::Datatype(DatatypeDef { name, ty_params, ctors, linear }))
+            Ok(Def::Datatype(DatatypeDef {
+                name,
+                ty_params,
+                ctors,
+                linear,
+            }))
         })();
         self.pop_type_vars(scope);
         def
@@ -862,7 +994,10 @@ impl ParseCtx<'_> {
                 // Consume the sort, whatever shape it has: `t@ype` alone
                 // is three tokens.
                 self.advance();
-                while !self.at(&TokenKind::Comma) && !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+                while !self.at(&TokenKind::Comma)
+                    && !self.at(&TokenKind::RParen)
+                    && !self.at(&TokenKind::Eof)
+                {
                     self.advance();
                 }
             }
@@ -893,14 +1028,20 @@ impl ParseCtx<'_> {
             // `of ()` — no fields at all.
             if self.at(&TokenKind::RParen) {
                 self.advance();
-                return Ok(Ctor { name, fields: vec![] });
+                return Ok(Ctor {
+                    name,
+                    fields: vec![],
+                });
             }
             let mut fields = vec![self.parse_type()?];
             while self.at(&TokenKind::Comma) {
                 self.advance();
                 fields.push(self.parse_type()?);
             }
-            self.expect(&TokenKind::RParen, "expected `)` after the constructor fields")?;
+            self.expect(
+                &TokenKind::RParen,
+                "expected `)` after the constructor fields",
+            )?;
             fields
         } else if self.starts_a_type() {
             // `Some of int` — a single field needs no parentheses.
@@ -918,12 +1059,19 @@ impl ParseCtx<'_> {
     fn starts_a_type(&self) -> bool {
         matches!(
             self.peek().kind,
-            TokenKind::Ident(_) | TokenKind::LParen | TokenKind::At | TokenKind::Amp | TokenKind::Bang
+            TokenKind::Ident(_)
+                | TokenKind::LParen
+                | TokenKind::At
+                | TokenKind::Amp
+                | TokenKind::Bang
         )
     }
 
     fn parse_fun_def(&mut self) -> Result<Def, CompileError> {
-        self.advance(); // `fun` / `fn`
+        // `prfun f (): P = <derivation>` is a `fun` in every respect the
+        // parser cares about; what differs is who reads the result.
+        let proof = self.at_proof_keyword();
+        self.advance(); // `fun` / `fn` / `praxi` / `prfun`
         // `fun{a:t@ype} f (...)` — the template parameters precede the
         // name.  They are the *sorts* a template abstracts over, so
         // unlike the other static annotations they are kept.
@@ -956,7 +1104,17 @@ impl ParseCtx<'_> {
         self.expect(&TokenKind::Eq, "expected `=` before the function body")?;
         let body = self.parse_expr(0)?;
         self.pop_type_vars(scope);
-        Ok(Def::Fun(FunDef { ty_params, universals, existentials, metric, name, params, ret, body }))
+        Ok(Def::Fun(FunDef {
+            ty_params,
+            universals,
+            existentials,
+            metric,
+            name,
+            params,
+            ret,
+            body,
+            proof,
+        }))
     }
 
     /// The body of an `extern fun` declaration: everything a `fun` has
@@ -969,8 +1127,11 @@ impl ParseCtx<'_> {
     /// and not the file.
     fn parse_dataprop(&mut self, linear: bool) -> Option<Vec<FunDecl>> {
         self.advance(); // `dataprop` / `dataview`
-        let TokenKind::Ident(prop) = self.peek().kind.clone() else { return None };
+        let TokenKind::Ident(prop) = self.peek().kind.clone() else {
+            return None;
+        };
         self.advance();
+        self.props.insert(prop.clone());
         // `(int, int)` — the sorts it is indexed by.  How many there are
         // is all that matters here; what they are is checked by ATS.
         if self.at(&TokenKind::LParen) {
@@ -986,7 +1147,9 @@ impl ParseCtx<'_> {
                 self.advance();
             }
             let universals = self.parse_quantifiers();
-            let TokenKind::Ident(name) = self.peek().kind.clone() else { return None };
+            let TokenKind::Ident(name) = self.peek().kind.clone() else {
+                return None;
+            };
             self.advance();
             // `(n, n*r)` — the indices *this* constructor's proof has.
             let indices = self.parse_index_terms();
@@ -1000,7 +1163,11 @@ impl ParseCtx<'_> {
             if self.at(&TokenKind::Of) {
                 self.advance();
                 for (i, ty) in self.parse_constructor_fields()?.into_iter().enumerate() {
-                    params.push(Param { name: format!("pf{i}"), ty, borrowed: false });
+                    params.push(Param {
+                        name: format!("pf{i}"),
+                        ty,
+                        borrowed: false,
+                    });
                 }
             }
             out.push(FunDecl {
@@ -1095,7 +1262,16 @@ impl ParseCtx<'_> {
             }
         }
         self.pop_type_vars(scope);
-        Ok(FunDecl { linear: false, proof, name, ty_params, universals, existentials, params, ret })
+        Ok(FunDecl {
+            linear: false,
+            proof,
+            name,
+            ty_params,
+            universals,
+            existentials,
+            params,
+            ret,
+        })
     }
 
     fn parse_implement_def(&mut self) -> Result<Def, CompileError> {
@@ -1116,7 +1292,10 @@ impl ParseCtx<'_> {
                     break;
                 }
             }
-            self.expect(&TokenKind::RParen, "expected `)` after the template parameters")?;
+            self.expect(
+                &TokenKind::RParen,
+                "expected `)` after the template parameters",
+            )?;
         }
         ty_params.extend(self.parse_template_params());
         let name = self.parse_qualified_ident("expected a function name")?;
@@ -1145,7 +1324,14 @@ impl ParseCtx<'_> {
         self.expect(&TokenKind::Eq, "expected `=` before the implement body")?;
         let body = self.parse_expr(0)?;
         self.pop_type_vars(scope);
-        Ok(Def::Implement(ImplementDef { ty_params, instance, name, params, ret, body }))
+        Ok(Def::Implement(ImplementDef {
+            ty_params,
+            instance,
+            name,
+            params,
+            ret,
+            body,
+        }))
     }
 
     /// Whether the token after the cursor starts something new rather
@@ -1183,7 +1369,10 @@ impl ParseCtx<'_> {
     fn parse_qualified_ident(&mut self, what: &str) -> Result<String, CompileError> {
         let mut name = self.expect_ident(what)?;
         while self.at(&TokenKind::Dot)
-            && self.tokens.get(self.pos + 1).is_some_and(|t| matches!(t.kind, TokenKind::Ident(_)))
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|t| matches!(t.kind, TokenKind::Ident(_)))
         {
             self.advance(); // `.`
             name = self.expect_ident(what)?;
@@ -1338,7 +1527,9 @@ impl ParseCtx<'_> {
                 // start of `n > .`, and swallow the signature with it.
                 const ABOVE_COMPARISON: u8 = 6;
                 while !self.at(&TokenKind::Gt) && !self.at(&TokenKind::Eof) {
-                    let Ok(e) = self.parse_expr(ABOVE_COMPARISON) else { break };
+                    let Ok(e) = self.parse_expr(ABOVE_COMPARISON) else {
+                        break;
+                    };
                     let Some(term) = sexp_of_expr(&e) else { break };
                     terms.push(term);
                     if self.at(&TokenKind::Comma) {
@@ -1387,7 +1578,10 @@ impl ParseCtx<'_> {
             // turn every instantiation into an assumption.
             Some(claim) if is_relation(&claim) && self.at(close) => {
                 self.advance();
-                Some(Quant { vars: Vec::new(), guard: Some(claim) })
+                Some(Quant {
+                    vars: Vec::new(),
+                    guard: Some(claim),
+                })
             }
             _ => {
                 self.pos = opener;
@@ -1429,8 +1623,10 @@ impl ParseCtx<'_> {
             self.pos = save;
             return None;
         };
-        let vars: Vec<(String, Sort)> =
-            names.into_iter().map(|n| (n, Sort::from_name(&sort))).collect();
+        let vars: Vec<(String, Sort)> = names
+            .into_iter()
+            .map(|n| (n, Sort::from_name(&sort)))
+            .collect();
         // `{i,j:nat | i <= j+1; i+j == n-1}` — ATS writes a conjunction
         // of claims with semicolons, and this is how every loop
         // invariant in the corpus is spelled.  Reading only the first
@@ -1448,7 +1644,9 @@ impl ParseCtx<'_> {
                 }
                 self.advance();
             }
-            conjuncts.into_iter().reduce(|a, b| SExp::App("&&".into(), vec![a, b]))
+            conjuncts
+                .into_iter()
+                .reduce(|a, b| SExp::App("&&".into(), vec![a, b]))
         } else {
             None
         };
@@ -1482,11 +1680,15 @@ impl ParseCtx<'_> {
     /// A sort's name.  `t@ype` arrives as three tokens because `@` is an
     /// operator elsewhere, so the pieces are rejoined here.
     fn parse_sort_name(&mut self) -> Option<String> {
-        let TokenKind::Ident(mut name) = self.peek().kind.clone() else { return None };
+        let TokenKind::Ident(mut name) = self.peek().kind.clone() else {
+            return None;
+        };
         self.advance();
         while self.at(&TokenKind::At) {
             self.advance();
-            let TokenKind::Ident(rest) = self.peek().kind.clone() else { return None };
+            let TokenKind::Ident(rest) = self.peek().kind.clone() else {
+                return None;
+            };
             self.advance();
             name = format!("{name}@{rest}");
         }
@@ -1513,11 +1715,18 @@ impl ParseCtx<'_> {
         loop {
             match self.peek().kind {
                 TokenKind::LBrace => self.skip_balanced(&TokenKind::LBrace, &TokenKind::RBrace),
-                TokenKind::LBracket => self.skip_balanced(&TokenKind::LBracket, &TokenKind::RBracket),
+                TokenKind::LBracket => {
+                    self.skip_balanced(&TokenKind::LBracket, &TokenKind::RBracket)
+                }
                 // `.<>.` — an empty metric.  The lexer reads `<>` as the
                 // not-equal token, so this arrives as three tokens and
                 // has to be matched on its own.
-                TokenKind::Dot if self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == TokenKind::Ne) => {
+                TokenKind::Dot
+                    if self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|t| t.kind == TokenKind::Ne) =>
+                {
                     self.advance();
                     self.advance();
                     if self.at(&TokenKind::Dot) {
@@ -1525,7 +1734,12 @@ impl ParseCtx<'_> {
                     }
                 }
                 // `.<...>.` — a metric proving the recursion terminates.
-                TokenKind::Dot if self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == TokenKind::Lt) => {
+                TokenKind::Dot
+                    if self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|t| t.kind == TokenKind::Lt) =>
+                {
                     while !self.at(&TokenKind::Eof) && !self.at(&TokenKind::Gt) {
                         self.advance();
                     }
@@ -1658,7 +1872,10 @@ impl ParseCtx<'_> {
         // token, so the empty argument list arrives as one token and has
         // to be matched on its own.
         if self.at(&TokenKind::Ne)
-            && self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == TokenKind::LParen)
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|t| t.kind == TokenKind::LParen)
         {
             self.advance();
             return Ok((Some(Vec::new()), static_args));
@@ -1666,7 +1883,14 @@ impl ParseCtx<'_> {
         if !(self.at(&TokenKind::Lt) && self.looks_like_template_args()) {
             // No angle group follows: the braces alone decide whether an
             // instance was named.
-            return Ok((if saw_brace_group && every_group_typed { Some(brace_args) } else { None }, static_args));
+            return Ok((
+                if saw_brace_group && every_group_typed {
+                    Some(brace_args)
+                } else {
+                    None
+                },
+                static_args,
+            ));
         }
         let mut args = Vec::new();
         // `array_foreach$fwork<a><tenv>` — a template may take its
@@ -1687,7 +1911,10 @@ impl ParseCtx<'_> {
             }
             self.expect(&TokenKind::Gt, "expected `>` after the type arguments")?;
             if self.at(&TokenKind::Ne)
-                && self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == TokenKind::LParen)
+                && self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|t| t.kind == TokenKind::LParen)
             {
                 self.advance();
                 break;
@@ -1717,7 +1944,9 @@ impl ParseCtx<'_> {
     /// as an opening bracket when a matching `>` follows with nothing but
     /// names and commas in between, and a `(` after it.
     fn skip_template_arguments(&mut self) {
-        while self.at(&TokenKind::LBrace) || (self.at(&TokenKind::Lt) && self.looks_like_template_args()) {
+        while self.at(&TokenKind::LBrace)
+            || (self.at(&TokenKind::Lt) && self.looks_like_template_args())
+        {
             if self.at(&TokenKind::LBrace) {
                 self.skip_balanced(&TokenKind::LBrace, &TokenKind::RBrace);
             } else {
@@ -1798,7 +2027,7 @@ impl ParseCtx<'_> {
                         // of one closed a type argument list.
                         TokenKind::Ident(w) => starts_a_declaration(w),
                         _ => false,
-                    })
+                    });
                 }
                 TokenKind::Ident(_) | TokenKind::Comma => i += 1,
                 _ => return false,
@@ -1843,7 +2072,10 @@ impl ParseCtx<'_> {
     /// nowhere else for the information to come from.  An unannotated
     /// parameter is recorded as `_` and resolved against the declaration
     /// when the program is emitted.
-    fn parse_params_maybe_untyped(&mut self, allow_untyped: bool) -> Result<Vec<Param>, CompileError> {
+    fn parse_params_maybe_untyped(
+        &mut self,
+        allow_untyped: bool,
+    ) -> Result<Vec<Param>, CompileError> {
         let mut all = self.parse_one_param_list(allow_untyped)?;
         while self.at(&TokenKind::LParen) {
             all.extend(self.parse_one_param_list(allow_untyped)?);
@@ -1863,7 +2095,10 @@ impl ParseCtx<'_> {
     }
 
     fn parse_one_param_list(&mut self, allow_untyped: bool) -> Result<Vec<Param>, CompileError> {
-        self.expect(&TokenKind::LParen, "expected `(` to begin the parameter list")?;
+        self.expect(
+            &TokenKind::LParen,
+            "expected `(` to begin the parameter list",
+        )?;
         let mut params = Vec::new();
         if !self.at(&TokenKind::RParen) {
             loop {
@@ -1873,13 +2108,20 @@ impl ParseCtx<'_> {
                 // list one shape for everything downstream.
                 let named = matches!(self.peek().kind, TokenKind::Ident(_))
                     && self.tokens.get(self.pos + 1).is_some_and(|t| {
-                        matches!(t.kind, TokenKind::Colon | TokenKind::Comma | TokenKind::RParen)
+                        matches!(
+                            t.kind,
+                            TokenKind::Colon | TokenKind::Comma | TokenKind::RParen
+                        )
                     });
                 if !named {
                     let borrowed = self.at_borrow_marker();
                     let ty = self.parse_type()?;
                     self.gensym += 1;
-                    params.push(Param { borrowed, name: format!("arg${}", self.gensym), ty });
+                    params.push(Param {
+                        borrowed,
+                        name: format!("arg${}", self.gensym),
+                        ty,
+                    });
                     if self.at(&TokenKind::Comma) {
                         self.advance();
                         continue;
@@ -1899,7 +2141,9 @@ impl ParseCtx<'_> {
                 } else if allow_untyped {
                     Ty::Name("_".into())
                 } else {
-                    return Err(self.error_here(format!("parameter `{name}` needs a type annotation")));
+                    return Err(
+                        self.error_here(format!("parameter `{name}` needs a type annotation"))
+                    );
                 };
                 params.push(Param { borrowed, name, ty });
                 if self.at(&TokenKind::Comma) {
@@ -1984,7 +2228,11 @@ impl ParseCtx<'_> {
                         }
                     }
                     let base = Ty::App("array".into(), vec![elem]);
-                    if sizes.is_empty() { base } else { Ty::Index(Box::new(base), sizes) }
+                    if sizes.is_empty() {
+                        base
+                    } else {
+                        Ty::Index(Box::new(base), sizes)
+                    }
                 } else {
                     self.parse_type()?
                 }
@@ -2003,7 +2251,12 @@ impl ParseCtx<'_> {
         // function returns.  Both sides describe the same machine value;
         // the difference is who may then do what with it, which is a
         // fact about the proof, not about the word.
-        if self.at(&TokenKind::Gt) && self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == TokenKind::Gt) {
+        if self.at(&TokenKind::Gt)
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|t| t.kind == TokenKind::Gt)
+        {
             self.advance();
             self.advance();
             let _after = self.parse_type()?;
@@ -2028,7 +2281,11 @@ impl ParseCtx<'_> {
                 // and the refinement is the whole content of the name,
                 // so the name is what survives; only a family that says
                 // nothing its base does not collapses to the base.
-                let kept = if name == base { base.to_string() } else { name.clone() };
+                let kept = if name == base {
+                    base.to_string()
+                } else {
+                    name.clone()
+                };
                 return self.finish_arrow_type(Ty::Name(kept));
             }
             // The *family* is kept, not the base it refines.  `intGte(0)`
@@ -2039,6 +2296,15 @@ impl ParseCtx<'_> {
             // back to its base, which is the stage that may forget.
             let atom = Ty::Index(Box::new(Ty::Name(name.clone())), idx);
             return self.finish_arrow_type(atom);
+        }
+        // A proposition is indexed, not applied: `FACT(0, 1)` is about
+        // two numbers, and reading them as type arguments loses both.
+        if self.props.contains(&name) {
+            let idx = self.parse_index_terms();
+            if !idx.is_empty() {
+                return self.finish_arrow_type(Ty::Index(Box::new(Ty::Name(name)), idx));
+            }
+            return self.finish_arrow_type(Ty::Name(name));
         }
         // How many of the arguments about to be read are *types*.  For a
         // family this compiler canonicalises — `array(a, n)`,
@@ -2084,13 +2350,20 @@ impl ParseCtx<'_> {
                 // what the value *is*.
                 let mut args = args;
                 args.truncate(arity);
-                let base =
-                    if args.is_empty() { Ty::Name(canonical.into()) } else { Ty::App(canonical.into(), args) };
+                let base = if args.is_empty() {
+                    Ty::Name(canonical.into())
+                } else {
+                    Ty::App(canonical.into(), args)
+                };
                 // The length is kept *around* that type rather than
                 // inside it, so what the value is stays exactly what it
                 // was: `erased()` gives back the same type as before, and
                 // no later stage can tell the difference.
-                if sizes.is_empty() { base } else { Ty::Index(Box::new(base), sizes) }
+                if sizes.is_empty() {
+                    base
+                } else {
+                    Ty::Index(Box::new(base), sizes)
+                }
             } else if args.is_empty() {
                 // A name applied to nothing but index terms is just the
                 // name: `int(n)` is an `int`, `intGte(0)` a bounded one.
@@ -2335,7 +2608,9 @@ impl ParseCtx<'_> {
             self.advance();
             return true;
         }
-        let Some(next) = self.tokens.get(self.pos + 1).map(|t| t.kind.clone()) else { return false };
+        let Some(next) = self.tokens.get(self.pos + 1).map(|t| t.kind.clone()) else {
+            return false;
+        };
         if !self.at(&TokenKind::Minus) {
             return false;
         }
@@ -2384,7 +2659,9 @@ impl ParseCtx<'_> {
                 lhs = Expr::Call(Box::new(Expr::Var(cons)), vec![lhs, rhs]);
                 continue;
             }
-            let Some((op, lbp, rbp)) = self.current_binop() else { break };
+            let Some((op, lbp, rbp)) = self.current_binop() else {
+                break;
+            };
             if lbp < min_bp {
                 break;
             }
@@ -2420,7 +2697,14 @@ impl ParseCtx<'_> {
                 let tmp = format!("swap${}", self.gensym);
                 return Ok(Expr::Let(
                     vec![
-                        LetBind { opened: Vec::new(), proof: false, name: Some(tmp.clone()), ty: None, value: lhs.clone(), mutable: false },
+                        LetBind {
+                            opened: Vec::new(),
+                            proof: false,
+                            name: Some(tmp.clone()),
+                            ty: None,
+                            value: lhs.clone(),
+                            mutable: false,
+                        },
                         LetBind {
                             opened: Vec::new(),
                             proof: false,
@@ -2475,13 +2759,22 @@ impl ParseCtx<'_> {
             self.advance();
             self.expect(&TokenKind::LBrace, "expected `{` after `where`")?;
             let (binds, funs, pending) = self.parse_local_decls_and_funs()?;
-            self.expect(&TokenKind::RBrace, "expected `}` to close the `where` block")?;
-            let inner = if binds.is_empty() { lhs } else { Expr::Let(binds, Box::new(lhs)) };
+            self.expect(
+                &TokenKind::RBrace,
+                "expected `}` to close the `where` block",
+            )?;
+            let inner = if binds.is_empty() {
+                lhs
+            } else {
+                Expr::Let(binds, Box::new(lhs))
+            };
             // A pattern binding inside a `where` has no following body of
             // its own to scope over; the clause is not one this subset
             // needs, so the pattern is refused rather than guessed at.
             if pending.is_some() {
-                return Err(self.error_here("a pattern binding is not supported inside a `where` clause"));
+                return Err(
+                    self.error_here("a pattern binding is not supported inside a `where` clause")
+                );
             }
             lhs = wrap_funs(funs, inner);
         }
@@ -2544,17 +2837,25 @@ impl ParseCtx<'_> {
                 self.expect(&TokenKind::RParen, "expected `)` after the arguments")?;
                 expr = Expr::Call(Box::new(expr), args);
             } else if self.at(&TokenKind::Dot)
-                && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::IntLit(_)))
+                && matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::IntLit(_))
+                )
             {
                 // `xs.0` — a tuple projection.  The lexer only glues a
                 // dot into a number when digits came *before* it, so the
                 // slot arrives here as its own integer token.
                 self.advance();
-                let TokenKind::IntLit(n) = self.peek().kind.clone() else { unreachable!() };
+                let TokenKind::IntLit(n) = self.peek().kind.clone() else {
+                    unreachable!()
+                };
                 self.advance();
                 expr = Expr::Proj(Box::new(expr), n as usize);
             } else if self.at(&TokenKind::Dot)
-                && self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == TokenKind::LBracket)
+                && self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|t| t.kind == TokenKind::LBracket)
             {
                 // `A.[i]` — ATS's array subscript.  The dot is what tells
                 // it apart from `xs[i]`, which indexes `argv`.
@@ -2564,7 +2865,10 @@ impl ParseCtx<'_> {
                 self.expect(&TokenKind::RBracket, "expected `]` after the index")?;
                 expr = Expr::Index(Box::new(expr), Box::new(index));
             } else if self.at(&TokenKind::Dot)
-                && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Ident(_)))
+                && matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::Ident(_))
+                )
             {
                 // `r.cmp` is a *field*; `str.tail()` is dot notation,
                 // which in ATS is application with the receiver first
@@ -2575,7 +2879,9 @@ impl ParseCtx<'_> {
                 // next turn of this loop, exactly as for any other
                 // callee.
                 self.advance();
-                let TokenKind::Ident(field) = self.peek().kind.clone() else { unreachable!() };
+                let TokenKind::Ident(field) = self.peek().kind.clone() else {
+                    unreachable!()
+                };
                 self.advance();
                 expr = Expr::Field(Box::new(expr), field);
             } else if self.at(&TokenKind::LBracket) {
@@ -2583,7 +2889,9 @@ impl ParseCtx<'_> {
                 let index = self.parse_expr(0)?;
                 self.expect(&TokenKind::RBracket, "expected `]` after the index")?;
                 expr = Expr::Index(Box::new(expr), Box::new(index));
-            } else if matches!(expr, Expr::Var(_) | Expr::Inst(..)) && self.starts_a_juxtaposed_argument() {
+            } else if matches!(expr, Expr::Var(_) | Expr::Inst(..))
+                && self.starts_a_juxtaposed_argument()
+            {
                 // `succ i`, `pred n`, `free bt1` — application written
                 // without parentheses, which ATS allows and the prelude
                 // uses constantly.
@@ -2623,20 +2931,36 @@ impl ParseCtx<'_> {
             // A comma with anything else after it is separating two
             // arguments, and reading it as a splice would swallow the
             // separator and then fail on what came next.
-            TokenKind::Comma if self.macro_depth > 0 => {
-                self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == TokenKind::LParen)
-            }
+            TokenKind::Comma if self.macro_depth > 0 => self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|t| t.kind == TokenKind::LParen),
             _ => false,
         }
     }
 
     fn parse_primary(&mut self, min_bp: u8) -> Result<Expr, CompileError> {
         match self.peek().kind.clone() {
-            TokenKind::IntLit(n) => { self.advance(); Ok(Expr::IntLit(n)) }
-            TokenKind::CharLit(b) => { self.advance(); Ok(Expr::CharLit(b)) }
-            TokenKind::FloatLit(v) => { self.advance(); Ok(Expr::FloatLit(v)) }
-            TokenKind::True => { self.advance(); Ok(Expr::BoolLit(true)) }
-            TokenKind::False => { self.advance(); Ok(Expr::BoolLit(false)) }
+            TokenKind::IntLit(n) => {
+                self.advance();
+                Ok(Expr::IntLit(n))
+            }
+            TokenKind::CharLit(b) => {
+                self.advance();
+                Ok(Expr::CharLit(b))
+            }
+            TokenKind::FloatLit(v) => {
+                self.advance();
+                Ok(Expr::FloatLit(v))
+            }
+            TokenKind::True => {
+                self.advance();
+                Ok(Expr::BoolLit(true))
+            }
+            TokenKind::False => {
+                self.advance();
+                Ok(Expr::BoolLit(false))
+            }
             TokenKind::StrLit(raw) => {
                 let span = self.peek().span;
                 self.advance();
@@ -2651,7 +2975,10 @@ impl ParseCtx<'_> {
                 self.advance();
                 self.expect(&TokenKind::LParen, "expected `(` after the splice comma")?;
                 let e = self.parse_expr(0)?;
-                self.expect(&TokenKind::RParen, "expected `)` after the spliced expression")?;
+                self.expect(
+                    &TokenKind::RParen,
+                    "expected `)` after the spliced expression",
+                )?;
                 Ok(e)
             }
             // `$UN.cast(x)`, `$STDLIB.drand48()` — a name qualified by
@@ -2662,8 +2989,14 @@ impl ParseCtx<'_> {
             // name stands on its own.
             TokenKind::Ident(q)
                 if q.starts_with('$')
-                    && self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == TokenKind::Dot)
-                    && matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind), Some(TokenKind::Ident(_))) =>
+                    && self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|t| t.kind == TokenKind::Dot)
+                    && matches!(
+                        self.tokens.get(self.pos + 2).map(|t| &t.kind),
+                        Some(TokenKind::Ident(_))
+                    ) =>
             {
                 self.advance();
                 self.advance();
@@ -2749,7 +3082,10 @@ impl ParseCtx<'_> {
             // here: everything downstream then sees an ordinary list,
             // and inference can read the element type off it.
             TokenKind::Ident(name)
-                if matches!(name.as_str(), "$list" | "$lst" | "$list_vt" | "$listlst" | "$arrpsz") =>
+                if matches!(
+                    name.as_str(),
+                    "$list" | "$lst" | "$list_vt" | "$listlst" | "$arrpsz"
+                ) =>
             {
                 self.advance();
                 let _element = self.parse_template_arguments()?;
@@ -2816,7 +3152,10 @@ impl ParseCtx<'_> {
                     self.advance();
                     let _cleanup = self.parse_expr(0)?;
                 }
-                self.expect(&TokenKind::RParen, "expected `)` after the delayed expression")?;
+                self.expect(
+                    &TokenKind::RParen,
+                    "expected `)` after the delayed expression",
+                )?;
                 Ok(Expr::Call(
                     Box::new(Expr::Var("$delay".into())),
                     vec![Expr::Lam(Vec::new(), None, Box::new(body))],
@@ -2926,12 +3265,22 @@ impl ParseCtx<'_> {
                     self.advance();
                     items.push(self.parse_expr(0)?);
                 }
-                self.expect(&TokenKind::RParen, "expected `)` after the parenthesized expression")?;
+                self.expect(
+                    &TokenKind::RParen,
+                    "expected `)` after the parenthesized expression",
+                )?;
                 let mut it = items.into_iter().rev();
                 let mut expr = it.next().expect("at least one element");
                 for earlier in it {
                     expr = Expr::Let(
-                        vec![LetBind { opened: Vec::new(), proof: false, name: None, ty: None, value: earlier, mutable: false }],
+                        vec![LetBind {
+                            opened: Vec::new(),
+                            proof: false,
+                            name: None,
+                            ty: None,
+                            value: earlier,
+                            mutable: false,
+                        }],
                         Box::new(expr),
                     );
                 }
@@ -2943,7 +3292,12 @@ impl ParseCtx<'_> {
             }
             // `@(a, b)` — the unboxed tuple.  The subset gives boxed and
             // unboxed tuples one representation, so they parse alike.
-            TokenKind::At if self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == TokenKind::LParen) => {
+            TokenKind::At
+                if self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|t| t.kind == TokenKind::LParen) =>
+            {
                 self.advance();
                 self.parse_primary(min_bp)
             }
@@ -2988,7 +3342,11 @@ impl ParseCtx<'_> {
         } else {
             Expr::Unit
         };
-        Ok(Expr::IfThenElse(Box::new(cond), Box::new(then_e), Box::new(else_e)))
+        Ok(Expr::IfThenElse(
+            Box::new(cond),
+            Box::new(then_e),
+            Box::new(else_e),
+        ))
     }
 
     fn parse_let(&mut self, min_bp: u8) -> Result<Expr, CompileError> {
@@ -3032,7 +3390,11 @@ impl ParseCtx<'_> {
                 sequence(items)
             }
         };
-        let inner = if binds.is_empty() { inner } else { Expr::Let(binds, Box::new(inner)) };
+        let inner = if binds.is_empty() {
+            inner
+        } else {
+            Expr::Let(binds, Box::new(inner))
+        };
         Ok(wrap_funs(funs, inner))
     }
 
@@ -3052,12 +3414,20 @@ impl ParseCtx<'_> {
                 must_match(value, pattern, rest)
             }
             None => {
-                let body = if self.at(&TokenKind::RBrace) { Expr::Unit } else { self.parse_expr(0)? };
+                let body = if self.at(&TokenKind::RBrace) {
+                    Expr::Unit
+                } else {
+                    self.parse_expr(0)?
+                };
                 self.expect(&TokenKind::RBrace, "expected `}` after the block")?;
                 body
             }
         };
-        let inner = if binds.is_empty() { inner } else { Expr::Let(binds, Box::new(inner)) };
+        let inner = if binds.is_empty() {
+            inner
+        } else {
+            Expr::Let(binds, Box::new(inner))
+        };
         Ok(wrap_funs(funs, inner))
     }
 
@@ -3069,18 +3439,24 @@ impl ParseCtx<'_> {
     /// desugared into one.
     /// As `parse_local_decls`, but also returning the nested `fun`
     /// definitions the run contained.
-    fn parse_local_decls_and_funs(&mut self) -> Result<(Vec<LetBind>, Vec<FunDef>, Option<(Pattern, Expr)>), CompileError> {
+    fn parse_local_decls_and_funs(
+        &mut self,
+    ) -> Result<(Vec<LetBind>, Vec<FunDef>, Option<(Pattern, Expr)>), CompileError> {
         let mut binds = Vec::new();
         let mut funs = Vec::new();
         loop {
             if matches!(self.peek().kind, TokenKind::Fun | TokenKind::Fn) {
-                let Def::Fun(f) = self.parse_fun_def()? else { unreachable!("parse_fun_def yields a Fun") };
+                let Def::Fun(f) = self.parse_fun_def()? else {
+                    unreachable!("parse_fun_def yields a Fun")
+                };
                 funs.push(f);
                 continue;
             }
             // `and g (...) = ...` continues a mutually recursive group.
             if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "and") && !funs.is_empty() {
-                let Def::Fun(f) = self.parse_fun_def()? else { unreachable!("parse_fun_def yields a Fun") };
+                let Def::Fun(f) = self.parse_fun_def()? else {
+                    unreachable!("parse_fun_def yields a Fun")
+                };
                 funs.push(f);
                 continue;
             }
@@ -3096,7 +3472,9 @@ impl ParseCtx<'_> {
         }
     }
 
-    fn parse_local_decl_run(&mut self) -> Result<(Vec<LetBind>, Option<(Pattern, Expr)>), CompileError> {
+    fn parse_local_decl_run(
+        &mut self,
+    ) -> Result<(Vec<LetBind>, Option<(Pattern, Expr)>), CompileError> {
         let mut binds = Vec::new();
         loop {
             match self.peek().kind.clone() {
@@ -3141,7 +3519,14 @@ impl ParseCtx<'_> {
                     }
                     for d in defs {
                         if let Def::Const(c) = d {
-                            binds.push(LetBind { opened: Vec::new(), proof: false, name: Some(c.name), ty: None, value: c.value, mutable: false });
+                            binds.push(LetBind {
+                                opened: Vec::new(),
+                                proof: false,
+                                name: Some(c.name),
+                                ty: None,
+                                value: c.value,
+                                mutable: false,
+                            });
                         }
                     }
                 }
@@ -3224,8 +3609,11 @@ impl ParseCtx<'_> {
         // gives it a name.  The name is static, so it binds nothing at
         // run time — but it is what lets the caller *reason* about the
         // witness the callee refused to name, so it is kept.
-        let opened: Vec<(String, Sort)> =
-            self.parse_existentials().into_iter().flat_map(|q| q.vars).collect();
+        let opened: Vec<(String, Sort)> = self
+            .parse_existentials()
+            .into_iter()
+            .flat_map(|q| q.vars)
+            .collect();
         // Does a pattern start here?  A literal always does; a name does
         // when it is applied — `cons(n, ns)` — since a binding's name is
         // never followed by `(`.
@@ -3251,21 +3639,35 @@ impl ParseCtx<'_> {
             let pattern = self.parse_pattern()?;
             if let Pattern::Var(n) = pattern {
                 // `(x)` is just `x` spelled with its brackets.
-                return Ok(BindKind::Simple(self.finish_let_bind(&opened, Some(n), None, mutable)?));
+                return Ok(BindKind::Simple(self.finish_let_bind(
+                    &opened,
+                    Some(n),
+                    None,
+                    mutable,
+                )?));
             }
             if let Pattern::Tuple(items) = &pattern {
                 if items.is_empty() {
-                    return Ok(BindKind::Simple(self.finish_let_bind(&opened, None, None, mutable)?));
+                    return Ok(BindKind::Simple(
+                        self.finish_let_bind(&opened, None, None, mutable)?,
+                    ));
                 }
                 if items.len() == 1 {
                     if let Pattern::Var(n) = &items[0] {
                         let n = n.clone();
-                        return Ok(BindKind::Simple(self.finish_let_bind(&opened, Some(n), None, mutable)?));
+                        return Ok(BindKind::Simple(self.finish_let_bind(
+                            &opened,
+                            Some(n),
+                            None,
+                            mutable,
+                        )?));
                     }
                 }
             }
             if let Pattern::Wildcard = pattern {
-                return Ok(BindKind::Simple(self.finish_let_bind(&opened, None, None, mutable)?));
+                return Ok(BindKind::Simple(
+                    self.finish_let_bind(&opened, None, None, mutable)?,
+                ));
             }
             self.expect(&TokenKind::Eq, "expected `=` in the binding")?;
             let value = self.parse_expr(0)?;
@@ -3276,11 +3678,19 @@ impl ParseCtx<'_> {
         } else {
             return Err(self.error_here("expected a name, `_` or a pattern after `val`"));
         };
-        Ok(BindKind::Simple(self.finish_let_bind(&opened, name, None, mutable)?))
+        Ok(BindKind::Simple(
+            self.finish_let_bind(&opened, name, None, mutable)?,
+        ))
     }
 
     /// The `: type` and `= value` (or uninitialized zero) of a binding.
-    fn finish_let_bind(&mut self, opened: &[(String, Sort)], name: Option<String>, _dummy: Option<()>, mutable: bool) -> Result<LetBind, CompileError> {
+    fn finish_let_bind(
+        &mut self,
+        opened: &[(String, Sort)],
+        name: Option<String>,
+        _dummy: Option<()>,
+        mutable: bool,
+    ) -> Result<LetBind, CompileError> {
         let ty = if self.at(&TokenKind::Colon) {
             self.advance();
             Some(self.parse_type()?)
@@ -3294,12 +3704,20 @@ impl ParseCtx<'_> {
             let Some(ty) = &ty else {
                 return Err(self.error_here("an uninitialized `var` needs a type annotation"));
             };
-            zero_of(ty).ok_or_else(|| self.error_here("this type has no zero value to start from"))?
+            zero_of(ty)
+                .ok_or_else(|| self.error_here("this type has no zero value to start from"))?
         } else {
             self.expect(&TokenKind::Eq, "expected `=` in the binding")?;
             self.parse_expr(0)?
         };
-        Ok(LetBind { opened: opened.to_vec(), proof: false, name, ty, value, mutable })
+        Ok(LetBind {
+            opened: opened.to_vec(),
+            proof: false,
+            name,
+            ty,
+            value,
+            mutable,
+        })
     }
 
     /// `typedef T = t` — record the alias, and report whether it was one
@@ -3474,7 +3892,10 @@ impl ParseCtx<'_> {
             return None;
         };
         self.advance();
-        Some(Def::Overload { op: op.to_string(), func })
+        Some(Def::Overload {
+            op: op.to_string(),
+            func,
+        })
     }
 
     /// `prval pf = e`, `prval () = e`, `prval EQINT() = e` — a proof
@@ -3492,7 +3913,10 @@ impl ParseCtx<'_> {
             // `prval pf = ...` — a name, unless it is a constructor
             // pattern (`EQINT()`), which binds nothing this compiler has.
             TokenKind::Ident(n)
-                if self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == TokenKind::Eq) =>
+                if self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|t| t.kind == TokenKind::Eq) =>
             {
                 self.advance();
                 Some(n)
@@ -3517,7 +3941,14 @@ impl ParseCtx<'_> {
         }
         self.advance();
         match self.parse_expr(0) {
-            Ok(value) => Some(LetBind { opened: Vec::new(), proof: true, name, ty: None, value, mutable: false }),
+            Ok(value) => Some(LetBind {
+                opened: Vec::new(),
+                proof: true,
+                name,
+                ty: None,
+                value,
+                mutable: false,
+            }),
             Err(_) => {
                 self.pos = save;
                 None
@@ -3708,7 +4139,10 @@ impl ParseCtx<'_> {
                             }
                         }
                     }
-                    self.expect(&TokenKind::RParen, "expected `)` after the constructor fields")?;
+                    self.expect(
+                        &TokenKind::RParen,
+                        "expected `)` after the constructor fields",
+                    )?;
                     Ok(Pattern::Ctor(name, fields))
                 } else {
                     Ok(Pattern::Var(name))
@@ -3736,13 +4170,24 @@ impl ParseCtx<'_> {
         self.skip_static_annotations();
         self.expect(&TokenKind::LParen, "expected `(` after `for`")?;
         let init = self.parse_expr(0)?;
-        self.expect(&TokenKind::Semicolon, "expected `;` after the loop initializer")?;
+        self.expect(
+            &TokenKind::Semicolon,
+            "expected `;` after the loop initializer",
+        )?;
         let cond = self.parse_expr(0)?;
-        self.expect(&TokenKind::Semicolon, "expected `;` after the loop condition")?;
+        self.expect(
+            &TokenKind::Semicolon,
+            "expected `;` after the loop condition",
+        )?;
         let step = self.parse_expr(0)?;
         self.expect(&TokenKind::RParen, "expected `)` after the loop step")?;
         let body = self.parse_expr(0)?;
-        Ok(Expr::For(Box::new(init), Box::new(cond), Box::new(step), Box::new(body)))
+        Ok(Expr::For(
+            Box::new(init),
+            Box::new(cond),
+            Box::new(step),
+            Box::new(body),
+        ))
     }
 
     /// `lam (x: int): int => e`, or with an arrow annotation
@@ -3762,7 +4207,11 @@ impl ParseCtx<'_> {
             let mut params = Vec::new();
             while let TokenKind::Ident(name) = self.peek().kind.clone() {
                 self.advance();
-                params.push(Param { borrowed: false, name, ty: Ty::Name("_".into()) });
+                params.push(Param {
+                    borrowed: false,
+                    name,
+                    ty: Ty::Name("_".into()),
+                });
             }
             params
         };
@@ -3772,14 +4221,22 @@ impl ParseCtx<'_> {
         } else {
             None
         };
-        if self.at(&TokenKind::Eq) && self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == TokenKind::Lt) {
+        if self.at(&TokenKind::Eq)
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|t| t.kind == TokenKind::Lt)
+        {
             self.advance(); // `=`
             while !self.at(&TokenKind::Eof) && !self.at(&TokenKind::Gt) {
                 self.advance();
             }
             self.advance(); // `>`
         } else {
-            self.expect(&TokenKind::FatArrow, "expected `=>` after the lambda parameters")?;
+            self.expect(
+                &TokenKind::FatArrow,
+                "expected `=>` after the lambda parameters",
+            )?;
         }
         let body = self.parse_expr(0)?;
         Ok(Expr::Lam(params, ret, Box::new(body)))
@@ -3817,10 +4274,19 @@ impl ParseCtx<'_> {
 /// unit — `begin end` and `()` say the same thing.
 fn sequence(items: Vec<Expr>) -> Expr {
     let mut it = items.into_iter().rev();
-    let Some(mut expr) = it.next() else { return Expr::Unit };
+    let Some(mut expr) = it.next() else {
+        return Expr::Unit;
+    };
     for earlier in it {
         expr = Expr::Let(
-            vec![LetBind { opened: Vec::new(), proof: false, name: None, ty: None, value: earlier, mutable: false }],
+            vec![LetBind {
+                opened: Vec::new(),
+                proof: false,
+                name: None,
+                ty: None,
+                value: earlier,
+                mutable: false,
+            }],
             Box::new(expr),
         );
     }
@@ -3856,7 +4322,12 @@ fn decode_string(raw: &str, span: Span) -> Result<String, CompileError> {
             '\\' => out.push('\\'),
             '"' => out.push('"'),
             '\'' => out.push('\''),
-            other => return Err(CompileError::parse(span, format!("unknown escape sequence `\\{other}`"))),
+            other => {
+                return Err(CompileError::parse(
+                    span,
+                    format!("unknown escape sequence `\\{other}`"),
+                ));
+            }
         }
     }
     Ok(out)
@@ -3870,22 +4341,34 @@ mod tests {
 
     fn body_of(source: &str) -> Expr {
         let p = Parser::parse(source).expect("parse");
-        let Def::Fun(f) = &p.defs()[0] else { panic!("expected a fun def") };
+        let Def::Fun(f) = &p.defs()[0] else {
+            panic!("expected a fun def")
+        };
         f.body.clone()
     }
 
     fn impl_body(source: &str) -> Expr {
         let p = Parser::parse(source).expect("parse");
-        let Def::Implement(i) = &p.defs()[0] else { panic!("expected an implement def") };
+        let Def::Implement(i) = &p.defs()[0] else {
+            panic!("expected an implement def")
+        };
         i.body.clone()
     }
 
     fn expect_err(source: &str) -> CompileError {
-        Parser::parse(source).expect_err("should fail").into_iter().next().expect("at least one error")
+        Parser::parse(source)
+            .expect_err("should fail")
+            .into_iter()
+            .next()
+            .expect("at least one error")
     }
 
-    fn int(n: i64) -> Expr { Expr::IntLit(n) }
-    fn var(name: &str) -> Expr { Expr::Var(name.to_string()) }
+    fn int(n: i64) -> Expr {
+        Expr::IntLit(n)
+    }
+    fn var(name: &str) -> Expr {
+        Expr::Var(name.to_string())
+    }
 
     // --- programs ---------------------------------------------------
 
@@ -3903,9 +4386,19 @@ mod tests {
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
         assert_eq!(f.name, "f");
         assert_eq!(f.params.len(), 1);
-        assert_eq!(f.params[0], Param { borrowed: false, name: "x".into(), ty: Ty::Name("int".into()) });
+        assert_eq!(
+            f.params[0],
+            Param {
+                borrowed: false,
+                name: "x".into(),
+                ty: Ty::Name("int".into())
+            }
+        );
         assert_eq!(f.ret, Ty::Name("int".into()));
-        assert_eq!(f.body, Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(int(1))));
+        assert_eq!(
+            f.body,
+            Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(int(1)))
+        );
     }
 
     #[test]
@@ -3922,9 +4415,8 @@ mod tests {
 
     #[test]
     fn parses_two_definitions_in_order() {
-        let p = Parser::parse(
-            "fun f(): int = 1\nimplement main0() = println!(f())",
-        ).expect("parse");
+        let p =
+            Parser::parse("fun f(): int = 1\nimplement main0() = println!(f())").expect("parse");
         assert_eq!(p.defs().len(), 2);
         assert!(matches!(p.defs()[0], Def::Fun(_)));
         assert!(matches!(p.defs()[1], Def::Implement(_)));
@@ -3942,11 +4434,19 @@ mod tests {
     #[test]
     fn parses_a_datatype_with_type_parameters() {
         let p = Parser::parse("datatype list(a) = nil | cons(a, list(a))").expect("parse");
-        let Def::Datatype(d) = &p.defs()[0] else { panic!() };
+        let Def::Datatype(d) = &p.defs()[0] else {
+            panic!()
+        };
         assert_eq!(d.name, "list");
         assert_eq!(d.ty_params, vec!["a"]);
         assert_eq!(d.ctors.len(), 2);
-        assert_eq!(d.ctors[0], Ctor { name: "nil".into(), fields: vec![] });
+        assert_eq!(
+            d.ctors[0],
+            Ctor {
+                name: "nil".into(),
+                fields: vec![]
+            }
+        );
         assert_eq!(d.ctors[1].name, "cons");
         assert_eq!(d.ctors[1].fields.len(), 2);
     }
@@ -3973,8 +4473,11 @@ mod tests {
         // `cons(bintree a, a, bintree a)` — the datatype's own parameter
         // applied to itself, so the recursive field carries the element
         // type.
-        let p = Parser::parse("datatype bintree(a) = nil | cons(bintree a, a, bintree a)").expect("parse");
-        let Def::Datatype(d) = &p.defs()[0] else { panic!() };
+        let p = Parser::parse("datatype bintree(a) = nil | cons(bintree a, a, bintree a)")
+            .expect("parse");
+        let Def::Datatype(d) = &p.defs()[0] else {
+            panic!()
+        };
         assert_eq!(
             d.ctors[1].fields[0],
             Ty::App("bintree".into(), vec![Ty::Name("a".into())]),
@@ -3989,7 +4492,13 @@ mod tests {
         // parameter: an indexed `int`, which erases to plain `int`.
         let p = Parser::parse("fun{n:int} f (x: int n): int = 0").expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        assert_eq!(f.params[0].ty, Ty::Index(Box::new(Ty::Name("int".into())), vec![SExp::Var("n".into())]));
+        assert_eq!(
+            f.params[0].ty,
+            Ty::Index(
+                Box::new(Ty::Name("int".into())),
+                vec![SExp::Var("n".into())]
+            )
+        );
     }
 
     #[test]
@@ -3998,7 +4507,9 @@ mod tests {
         // and a `datavtype` is a definition, so the skip must stop there
         // rather than eating it.
         let p = Parser::parse("staload _ = \"x.dats\"\ndatavtype t(a) = nil of () | cons of (a, t a)\nfun f(): int = 1").expect("parse");
-        let Def::Datatype(d) = &p.defs()[0] else { panic!("got {:?}", &p.defs()[0]) };
+        let Def::Datatype(d) = &p.defs()[0] else {
+            panic!("got {:?}", &p.defs()[0])
+        };
         assert_eq!(d.name, "t");
         assert_eq!(d.ctors.len(), 2);
     }
@@ -4010,9 +4521,16 @@ mod tests {
         // `val- 55 = _55` — the pattern must match, and a literal pattern
         // is an assertion on the value.
         let body = impl_body("implement main0 () = { val _55 = 55 val- 55 = _55 }");
-        let Expr::Let(_, inner) = &body else { panic!("got {body:?}") };
-        let Expr::Case(scrut, arms) = &**inner else { panic!("got {body:?}") };
-        assert!(matches!(&**scrut, Expr::Var(n) if n == "_55"), "got {body:?}");
+        let Expr::Let(_, inner) = &body else {
+            panic!("got {body:?}")
+        };
+        let Expr::Case(scrut, arms) = &**inner else {
+            panic!("got {body:?}")
+        };
+        assert!(
+            matches!(&**scrut, Expr::Var(n) if n == "_55"),
+            "got {body:?}"
+        );
         assert_eq!(arms[0].0, Pattern::Int(55));
         // no fallback: a non-match leaves through `exit`
         assert_eq!(arms.len(), 2);
@@ -4025,11 +4543,19 @@ mod tests {
         let body = impl_body("implement main0 () = { val cons(n, ns) = xs val () = g(n, ns) }");
         // The pattern is the block's first binding, so the match is the
         // block itself; a name bound before it would wrap it in a `let`.
-        let Expr::Case(scrut, arms) = &body else { panic!("got {body:?}") };
-        assert!(matches!(&**scrut, Expr::Var(n) if n == "xs"), "got {body:?}");
+        let Expr::Case(scrut, arms) = &body else {
+            panic!("got {body:?}")
+        };
+        assert!(
+            matches!(&**scrut, Expr::Var(n) if n == "xs"),
+            "got {body:?}"
+        );
         assert_eq!(
             arms[0].0,
-            Pattern::Ctor("cons".into(), vec![Pattern::Var("n".into()), Pattern::Var("ns".into())])
+            Pattern::Ctor(
+                "cons".into(),
+                vec![Pattern::Var("n".into()), Pattern::Var("ns".into())]
+            )
         );
     }
 
@@ -4037,10 +4563,8 @@ mod tests {
     fn val_rec_binds_a_chain_of_mutually_recursive_values() {
         // `val rec a = ... and b = ...` — each binding may mention the
         // others, which is what a mutually recursive lazy value needs.
-        let p = Parser::parse(
-            "val rec a: int = f(b) and b: int = f(a)\nimplement main0 () = ()",
-        )
-        .expect("parse");
+        let p = Parser::parse("val rec a: int = f(b) and b: int = f(a)\nimplement main0 () = ()")
+            .expect("parse");
         assert_eq!(p.defs().len(), 3, "got {:?}", p.defs());
         let Def::Val(v0) = &p.defs()[0] else { panic!() };
         let Def::Val(v1) = &p.defs()[1] else { panic!() };
@@ -4054,8 +4578,13 @@ mod tests {
         // `datavtype` — a datatype whose values are linear.  The views
         // that make it linear are erased here, so it parses as an
         // ordinary datatype and its constructors exist at runtime.
-        let p = Parser::parse("datavtype bintree(a) = BTnil of () | BTcons of (bintree a, a, bintree a)").expect("parse");
-        let Def::Datatype(d) = &p.defs()[0] else { panic!("got {:?}", &p.defs()[0]) };
+        let p = Parser::parse(
+            "datavtype bintree(a) = BTnil of () | BTcons of (bintree a, a, bintree a)",
+        )
+        .expect("parse");
+        let Def::Datatype(d) = &p.defs()[0] else {
+            panic!("got {:?}", &p.defs()[0])
+        };
         assert_eq!(d.name, "bintree");
         assert_eq!(d.ctors.len(), 2);
         assert_eq!(d.ctors[0].name, "BTnil");
@@ -4084,16 +4613,22 @@ mod tests {
         // `macdef size (bt) = succ ,(bt)` — a macro with parameters is
         // expanded where it is used, the argument spliced in for the
         // parameter, exactly as ATS's own macro expander does.
-        let p = Parser::parse("macdef size (bt) = succ ,(bt)\nimplement main0 () = size (3)").expect("parse");
-        let Def::Implement(i) = &p.defs()[0] else { panic!("got {:?}", &p.defs()[0]) };
+        let p = Parser::parse("macdef size (bt) = succ ,(bt)\nimplement main0 () = size (3)")
+            .expect("parse");
+        let Def::Implement(i) = &p.defs()[0] else {
+            panic!("got {:?}", &p.defs()[0])
+        };
         assert_eq!(i.body, Expr::Call(Box::new(var("succ")), vec![int(3)]));
     }
 
     #[test]
     fn a_parameterized_macdef_substitutes_everywhere_in_its_body() {
         // The parameter may appear more than once, and nested.
-        let p = Parser::parse("macdef twice (x) = ,(x) + ,(x)\nimplement main0 () = twice (n)").expect("parse");
-        let Def::Implement(i) = &p.defs()[0] else { panic!("got {:?}", &p.defs()[0]) };
+        let p = Parser::parse("macdef twice (x) = ,(x) + ,(x)\nimplement main0 () = twice (n)")
+            .expect("parse");
+        let Def::Implement(i) = &p.defs()[0] else {
+            panic!("got {:?}", &p.defs()[0])
+        };
         assert_eq!(
             i.body,
             Expr::BinOp(BinOp::Add, Box::new(var("n")), Box::new(var("n")))
@@ -4104,8 +4639,11 @@ mod tests {
     fn a_parameterized_macdef_may_be_called_by_juxtaposition() {
         // `free bt1` — a one-parameter macro used without parentheses:
         // the following atom is the argument.
-        let p = Parser::parse("macdef free (bt) = g ,(bt)\nimplement main0 () = free x").expect("parse");
-        let Def::Implement(i) = &p.defs()[0] else { panic!("got {:?}", &p.defs()[0]) };
+        let p = Parser::parse("macdef free (bt) = g ,(bt)\nimplement main0 () = free x")
+            .expect("parse");
+        let Def::Implement(i) = &p.defs()[0] else {
+            panic!("got {:?}", &p.defs()[0])
+        };
         assert_eq!(i.body, Expr::Call(Box::new(var("g")), vec![var("x")]));
     }
 
@@ -4115,7 +4653,9 @@ mod tests {
         // marker; the expression it prefixes stands on its own, and the
         // use site's argument arrives in its place.
         let p = Parser::parse("macdef m (x) = f(,(x))\nimplement main0 () = m(1)").expect("parse");
-        let Def::Implement(i) = &p.defs()[0] else { panic!("got {:?}", &p.defs()[0]) };
+        let Def::Implement(i) = &p.defs()[0] else {
+            panic!("got {:?}", &p.defs()[0])
+        };
         assert_eq!(i.body, Expr::Call(Box::new(var("f")), vec![int(1)]));
     }
 
@@ -4130,13 +4670,18 @@ mod tests {
             !rendered.contains("Inst(\"from\""),
             "a static group was read as a template argument:\n{rendered}"
         );
-        assert!(!rendered.contains("StaticInst"), "a binder was read as an argument:\n{rendered}");
+        assert!(
+            !rendered.contains("StaticInst"),
+            "a binder was read as an argument:\n{rendered}"
+        );
     }
 
     #[test]
     fn parses_a_datatype_without_parameters() {
         let p = Parser::parse("datatype color = red | green | blue").expect("parse");
-        let Def::Datatype(d) = &p.defs()[0] else { panic!() };
+        let Def::Datatype(d) = &p.defs()[0] else {
+            panic!()
+        };
         assert_eq!(d.ty_params, vec![] as Vec<String>);
         assert_eq!(d.ctors.len(), 3);
     }
@@ -4152,7 +4697,9 @@ mod tests {
     #[test]
     fn parses_an_implement_clause() {
         let p = Parser::parse("implement main0() = println!(\"hi\")").expect("parse");
-        let Def::Implement(i) = &p.defs()[0] else { panic!() };
+        let Def::Implement(i) = &p.defs()[0] else {
+            panic!()
+        };
         assert_eq!(i.name, "main0");
         assert_eq!(i.ret, None);
         assert_eq!(
@@ -4164,7 +4711,9 @@ mod tests {
     #[test]
     fn implement_may_carry_an_explicit_return_type() {
         let p = Parser::parse("implement f(): int = 1").expect("parse");
-        let Def::Implement(i) = &p.defs()[0] else { panic!() };
+        let Def::Implement(i) = &p.defs()[0] else {
+            panic!()
+        };
         assert_eq!(i.ret, Some(Ty::Name("int".into())));
     }
 
@@ -4174,11 +4723,19 @@ mod tests {
     fn multiplication_binds_tighter_than_addition() {
         assert_eq!(
             body_of("fun f(): int = 1 + 2 * 3"),
-            Expr::BinOp(BinOp::Add, Box::new(int(1)), Box::new(Expr::BinOp(BinOp::Mul, Box::new(int(2)), Box::new(int(3)))))
+            Expr::BinOp(
+                BinOp::Add,
+                Box::new(int(1)),
+                Box::new(Expr::BinOp(BinOp::Mul, Box::new(int(2)), Box::new(int(3))))
+            )
         );
         assert_eq!(
             body_of("fun f(): int = 1 * 2 + 3"),
-            Expr::BinOp(BinOp::Add, Box::new(Expr::BinOp(BinOp::Mul, Box::new(int(1)), Box::new(int(2)))), Box::new(int(3)))
+            Expr::BinOp(
+                BinOp::Add,
+                Box::new(Expr::BinOp(BinOp::Mul, Box::new(int(1)), Box::new(int(2)))),
+                Box::new(int(3))
+            )
         );
     }
 
@@ -4186,7 +4743,15 @@ mod tests {
     fn comparisons_bind_looser_than_arithmetic() {
         assert_eq!(
             body_of("fun f(x: int): int = x + 1 = 2"),
-            Expr::BinOp(BinOp::Eq, Box::new(Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(int(1)))), Box::new(int(2)))
+            Expr::BinOp(
+                BinOp::Eq,
+                Box::new(Expr::BinOp(
+                    BinOp::Add,
+                    Box::new(var("x")),
+                    Box::new(int(1))
+                )),
+                Box::new(int(2))
+            )
         );
     }
 
@@ -4194,11 +4759,27 @@ mod tests {
     fn boolean_connectives_are_loosest_and_left_associative() {
         assert_eq!(
             body_of("fun f(a: bool, b: bool): bool = a andalso b orelse a"),
-            Expr::BinOp(BinOp::Orelse, Box::new(Expr::BinOp(BinOp::Andalso, Box::new(var("a")), Box::new(var("b")))), Box::new(var("a")))
+            Expr::BinOp(
+                BinOp::Orelse,
+                Box::new(Expr::BinOp(
+                    BinOp::Andalso,
+                    Box::new(var("a")),
+                    Box::new(var("b"))
+                )),
+                Box::new(var("a"))
+            )
         );
         assert_eq!(
             body_of("fun f(a: bool, b: bool, c: bool): bool = a andalso b andalso c"),
-            Expr::BinOp(BinOp::Andalso, Box::new(Expr::BinOp(BinOp::Andalso, Box::new(var("a")), Box::new(var("b")))), Box::new(var("c")))
+            Expr::BinOp(
+                BinOp::Andalso,
+                Box::new(Expr::BinOp(
+                    BinOp::Andalso,
+                    Box::new(var("a")),
+                    Box::new(var("b"))
+                )),
+                Box::new(var("c"))
+            )
         );
     }
 
@@ -4206,7 +4787,15 @@ mod tests {
     fn mod_division_and_multiplication_share_a_precedence_level() {
         assert_eq!(
             body_of("fun f(x: int, y: int): int = x * y mod 2"),
-            Expr::BinOp(BinOp::Mod, Box::new(Expr::BinOp(BinOp::Mul, Box::new(var("x")), Box::new(var("y")))), Box::new(int(2)))
+            Expr::BinOp(
+                BinOp::Mod,
+                Box::new(Expr::BinOp(
+                    BinOp::Mul,
+                    Box::new(var("x")),
+                    Box::new(var("y"))
+                )),
+                Box::new(int(2))
+            )
         );
     }
 
@@ -4232,7 +4821,10 @@ mod tests {
             impl_body("implement main0() = if true then println!(\"hi\")"),
             Expr::IfThenElse(
                 Box::new(Expr::BoolLit(true)),
-                Box::new(Expr::MacroCall("println!".into(), vec![Expr::StrLit("hi".into())])),
+                Box::new(Expr::MacroCall(
+                    "println!".into(),
+                    vec![Expr::StrLit("hi".into())]
+                )),
                 Box::new(Expr::Unit),
             )
         );
@@ -4242,7 +4834,9 @@ mod tests {
 
     fn ctors_of(source: &str) -> Vec<Ctor> {
         let p = Parser::parse(source).expect("parse");
-        let Def::Datatype(d) = &p.defs()[0] else { panic!("expected a datatype") };
+        let Def::Datatype(d) = &p.defs()[0] else {
+            panic!("expected a datatype")
+        };
         d.ctors.clone()
     }
 
@@ -4251,8 +4845,14 @@ mod tests {
         // `C of (t, u)` is how ATS spells it; `C(t, u)` is accepted too.
         let c = ctors_of("datatype t = A of (int, bool) | B of () | C");
         assert_eq!(c[0].name, "A");
-        assert_eq!(c[0].fields, vec![Ty::Name("int".into()), Ty::Name("bool".into())]);
-        assert!(c[1].fields.is_empty(), "`of ()` is a constructor with no fields");
+        assert_eq!(
+            c[0].fields,
+            vec![Ty::Name("int".into()), Ty::Name("bool".into())]
+        );
+        assert!(
+            c[1].fields.is_empty(),
+            "`of ()` is a constructor with no fields"
+        );
         assert!(c[2].fields.is_empty(), "a bare name has no fields either");
     }
 
@@ -4264,11 +4864,17 @@ mod tests {
 
     #[test]
     fn a_datatype_may_take_type_parameters() {
-        let p = Parser::parse("datatype list0(a) = list0_nil of () | list0_cons of (a, list0(a))").expect("parse");
-        let Def::Datatype(d) = &p.defs()[0] else { panic!("expected a datatype") };
+        let p = Parser::parse("datatype list0(a) = list0_nil of () | list0_cons of (a, list0(a))")
+            .expect("parse");
+        let Def::Datatype(d) = &p.defs()[0] else {
+            panic!("expected a datatype")
+        };
         assert_eq!(d.ty_params, vec!["a".to_string()]);
         assert_eq!(d.ctors[1].fields[0], Ty::Name("a".into()));
-        assert_eq!(d.ctors[1].fields[1], Ty::App("list0".into(), vec![Ty::Name("a".into())]));
+        assert_eq!(
+            d.ctors[1].fields[1],
+            Ty::App("list0".into(), vec![Ty::Name("a".into())])
+        );
     }
 
     #[test]
@@ -4279,7 +4885,9 @@ mod tests {
     #[test]
     fn a_datatype_parameter_may_carry_a_sort() {
         let p = Parser::parse("datatype list0(a:t@ype) = nil0 of ()").expect("parse");
-        let Def::Datatype(d) = &p.defs()[0] else { panic!("expected a datatype") };
+        let Def::Datatype(d) = &p.defs()[0] else {
+            panic!("expected a datatype")
+        };
         assert_eq!(d.ty_params, vec!["a".to_string()]);
     }
 
@@ -4288,7 +4896,9 @@ mod tests {
     #[test]
     fn a_val_may_stand_at_the_top_level() {
         let p = Parser::parse("val limit = 10").expect("parse");
-        let Def::Val(v) = &p.defs()[0] else { panic!("expected a val, got {:?}", p.defs()[0]) };
+        let Def::Val(v) = &p.defs()[0] else {
+            panic!("expected a val, got {:?}", p.defs()[0])
+        };
         assert_eq!(v.name, "limit");
         assert_eq!(v.value, int(10));
         assert_eq!(v.ty, None);
@@ -4297,7 +4907,9 @@ mod tests {
     #[test]
     fn a_top_level_val_may_be_annotated() {
         let p = Parser::parse("val limit: int = 10").expect("parse");
-        let Def::Val(v) = &p.defs()[0] else { panic!("expected a val") };
+        let Def::Val(v) = &p.defs()[0] else {
+            panic!("expected a val")
+        };
         assert_eq!(v.ty, Some(ty("int")));
     }
 
@@ -4306,7 +4918,9 @@ mod tests {
         // `.<>.` — the lexer reads `<>` as the not-equal token, so the
         // empty metric arrives as three tokens rather than four.
         let p = Parser::parse("fun f {n:nat} .<>. (n: int): int = n").expect("parse");
-        let Def::Fun(f) = &p.defs()[0] else { panic!("expected a fun") };
+        let Def::Fun(f) = &p.defs()[0] else {
+            panic!("expected a fun")
+        };
         assert_eq!(f.name, "f");
     }
 
@@ -4315,7 +4929,9 @@ mod tests {
     #[test]
     fn an_extern_fun_declares_a_signature() {
         let p = Parser::parse("extern fun twice (x: int): int").expect("parse");
-        let Def::Extern(d) = &p.defs()[0] else { panic!("expected an extern, got {:?}", p.defs()[0]) };
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!("expected an extern, got {:?}", p.defs()[0])
+        };
         assert_eq!(d.name, "twice");
         assert_eq!(d.params[0].ty, ty("int"));
         assert_eq!(d.ret, ty("int"));
@@ -4325,14 +4941,18 @@ mod tests {
     #[test]
     fn an_extern_template_records_its_type_parameters() {
         let p = Parser::parse("extern fun{a:t@ype} size (xs: int): int").expect("parse");
-        let Def::Extern(d) = &p.defs()[0] else { panic!("expected an extern") };
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!("expected an extern")
+        };
         assert_eq!(d.ty_params, vec!["a".to_string()]);
     }
 
     #[test]
     fn a_template_definition_records_its_type_parameters() {
         let p = Parser::parse("fun{a:t0p} ident (x: a): a = x").expect("parse");
-        let Def::Fun(f) = &p.defs()[0] else { panic!("expected a fun") };
+        let Def::Fun(f) = &p.defs()[0] else {
+            panic!("expected a fun")
+        };
         assert_eq!(f.ty_params, vec!["a".to_string()]);
     }
 
@@ -4340,16 +4960,22 @@ mod tests {
     fn an_implement_may_leave_its_parameters_untyped() {
         // The types come from the `extern` declaration above it, so the
         // definition need not repeat them.
-        let p = Parser::parse("extern fun twice (x: int): int implement twice (x) = x + x").expect("parse");
-        let Def::Implement(i) = &p.defs()[1] else { panic!("expected an implement, got {:?}", p.defs()[1]) };
+        let p = Parser::parse("extern fun twice (x: int): int implement twice (x) = x + x")
+            .expect("parse");
+        let Def::Implement(i) = &p.defs()[1] else {
+            panic!("expected an implement, got {:?}", p.defs()[1])
+        };
         assert_eq!(i.params.len(), 1);
         assert_eq!(i.params[0].name, "x");
     }
 
     #[test]
     fn an_implement_records_the_template_parameters_it_binds() {
-        let p = Parser::parse("extern fun{a:t@ype} f (x: a): int implement{a} f (x) = 0").expect("parse");
-        let Def::Implement(i) = &p.defs()[1] else { panic!("expected an implement") };
+        let p = Parser::parse("extern fun{a:t@ype} f (x: a): int implement{a} f (x) = 0")
+            .expect("parse");
+        let Def::Implement(i) = &p.defs()[1] else {
+            panic!("expected an implement")
+        };
         assert_eq!(i.ty_params, vec!["a".to_string()]);
     }
 
@@ -4358,15 +4984,23 @@ mod tests {
         // Foreign declarations carry syntax the subset does not model
         // (`= "ext#name"`, linear types).  Those must go on being ignored
         // rather than becoming parse errors.
-        let p = Parser::parse("extern fun weird {n:nat} (x: &int >> int n): void = \"ext#weird\" fun g(): int = 1")
-            .expect("parse");
-        assert!(p.defs().iter().any(|d| matches!(d, Def::Fun(f) if f.name == "g")));
+        let p = Parser::parse(
+            "extern fun weird {n:nat} (x: &int >> int n): void = \"ext#weird\" fun g(): int = 1",
+        )
+        .expect("parse");
+        assert!(
+            p.defs()
+                .iter()
+                .any(|d| matches!(d, Def::Fun(f) if f.name == "g"))
+        );
     }
 
     // --- case and patterns -----------------------------------------
 
     fn arms(source: &str) -> Vec<(Pattern, Expr)> {
-        let Expr::Case(_, arms) = impl_body(source) else { panic!("expected a case") };
+        let Expr::Case(_, arms) = impl_body(source) else {
+            panic!("expected a case")
+        };
         arms
     }
 
@@ -4377,7 +5011,10 @@ mod tests {
         assert_eq!(a[0].0, Pattern::Ctor("nil".into(), vec![]));
         assert_eq!(
             a[1].0,
-            Pattern::Ctor("cons".into(), vec![Pattern::Var("x".into()), Pattern::Var("r".into())])
+            Pattern::Ctor(
+                "cons".into(),
+                vec![Pattern::Var("x".into()), Pattern::Var("r".into())]
+            )
         );
         assert_eq!(a[1].1, int(1));
     }
@@ -4413,7 +5050,10 @@ mod tests {
     #[test]
     fn parses_a_tuple_pattern() {
         let a = arms("implement main0() = case p of | (x, y) => 0");
-        assert_eq!(a[0].0, Pattern::Tuple(vec![Pattern::Var("x".into()), Pattern::Var("y".into())]));
+        assert_eq!(
+            a[0].0,
+            Pattern::Tuple(vec![Pattern::Var("x".into()), Pattern::Var("y".into())])
+        );
     }
 
     #[test]
@@ -4430,8 +5070,13 @@ mod tests {
         // there is a checker to make it to.  The value is untouched, so
         // every stage after the checker looks through it.
         let body = impl_body("implement main0() = (1 + 2): int");
-        let Expr::Ascribe(inner, ty) = &body else { panic!("{body:?}") };
-        assert_eq!(**inner, Expr::BinOp(BinOp::Add, Box::new(int(1)), Box::new(int(2))));
+        let Expr::Ascribe(inner, ty) = &body else {
+            panic!("{body:?}")
+        };
+        assert_eq!(
+            **inner,
+            Expr::BinOp(BinOp::Add, Box::new(int(1)), Box::new(int(2)))
+        );
         assert_eq!(*ty, Ty::Name("int".into()));
     }
 
@@ -4440,9 +5085,14 @@ mod tests {
         // `intGte(0)` is where an unbounded integer becomes a bounded
         // one, and the only line in the file that says so.
         let body = impl_body("implement main0() = 5: intGte(0)");
-        let Expr::Ascribe(inner, ty) = &body else { panic!("{body:?}") };
+        let Expr::Ascribe(inner, ty) = &body else {
+            panic!("{body:?}")
+        };
         assert_eq!(**inner, int(5));
-        assert_eq!(*ty, Ty::Index(Box::new(Ty::Name("intGte".into())), vec![SExp::IntLit(0)]));
+        assert_eq!(
+            *ty,
+            Ty::Index(Box::new(Ty::Name("intGte".into())), vec![SExp::IntLit(0)])
+        );
     }
 
     #[test]
@@ -4457,7 +5107,11 @@ mod tests {
     fn indexing_binds_tighter_than_arithmetic() {
         assert_eq!(
             impl_body("implement main0() = xs[0] + 1"),
-            Expr::BinOp(BinOp::Add, Box::new(Expr::Index(Box::new(var("xs")), Box::new(int(0)))), Box::new(int(1)))
+            Expr::BinOp(
+                BinOp::Add,
+                Box::new(Expr::Index(Box::new(var("xs")), Box::new(int(0)))),
+                Box::new(int(1))
+            )
         );
     }
 
@@ -4466,7 +5120,9 @@ mod tests {
         // Their types are fixed by the language, so ATS lets them go
         // unwritten.
         let p = Parser::parse("implement main0(argc, argv) = println!(argc)").expect("parse");
-        let Def::Implement(i) = &p.defs()[0] else { panic!("expected an implement") };
+        let Def::Implement(i) = &p.defs()[0] else {
+            panic!("expected an implement")
+        };
         assert_eq!(i.params.len(), 2);
         assert_eq!(i.params[0].name, "argc");
         assert_eq!(i.params[0].ty, Ty::Name("int".into()));
@@ -4482,15 +5138,21 @@ mod tests {
         // not be mistaken for the end of the enclosing block, or the
         // `in` after it is never seen.
         let body = impl_body("implement main0() = let prval () = fact_ind{n}() in println!(1) end");
-        let Expr::Let(binds, rest) = &body else { panic!("{body:?}") };
+        let Expr::Let(binds, rest) = &body else {
+            panic!("{body:?}")
+        };
         assert!(binds[0].proof);
         assert_eq!(**rest, Expr::MacroCall("println!".into(), vec![int(1)]));
     }
 
     #[test]
     fn a_proof_binding_whose_left_hand_side_is_a_pattern_is_still_kept() {
-        let body = impl_body("implement main0() = let prval EQINT() = eqint_make{n,0}[x] in println!(2) end");
-        let Expr::Let(binds, rest) = &body else { panic!("{body:?}") };
+        let body = impl_body(
+            "implement main0() = let prval EQINT() = eqint_make{n,0}[x] in println!(2) end",
+        );
+        let Expr::Let(binds, rest) = &body else {
+            panic!("{body:?}")
+        };
         assert!(binds[0].proof);
         assert_eq!(**rest, Expr::MacroCall("println!".into(), vec![int(2)]));
     }
@@ -4510,18 +5172,32 @@ mod tests {
         // the same construct as a `let` with a discard binding, so it
         // desugars to one.
         let body = impl_body("implement main0() = (println!(\"a\"); println!(\"b\"))");
-        let Expr::Let(binds, tail) = &body else { panic!("expected a let, got {body:?}") };
+        let Expr::Let(binds, tail) = &body else {
+            panic!("expected a let, got {body:?}")
+        };
         assert_eq!(binds.len(), 1);
         assert_eq!(binds[0].name, None, "the first element is discarded");
-        assert_eq!(binds[0].value, Expr::MacroCall("println!".into(), vec![Expr::StrLit("a".into())]));
-        assert_eq!(**tail, Expr::MacroCall("println!".into(), vec![Expr::StrLit("b".into())]));
+        assert_eq!(
+            binds[0].value,
+            Expr::MacroCall("println!".into(), vec![Expr::StrLit("a".into())])
+        );
+        assert_eq!(
+            **tail,
+            Expr::MacroCall("println!".into(), vec![Expr::StrLit("b".into())])
+        );
     }
 
     #[test]
     fn a_longer_sequence_nests_to_the_right() {
-        let body = impl_body("implement main0() = (println!(\"a\"); println!(\"b\"); println!(\"c\"))");
-        let Expr::Let(_, tail) = &body else { panic!("expected a let") };
-        assert!(matches!(**tail, Expr::Let(..)), "expected the rest to nest, got {tail:?}");
+        let body =
+            impl_body("implement main0() = (println!(\"a\"); println!(\"b\"); println!(\"c\"))");
+        let Expr::Let(_, tail) = &body else {
+            panic!("expected a let")
+        };
+        assert!(
+            matches!(**tail, Expr::Let(..)),
+            "expected the rest to nest, got {tail:?}"
+        );
     }
 
     #[test]
@@ -4539,7 +5215,10 @@ mod tests {
         let body = impl_body("implement main0() = gfact<int>(12)");
         assert_eq!(
             body,
-            Expr::Call(Box::new(Expr::Inst("gfact".into(), vec![Ty::Name("int".into())])), vec![int(12)])
+            Expr::Call(
+                Box::new(Expr::Inst("gfact".into(), vec![Ty::Name("int".into())])),
+                vec![int(12)]
+            )
         );
     }
 
@@ -4551,7 +5230,10 @@ mod tests {
         let body = impl_body("implement main0() = cons{int}(1, 2)");
         assert_eq!(
             body,
-            Expr::Call(Box::new(Expr::Inst("cons".into(), vec![Ty::Name("int".into())])), vec![int(1), int(2)])
+            Expr::Call(
+                Box::new(Expr::Inst("cons".into(), vec![Ty::Name("int".into())])),
+                vec![int(1), int(2)]
+            )
         );
     }
 
@@ -4563,7 +5245,9 @@ mod tests {
 
     fn param_ty(source: &str) -> Ty {
         let p = Parser::parse(source).expect("parse");
-        let Def::Fun(f) = &p.defs()[0] else { panic!("expected a fun def") };
+        let Def::Fun(f) = &p.defs()[0] else {
+            panic!("expected a fun def")
+        };
         f.params[0].ty.clone()
     }
 
@@ -4620,7 +5304,9 @@ mod tests {
     #[test]
     fn a_var_declaration_binds_a_mutable_cell() {
         let body = impl_body("implement main0() = let var x: int = 1 in x end");
-        let Expr::Let(binds, _) = &body else { panic!("expected a let, got {body:?}") };
+        let Expr::Let(binds, _) = &body else {
+            panic!("expected a let, got {body:?}")
+        };
         assert_eq!(binds.len(), 1);
         assert!(binds[0].mutable, "`var` must bind a mutable cell");
         assert_eq!(binds[0].name.as_deref(), Some("x"));
@@ -4630,7 +5316,9 @@ mod tests {
     #[test]
     fn a_val_declaration_is_still_immutable() {
         let body = impl_body("implement main0() = let val x: int = 1 in x end");
-        let Expr::Let(binds, _) = &body else { panic!("expected a let") };
+        let Expr::Let(binds, _) = &body else {
+            panic!("expected a let")
+        };
         assert!(!binds[0].mutable);
     }
 
@@ -4639,7 +5327,9 @@ mod tests {
         // `var i: int` — ATS forbids reading it before it is written, so
         // materializing a zero is observationally equivalent.
         let body = impl_body("implement main0() = let var i: int in i end");
-        let Expr::Let(binds, _) = &body else { panic!("expected a let") };
+        let Expr::Let(binds, _) = &body else {
+            panic!("expected a let")
+        };
         assert!(binds[0].mutable);
         assert_eq!(binds[0].value, int(0));
     }
@@ -4647,7 +5337,9 @@ mod tests {
     #[test]
     fn parses_an_assignment() {
         let body = impl_body("implement main0() = let var x: int = 1 in x := 5 end");
-        let Expr::Let(_, inner) = &body else { panic!("expected a let") };
+        let Expr::Let(_, inner) = &body else {
+            panic!("expected a let")
+        };
         assert_eq!(**inner, Expr::Assign("x".into(), Box::new(int(5))));
     }
 
@@ -4656,10 +5348,19 @@ mod tests {
         // `x :=+ 2` means `x := x + 2`; ATS spells the operator into the
         // assignment rather than into a separate form.
         let body = impl_body("implement main0() = let var x: int = 1 in x :=+ 2 end");
-        let Expr::Let(_, inner) = &body else { panic!("expected a let") };
+        let Expr::Let(_, inner) = &body else {
+            panic!("expected a let")
+        };
         assert_eq!(
             **inner,
-            Expr::Assign("x".into(), Box::new(Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(int(2)))))
+            Expr::Assign(
+                "x".into(),
+                Box::new(Expr::BinOp(
+                    BinOp::Add,
+                    Box::new(var("x")),
+                    Box::new(int(2))
+                ))
+            )
         );
     }
 
@@ -4670,7 +5371,10 @@ mod tests {
             body,
             Expr::While(
                 Box::new(Expr::BoolLit(true)),
-                Box::new(Expr::MacroCall("println!".into(), vec![Expr::StrLit("x".into())])),
+                Box::new(Expr::MacroCall(
+                    "println!".into(),
+                    vec![Expr::StrLit("x".into())]
+                )),
             )
         );
     }
@@ -4678,12 +5382,24 @@ mod tests {
     #[test]
     fn parses_a_for_loop_with_three_clauses() {
         let body = impl_body("implement main0() = for (i := 0; i < 3; i :=+ 1) println!(i)");
-        let Expr::For(init, cond, step, _) = &body else { panic!("expected a for loop, got {body:?}") };
+        let Expr::For(init, cond, step, _) = &body else {
+            panic!("expected a for loop, got {body:?}")
+        };
         assert_eq!(**init, Expr::Assign("i".into(), Box::new(int(0))));
-        assert_eq!(**cond, Expr::BinOp(BinOp::Lt, Box::new(var("i")), Box::new(int(3))));
+        assert_eq!(
+            **cond,
+            Expr::BinOp(BinOp::Lt, Box::new(var("i")), Box::new(int(3)))
+        );
         assert_eq!(
             **step,
-            Expr::Assign("i".into(), Box::new(Expr::BinOp(BinOp::Add, Box::new(var("i")), Box::new(int(1)))))
+            Expr::Assign(
+                "i".into(),
+                Box::new(Expr::BinOp(
+                    BinOp::Add,
+                    Box::new(var("i")),
+                    Box::new(int(1))
+                ))
+            )
         );
     }
 
@@ -4692,19 +5408,31 @@ mod tests {
         assert_eq!(
             body_of("fun f(x: int): int = let val y = x + 1 in y * 2 end"),
             Expr::Let(
-                vec![LetBind { opened: Vec::new(), proof: false, name: Some("y".into()), ty: None, value: Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(int(1))), mutable: false }],
-                Box::new(Expr::BinOp(BinOp::Mul, Box::new(var("y")), Box::new(int(2)))),
+                vec![LetBind {
+                    opened: Vec::new(),
+                    proof: false,
+                    name: Some("y".into()),
+                    ty: None,
+                    value: Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(int(1))),
+                    mutable: false
+                }],
+                Box::new(Expr::BinOp(
+                    BinOp::Mul,
+                    Box::new(var("y")),
+                    Box::new(int(2))
+                )),
             )
         );
     }
 
     #[test]
     fn let_bindings_may_have_type_annotations_and_discards() {
-        let p = Parser::parse(
-            "fun f(): int = let val x: int = 1; val () = g() in x end",
-        ).expect("parse");
+        let p = Parser::parse("fun f(): int = let val x: int = 1; val () = g() in x end")
+            .expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        let Expr::Let(binds, _) = &f.body else { panic!("expected let") };
+        let Expr::Let(binds, _) = &f.body else {
+            panic!("expected let")
+        };
         assert_eq!(binds.len(), 2);
         assert_eq!(binds[0].ty, Some(Ty::Name("int".into())));
         assert_eq!(binds[1].name, None); // val () = g();  discard binding
@@ -4716,9 +5444,12 @@ mod tests {
         // bindings.  ATS binds them simultaneously; the run below is
         // lowered sequentially, which agrees whenever the right-hand
         // sides do not mention a name the same declaration rebinds.
-        let p = Parser::parse("fun f(): int = let val a = 1 and b = 2 in a + b end").expect("parse");
+        let p =
+            Parser::parse("fun f(): int = let val a = 1 and b = 2 in a + b end").expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        let Expr::Let(binds, _) = &f.body else { panic!("expected let") };
+        let Expr::Let(binds, _) = &f.body else {
+            panic!("expected let")
+        };
         assert_eq!(binds.len(), 2);
         assert_eq!(binds[0].name.as_deref(), Some("a"));
         assert_eq!(binds[1].name.as_deref(), Some("b"));
@@ -4741,14 +5472,24 @@ mod tests {
     fn a_projection_can_be_assigned_to() {
         assert_eq!(
             body_of("fun f(xs: (int, int)): void = xs.0 := 7"),
-            Expr::Store(Box::new(Expr::Proj(Box::new(var("xs")), 0)), Box::new(int(7)))
+            Expr::Store(
+                Box::new(Expr::Proj(Box::new(var("xs")), 0)),
+                Box::new(int(7))
+            )
         );
     }
 
     #[test]
     fn a_typedef_names_a_type_and_is_expanded_where_it_is_used() {
         let p = Parser::parse("typedef T = int\nfun f(x: T): T = x").expect("parse");
-        let Def::Fun(f) = p.defs().iter().find(|d| matches!(d, Def::Fun(_))).expect("fun") else { panic!() };
+        let Def::Fun(f) = p
+            .defs()
+            .iter()
+            .find(|d| matches!(d, Def::Fun(_)))
+            .expect("fun")
+        else {
+            panic!()
+        };
         assert_eq!(f.params[0].ty, Ty::Name("int".into()));
         assert_eq!(f.ret, Ty::Name("int".into()));
     }
@@ -4756,8 +5497,18 @@ mod tests {
     #[test]
     fn a_typedef_may_name_a_tuple() {
         let p = Parser::parse("typedef T2 = (int, int)\nfun f(x: T2): int = x.0").expect("parse");
-        let Def::Fun(f) = p.defs().iter().find(|d| matches!(d, Def::Fun(_))).expect("fun") else { panic!() };
-        assert_eq!(f.params[0].ty, Ty::Tuple(vec![Ty::Name("int".into()), Ty::Name("int".into())]));
+        let Def::Fun(f) = p
+            .defs()
+            .iter()
+            .find(|d| matches!(d, Def::Fun(_)))
+            .expect("fun")
+        else {
+            panic!()
+        };
+        assert_eq!(
+            f.params[0].ty,
+            Ty::Tuple(vec![Ty::Name("int".into()), Ty::Name("int".into())])
+        );
     }
 
     #[test]
@@ -4769,13 +5520,19 @@ mod tests {
         let p = Parser::parse("fun f(x: int): (FACT(n, r) | int) = (pf | x)").expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
         assert_eq!(f.ret.erased(), Ty::Name("int".into()));
-        assert!(f.ret.proof().is_some(), "the proposition is kept: {:?}", f.ret);
+        assert!(
+            f.ret.proof().is_some(),
+            "the proposition is kept: {:?}",
+            f.ret
+        );
     }
 
     #[test]
     fn a_proof_component_is_erased_from_what_an_expression_evaluates_to() {
         let body = body_of("fun f(x: int): int = (pf | x)");
-        let Expr::ProofPair(proof, value) = &body else { panic!("{body:?}") };
+        let Expr::ProofPair(proof, value) = &body else {
+            panic!("{body:?}")
+        };
         assert_eq!(**proof, var("pf"));
         assert_eq!(**value, var("x"), "what runs is the value half");
     }
@@ -4790,9 +5547,12 @@ mod tests {
 
     #[test]
     fn a_proof_component_is_erased_from_a_pattern() {
-        let p = Parser::parse("fun f(x: int): int = let val (pf1 | r1) = g(x) in r1 end").expect("parse");
+        let p = Parser::parse("fun f(x: int): int = let val (pf1 | r1) = g(x) in r1 end")
+            .expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        let Expr::Let(binds, _) = &f.body else { panic!("expected let") };
+        let Expr::Let(binds, _) = &f.body else {
+            panic!("expected let")
+        };
         assert_eq!(binds[0].name.as_deref(), Some("r1"));
     }
 
@@ -4804,7 +5564,11 @@ mod tests {
         let p = Parser::parse("fun f {n:nat} .<n>. (x: int n): int = x").expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
         assert_eq!(f.metric, vec![SExp::Var("n".into())]);
-        assert_eq!(f.universals.len(), 1, "the quantifier must survive the metric");
+        assert_eq!(
+            f.universals.len(),
+            1,
+            "the quantifier must survive the metric"
+        );
     }
 
     #[test]
@@ -4820,7 +5584,10 @@ mod tests {
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
         assert_eq!(
             f.metric,
-            vec![SExp::App("-".into(), vec![SExp::Var("n".into()), SExp::IntLit(1)])]
+            vec![SExp::App(
+                "-".into(),
+                vec![SExp::Var("n".into()), SExp::IntLit(1)]
+            )]
         );
     }
 
@@ -4842,14 +5609,19 @@ mod tests {
         // — the claim *is* the content.  Read as a binder it parses as
         // nothing at all, and the axiom says nothing.
         let p = Parser::parse("extern fun ax (): [fact(0) == 1] void").expect("parse");
-        let Def::Extern(d) = &p.defs()[0] else { panic!("{:?}", p.defs()[0]) };
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!("{:?}", p.defs()[0])
+        };
         assert_eq!(d.existentials.len(), 1);
         assert!(d.existentials[0].vars.is_empty(), "nothing is bound");
         assert_eq!(
             d.existentials[0].guard,
             Some(SExp::App(
                 "==".into(),
-                vec![SExp::App("fact".into(), vec![SExp::IntLit(0)]), SExp::IntLit(1)]
+                vec![
+                    SExp::App("fact".into(), vec![SExp::IntLit(0)]),
+                    SExp::IntLit(1)
+                ]
             ))
         );
     }
@@ -4861,7 +5633,9 @@ mod tests {
         // away the only statement in the file that said anything.
         let p = Parser::parse("extern praxi fact_ind {n:pos} (): [fact(n) == n * fact(n-1)] void")
             .expect("parse");
-        let Def::Extern(d) = &p.defs()[0] else { panic!("{:?}", p.defs()[0]) };
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!("{:?}", p.defs()[0])
+        };
         assert_eq!(d.name, "fact_ind");
         assert_eq!(d.universals[0].vars, vec![("n".to_string(), Sort::Pos)]);
         assert_eq!(d.existentials.len(), 1);
@@ -4875,8 +5649,12 @@ mod tests {
         // cannot be thrown away on the way in.
         let p = Parser::parse("fun f {n:nat} (x: int n): int = g{n, 0}(x)").expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        let Expr::Call(callee, _) = &f.body else { panic!("{:?}", f.body) };
-        let Expr::StaticInst(inner, at) = &**callee else { panic!("{:?}", callee) };
+        let Expr::Call(callee, _) = &f.body else {
+            panic!("{:?}", f.body)
+        };
+        let Expr::StaticInst(inner, at) = &**callee else {
+            panic!("{:?}", callee)
+        };
         assert_eq!(**inner, Expr::Var("g".into()));
         assert_eq!(*at, vec![SExp::Var("n".into()), SExp::IntLit(0)]);
     }
@@ -4885,8 +5663,12 @@ mod tests {
     fn several_static_argument_groups_are_read_in_order() {
         let p = Parser::parse("fun f {n:nat} (x: int n): int = g{n+1}{n}(x)").expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        let Expr::Call(callee, _) = &f.body else { panic!() };
-        let Expr::StaticInst(_, at) = &**callee else { panic!("{:?}", callee) };
+        let Expr::Call(callee, _) = &f.body else {
+            panic!()
+        };
+        let Expr::StaticInst(_, at) = &**callee else {
+            panic!("{:?}", callee)
+        };
         assert_eq!(
             *at,
             vec![
@@ -4904,7 +5686,9 @@ mod tests {
         // quantifiers — re-reads it when the signature wants an index.
         let p = Parser::parse("fun f (): int = g{n}(1)").expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        let Expr::Call(callee, _) = &f.body else { panic!() };
+        let Expr::Call(callee, _) = &f.body else {
+            panic!()
+        };
         assert_eq!(**callee, Expr::Inst("g".into(), vec![Ty::Name("n".into())]));
     }
 
@@ -4912,7 +5696,9 @@ mod tests {
     fn a_call_with_no_static_arguments_is_left_unwrapped() {
         let p = Parser::parse("fun f (x: int): int = g(x)").expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        let Expr::Call(callee, _) = &f.body else { panic!() };
+        let Expr::Call(callee, _) = &f.body else {
+            panic!()
+        };
         assert_eq!(**callee, Expr::Var("g".into()));
     }
 
@@ -4922,26 +5708,30 @@ mod tests {
         // claim the rest of the body relies on.  Skipping it threw away
         // the proof and left the body unprovable; emitting it would call
         // a function that was never built.  So it is kept, and marked.
-        let p = Parser::parse(
-            "fun f {n:nat} (x: int n): int = let prval () = ax{n}() in x end",
-        )
-        .expect("parse");
+        let p = Parser::parse("fun f {n:nat} (x: int n): int = let prval () = ax{n}() in x end")
+            .expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        let Expr::Let(binds, _) = &f.body else { panic!("{:?}", f.body) };
+        let Expr::Let(binds, _) = &f.body else {
+            panic!("{:?}", f.body)
+        };
         assert_eq!(binds.len(), 1);
         assert!(binds[0].proof, "a proof binding must say so");
         assert_eq!(binds[0].name, None, "`()` names nothing");
-        assert!(matches!(binds[0].value, Expr::Call(..)), "{:?}", binds[0].value);
+        assert!(
+            matches!(binds[0].value, Expr::Call(..)),
+            "{:?}",
+            binds[0].value
+        );
     }
 
     #[test]
     fn a_proof_value_may_be_given_a_name() {
-        let p = Parser::parse(
-            "fun f {n:nat} (x: int n): int = let prval pf = ax{n}() in x end",
-        )
-        .expect("parse");
+        let p = Parser::parse("fun f {n:nat} (x: int n): int = let prval pf = ax{n}() in x end")
+            .expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        let Expr::Let(binds, _) = &f.body else { panic!() };
+        let Expr::Let(binds, _) = &f.body else {
+            panic!()
+        };
         assert_eq!(binds[0].name.as_deref(), Some("pf"));
         assert!(binds[0].proof);
     }
@@ -4951,21 +5741,30 @@ mod tests {
         // `prval EQINT() = eqint_make{n,0}()` names nothing this
         // compiler tracks, but the call on the right is still what
         // establishes the equality.
-        let p = Parser::parse(
-            "fun f {n:nat} (x: int n): int = let prval EQINT() = mk{n,0}() in x end",
-        )
-        .expect("parse");
+        let p =
+            Parser::parse("fun f {n:nat} (x: int n): int = let prval EQINT() = mk{n,0}() in x end")
+                .expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        let Expr::Let(binds, _) = &f.body else { panic!("{:?}", f.body) };
+        let Expr::Let(binds, _) = &f.body else {
+            panic!("{:?}", f.body)
+        };
         assert!(binds[0].proof);
-        assert!(matches!(binds[0].value, Expr::Call(..)), "{:?}", binds[0].value);
+        assert!(
+            matches!(binds[0].value, Expr::Call(..)),
+            "{:?}",
+            binds[0].value
+        );
     }
 
     #[test]
     fn a_proof_declaration_that_does_not_parse_is_still_skipped() {
         let p = Parser::parse("fun f (): int = let prval pf = ?? ~~ in 1 end").expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        assert!(matches!(f.body, Expr::Let(..) | Expr::IntLit(1)), "{:?}", f.body);
+        assert!(
+            matches!(f.body, Expr::Let(..) | Expr::IntLit(1)),
+            "{:?}",
+            f.body
+        );
     }
 
     #[test]
@@ -4993,7 +5792,10 @@ mod tests {
         assert!(bas.params.is_empty());
         assert_eq!(
             bas.ret,
-            Ty::Index(Box::new(Ty::Name("FACT".into())), vec![SExp::IntLit(0), SExp::IntLit(1)])
+            Ty::Index(
+                Box::new(Ty::Name("FACT".into())),
+                vec![SExp::IntLit(0), SExp::IntLit(1)]
+            )
         );
         let ind = decl("FACTind");
         assert_eq!(ind.universals.len(), 2);
@@ -5004,7 +5806,10 @@ mod tests {
                 Box::new(Ty::Name("FACT".into())),
                 vec![
                     SExp::Var("n".into()),
-                    SExp::App("*".into(), vec![SExp::Var("n".into()), SExp::Var("r".into())])
+                    SExp::App(
+                        "*".into(),
+                        vec![SExp::Var("n".into()), SExp::Var("r".into())]
+                    )
                 ]
             )
         );
@@ -5016,12 +5821,19 @@ mod tests {
         // callee refused to name.  Without the name every fact about the
         // returned value is about a variable nobody can mention twice,
         // and the proof that follows has nothing to attach to.
-        let p = Parser::parse("fun f (x: int): int = let val [r1:int] (pf1 | res) = g(x) in res end")
-            .expect("parse");
+        let p =
+            Parser::parse("fun f (x: int): int = let val [r1:int] (pf1 | res) = g(x) in res end")
+                .expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        let Expr::Let(binds, _) = &f.body else { panic!("{:?}", f.body) };
+        let Expr::Let(binds, _) = &f.body else {
+            panic!("{:?}", f.body)
+        };
         assert_eq!(binds[0].opened, vec![("r1".to_string(), Sort::Int)]);
-        assert_eq!(binds[0].name.as_deref(), Some("res"), "the value half is what is bound");
+        assert_eq!(
+            binds[0].name.as_deref(),
+            Some("res"),
+            "the value half is what is bound"
+        );
         assert!(!binds[0].proof, "the value half runs");
     }
 
@@ -5029,7 +5841,9 @@ mod tests {
     fn a_binding_that_opens_nothing_says_so() {
         let p = Parser::parse("fun f (x: int): int = let val y = g(x) in y end").expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        let Expr::Let(binds, _) = &f.body else { panic!() };
+        let Expr::Let(binds, _) = &f.body else {
+            panic!()
+        };
         assert!(binds[0].opened.is_empty());
     }
 
@@ -5042,14 +5856,25 @@ mod tests {
         let p = Parser::parse("fun f {n:nat} (x: int n): [r:int] (FACT(n, r) | int(r)) = x")
             .expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        let Ty::Proof(proof, value) = &f.ret else { panic!("{:?}", f.ret) };
+        let Ty::Proof(proof, value) = &f.ret else {
+            panic!("{:?}", f.ret)
+        };
         // A proposition applied to plain names parses as a type
         // application; the checker reads its arguments as index terms.
         assert_eq!(
             **proof,
-            Ty::App("FACT".into(), vec![Ty::Name("n".into()), Ty::Name("r".into())])
+            Ty::App(
+                "FACT".into(),
+                vec![Ty::Name("n".into()), Ty::Name("r".into())]
+            )
         );
-        assert_eq!(**value, Ty::Index(Box::new(Ty::Name("int".into())), vec![SExp::Var("r".into())]));
+        assert_eq!(
+            **value,
+            Ty::Index(
+                Box::new(Ty::Name("int".into())),
+                vec![SExp::Var("r".into())]
+            )
+        );
         // What the value *is* is still the value half.
         assert_eq!(f.ret.erased(), Ty::Name("int".into()));
         assert_eq!(f.ret.indices(), &[SExp::Var("r".into())]);
@@ -5059,7 +5884,9 @@ mod tests {
     fn a_returned_pair_keeps_the_proof_it_returns() {
         let p = Parser::parse("fun f (x: int): int = (pf | x)").expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        let Expr::ProofPair(proof, value) = &f.body else { panic!("{:?}", f.body) };
+        let Expr::ProofPair(proof, value) = &f.body else {
+            panic!("{:?}", f.body)
+        };
         assert_eq!(**proof, Expr::Var("pf".into()));
         assert_eq!(**value, Expr::Var("x".into()));
     }
@@ -5074,13 +5901,18 @@ mod tests {
     /// The type of `f`'s only parameter.
     fn first_param_ty(src: &str) -> Ty {
         let p = Parser::parse(src).expect("parse");
-        let Def::Fun(f) = &p.defs()[0] else { panic!("expected a fun") };
+        let Def::Fun(f) = &p.defs()[0] else {
+            panic!("expected a fun")
+        };
         f.params[0].ty.clone()
     }
 
     /// `array(int, n)` — an array of `int`, `n` long.
     fn int_array(size: SExp) -> Ty {
-        Ty::Index(Box::new(Ty::App("array".into(), vec![Ty::Name("int".into())])), vec![size])
+        Ty::Index(
+            Box::new(Ty::App("array".into(), vec![Ty::Name("int".into())])),
+            vec![size],
+        )
     }
 
     #[test]
@@ -5089,14 +5921,20 @@ mod tests {
         // than `array(int)`: without it `A[i]` cannot be checked against
         // anything, and a bounds check is the obligation ATS exists to
         // make.
-        assert_eq!(first_param_ty("fun f {n:nat} (a: array(int, n)): int = 1"), int_array(SExp::Var("n".into())));
+        assert_eq!(
+            first_param_ty("fun f {n:nat} (a: array(int, n)): int = 1"),
+            int_array(SExp::Var("n".into()))
+        );
     }
 
     #[test]
     fn the_bracket_spelling_of_an_array_is_the_same_array() {
         // `@[int][n]` is a flat array of `n` ints — the same type
         // `array(int, n)` names, written the way a `var` declares one.
-        assert_eq!(first_param_ty("fun f {n:nat} (a: @[int][n]): int = 1"), int_array(SExp::Var("n".into())));
+        assert_eq!(
+            first_param_ty("fun f {n:nat} (a: @[int][n]): int = 1"),
+            int_array(SExp::Var("n".into()))
+        );
     }
 
     #[test]
@@ -5122,7 +5960,10 @@ mod tests {
     fn a_size_may_be_an_expression_rather_than_a_variable() {
         assert_eq!(
             first_param_ty("fun f {n:nat} (a: array(int, n+1)): int = 1"),
-            int_array(SExp::App("+".into(), vec![SExp::Var("n".into()), SExp::IntLit(1)]))
+            int_array(SExp::App(
+                "+".into(),
+                vec![SExp::Var("n".into()), SExp::IntLit(1)]
+            ))
         );
     }
 
@@ -5177,8 +6018,8 @@ mod tests {
     fn the_marker_that_says_where_the_c_goes_is_not_part_of_it() {
         // `%{^` puts it above the output and `%{$` below.  Neither
         // marker is C, and leaving one in makes the file not compile.
-        let p = Parser::parse("%{$\nint z = 1;\n%}\nimplement main0 () = println! (0)")
-            .expect("parse");
+        let p =
+            Parser::parse("%{$\nint z = 1;\n%}\nimplement main0 () = println! (0)").expect("parse");
         let Some(Def::InlineC(text)) = p.defs().iter().find(|d| matches!(d, Def::InlineC(_)))
         else {
             panic!("{:?}", p.defs())
@@ -5194,14 +6035,18 @@ mod tests {
         // thing that distinguishes it, and the resource discipline that
         // is half of what ATS is for goes unchecked.
         let p = Parser::parse("datavtype box_vt(a) = mk_vt of (a)").expect("parse");
-        let Def::Datatype(d) = &p.defs()[0] else { panic!("{:?}", p.defs()[0]) };
+        let Def::Datatype(d) = &p.defs()[0] else {
+            panic!("{:?}", p.defs()[0])
+        };
         assert!(d.linear, "a datavtype is linear");
     }
 
     #[test]
     fn an_ordinary_datatype_is_not_linear() {
         let p = Parser::parse("datatype box(a) = mk of (a)").expect("parse");
-        let Def::Datatype(d) = &p.defs()[0] else { panic!() };
+        let Def::Datatype(d) = &p.defs()[0] else {
+            panic!()
+        };
         assert!(!d.linear);
     }
 
@@ -5211,7 +6056,10 @@ mod tests {
         // stands for permission to touch something, and permission that
         // could be used twice would not be permission at all.
         let p = Parser::parse("dataview owned (int) = | own (0) of ()").expect("parse");
-        let owned = p.defs().iter().any(|d| matches!(d, Def::Extern(e) if e.name == "own" && e.linear));
+        let owned = p
+            .defs()
+            .iter()
+            .any(|d| matches!(d, Def::Extern(e) if e.name == "own" && e.linear));
         assert!(owned, "{:?}", p.defs());
     }
 
@@ -5238,13 +6086,19 @@ mod tests {
     #[test]
     fn a_dataprop_that_does_not_parse_is_skipped_not_fatal() {
         let p = Parser::parse("dataprop WEIRD = | ??? \n fun f(): int = 1").expect("parse");
-        assert!(p.defs().iter().any(|d| matches!(d, Def::Fun(f) if f.name == "f")));
+        assert!(
+            p.defs()
+                .iter()
+                .any(|d| matches!(d, Def::Fun(f) if f.name == "f"))
+        );
     }
 
     #[test]
     fn a_proof_function_needs_no_extern_before_it() {
         let p = Parser::parse("praxi ax (): [1 == 1] void").expect("parse");
-        let Def::Extern(d) = &p.defs()[0] else { panic!("{:?}", p.defs()[0]) };
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!("{:?}", p.defs()[0])
+        };
         assert_eq!(d.name, "ax");
     }
 
@@ -5252,15 +6106,22 @@ mod tests {
     fn a_proof_function_that_does_not_parse_is_skipped_not_fatal() {
         // The fallback must survive: a proof language this compiler does
         // not model costs its own declaration, never the file.
-        let p = Parser::parse("praxi weird {a:t@ype} (!list(a) >> list(a)): void\nfun f(): int = 1")
-            .expect("parse");
-        assert!(p.defs().iter().any(|d| matches!(d, Def::Fun(f) if f.name == "f")));
+        let p =
+            Parser::parse("praxi weird {a:t@ype} (!list(a) >> list(a)): void\nfun f(): int = 1")
+                .expect("parse");
+        assert!(
+            p.defs()
+                .iter()
+                .any(|d| matches!(d, Def::Fun(f) if f.name == "f"))
+        );
     }
 
     #[test]
     fn a_bracket_holding_a_binder_is_still_read_as_a_binder() {
         let p = Parser::parse("extern fun g (): [r:nat] int r").expect("parse");
-        let Def::Extern(d) = &p.defs()[0] else { panic!() };
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!()
+        };
         assert_eq!(d.existentials[0].vars, vec![("r".to_string(), Sort::Nat)]);
         assert_eq!(d.existentials[0].guard, None);
     }
@@ -5282,7 +6143,9 @@ mod tests {
         // everything it implements elsewhere, and a declaration that
         // forgets its quantifier is a promise nobody can keep.
         let p = Parser::parse("extern fun ext {n:nat} (x: int n): int").expect("parse");
-        let Def::Extern(d) = &p.defs()[0] else { panic!("{:?}", p.defs()[0]) };
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!("{:?}", p.defs()[0])
+        };
         assert_eq!(d.universals.len(), 1);
         assert_eq!(d.universals[0].vars, vec![("n".to_string(), Sort::Nat)]);
     }
@@ -5298,7 +6161,10 @@ mod tests {
         assert_eq!(f.universals[0].vars, vec![("n".to_string(), Sort::Nat)]);
         assert_eq!(
             f.universals[0].guard,
-            Some(SExp::App(">".into(), vec![SExp::Var("n".into()), SExp::IntLit(0)]))
+            Some(SExp::App(
+                ">".into(),
+                vec![SExp::Var("n".into()), SExp::IntLit(0)]
+            ))
         );
     }
 
@@ -5318,11 +6184,17 @@ mod tests {
             Some(SExp::App(
                 "&&".into(),
                 vec![
-                    SExp::App("<=".into(), vec![SExp::Var("i".into()), SExp::Var("j".into())]),
+                    SExp::App(
+                        "<=".into(),
+                        vec![SExp::Var("i".into()), SExp::Var("j".into())]
+                    ),
                     SExp::App(
                         "==".into(),
                         vec![
-                            SExp::App("+".into(), vec![SExp::Var("i".into()), SExp::Var("j".into())]),
+                            SExp::App(
+                                "+".into(),
+                                vec![SExp::Var("i".into()), SExp::Var("j".into())]
+                            ),
                             SExp::IntLit(4)
                         ]
                     ),
@@ -5336,7 +6208,11 @@ mod tests {
         let p = Parser::parse("fun loop {i,j:nat | i <= j; i+j == 4} (x: int i): int = x")
             .expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        let hyps: Vec<String> = f.universals[0].hypotheses().iter().map(|h| h.to_string()).collect();
+        let hyps: Vec<String> = f.universals[0]
+            .hypotheses()
+            .iter()
+            .map(|h| h.to_string())
+            .collect();
         assert!(hyps.contains(&"i >= 0".to_string()), "{hyps:?}");
         assert!(hyps.contains(&"j >= 0".to_string()), "{hyps:?}");
         assert!(hyps.iter().any(|h| h.contains("i <= j")), "{hyps:?}");
@@ -5355,12 +6231,21 @@ mod tests {
     fn an_indexed_type_keeps_its_index() {
         let p = Parser::parse("fun f {n:nat} (x: int n): int(n+1) = x + 1").expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
-        assert_eq!(f.params[0].ty, Ty::Index(Box::new(Ty::Name("int".into())), vec![SExp::Var("n".into())]));
+        assert_eq!(
+            f.params[0].ty,
+            Ty::Index(
+                Box::new(Ty::Name("int".into())),
+                vec![SExp::Var("n".into())]
+            )
+        );
         assert_eq!(
             f.ret,
             Ty::Index(
                 Box::new(Ty::Name("int".into())),
-                vec![SExp::App("+".into(), vec![SExp::Var("n".into()), SExp::IntLit(1)])]
+                vec![SExp::App(
+                    "+".into(),
+                    vec![SExp::Var("n".into()), SExp::IntLit(1)]
+                )]
             )
         );
     }
@@ -5370,8 +6255,19 @@ mod tests {
         assert_eq!(
             impl_body("implement main0() = { val x = 1; x + 1 }"),
             Expr::Let(
-                vec![LetBind { opened: Vec::new(), proof: false, name: Some("x".into()), ty: None, value: int(1), mutable: false }],
-                Box::new(Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(int(1)))),
+                vec![LetBind {
+                    opened: Vec::new(),
+                    proof: false,
+                    name: Some("x".into()),
+                    ty: None,
+                    value: int(1),
+                    mutable: false
+                }],
+                Box::new(Expr::BinOp(
+                    BinOp::Add,
+                    Box::new(var("x")),
+                    Box::new(int(1))
+                )),
             )
         );
     }
@@ -5381,9 +6277,17 @@ mod tests {
         assert_eq!(
             body_of("fun f(): int = lam (x: int) => x + 1"),
             Expr::Lam(
-                vec![Param { borrowed: false, name: "x".into(), ty: Ty::Name("int".into()) }],
+                vec![Param {
+                    borrowed: false,
+                    name: "x".into(),
+                    ty: Ty::Name("int".into())
+                }],
                 None,
-                Box::new(Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(int(1)))),
+                Box::new(Expr::BinOp(
+                    BinOp::Add,
+                    Box::new(var("x")),
+                    Box::new(int(1))
+                )),
             )
         );
     }
@@ -5419,7 +6323,10 @@ mod tests {
     fn raise_names_the_exception_it_throws() {
         assert_eq!(
             body_of("fun f(): int = $raise StreamSubscriptExn"),
-            Expr::Call(Box::new(var("$raise")), vec![Expr::StrLit("StreamSubscriptExn".into())])
+            Expr::Call(
+                Box::new(var("$raise")),
+                vec![Expr::StrLit("StreamSubscriptExn".into())]
+            )
         );
     }
 
@@ -5429,10 +6336,15 @@ mod tests {
         // closure.  Who may call it is a question for the type checker;
         // that it *is* an arrow is a question for the parser.
         let p = Parser::parse("extern fun apply (f: (int) -<cloref1> bool): bool").expect("parse");
-        let Def::Extern(d) = &p.defs()[0] else { panic!("expected an extern") };
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!("expected an extern")
+        };
         assert_eq!(
             d.params[0].ty,
-            Ty::Fun(vec![Ty::Name("int".into())], Box::new(Ty::Name("bool".into())))
+            Ty::Fun(
+                vec![Ty::Name("int".into())],
+                Box::new(Ty::Name("bool".into()))
+            )
         );
     }
 
@@ -5443,11 +6355,11 @@ mod tests {
         // is an outer name, and a binder shadows one — expanding it here
         // would turn the generic implementation into an instance of
         // whatever the alias happened to mean.
-        let p = Parser::parse(
-            "typedef res = int\nimplement(res) f<res> (x: res): res = x",
-        )
-        .expect("parse");
-        let Def::Implement(i) = &p.defs()[0] else { panic!("expected an implement") };
+        let p = Parser::parse("typedef res = int\nimplement(res) f<res> (x: res): res = x")
+            .expect("parse");
+        let Def::Implement(i) = &p.defs()[0] else {
+            panic!("expected an implement")
+        };
         assert_eq!(i.ty_params, vec!["res".to_string()]);
         assert_eq!(i.instance, vec![Ty::Name("res".into())]);
     }
@@ -5459,11 +6371,19 @@ mod tests {
         // brace group as a type argument would file it under an instance
         // nobody ever asks for, and the generic body would be missing.
         let p = Parser::parse("implement{a} f {n} (xs: int): int = xs").expect("parse");
-        let Def::Implement(i) = &p.defs()[0] else { panic!("expected an implement") };
-        assert!(i.instance.is_empty(), "a static argument was read as an instance: {:?}", i.instance);
+        let Def::Implement(i) = &p.defs()[0] else {
+            panic!("expected an implement")
+        };
+        assert!(
+            i.instance.is_empty(),
+            "a static argument was read as an instance: {:?}",
+            i.instance
+        );
 
         let p = Parser::parse("implement f<int> (xs: int): int = xs").expect("parse");
-        let Def::Implement(i) = &p.defs()[0] else { panic!("expected an implement") };
+        let Def::Implement(i) = &p.defs()[0] else {
+            panic!("expected an implement")
+        };
         assert_eq!(i.instance, vec![Ty::Name("int".into())]);
     }
 
@@ -5476,15 +6396,24 @@ mod tests {
         assert_eq!(
             body_of("fun f(): list0(int) = $list{int}(1, 2)"),
             Expr::Call(
-                Box::new(Expr::Inst("list0_cons".into(), vec![Ty::Name("int".into())])),
+                Box::new(Expr::Inst(
+                    "list0_cons".into(),
+                    vec![Ty::Name("int".into())]
+                )),
                 vec![
                     int(1),
                     Expr::Call(
-                        Box::new(Expr::Inst("list0_cons".into(), vec![Ty::Name("int".into())])),
+                        Box::new(Expr::Inst(
+                            "list0_cons".into(),
+                            vec![Ty::Name("int".into())]
+                        )),
                         vec![
                             int(2),
                             Expr::Call(
-                                Box::new(Expr::Inst("list0_nil".into(), vec![Ty::Name("int".into())])),
+                                Box::new(Expr::Inst(
+                                    "list0_nil".into(),
+                                    vec![Ty::Name("int".into())]
+                                )),
                                 vec![],
                             ),
                         ],
@@ -5506,7 +6435,9 @@ mod tests {
             "assume set (a:t@ype) = list0(a)\n",
         ))
         .expect("parse");
-        let Def::Fun(f) = &p.defs()[0] else { panic!("expected a fun") };
+        let Def::Fun(f) = &p.defs()[0] else {
+            panic!("expected a fun")
+        };
         assert_eq!(f.ret, Ty::App("list0".into(), vec![Ty::Name("int".into())]));
     }
 
@@ -5528,11 +6459,12 @@ mod tests {
         // `typedef ordmod (a:t@ype) = '{ ... }` names a *family* of
         // types.  Each use supplies the arguments, and the alias means
         // its body with those substituted in.
-        let p = Parser::parse(
-            "typedef pair (a:t@ype) = '{ fst= a, snd= a }\nfun f(): pair(int) = g()",
-        )
-        .expect("parse");
-        let Def::Fun(f) = &p.defs()[0] else { panic!("expected a fun") };
+        let p =
+            Parser::parse("typedef pair (a:t@ype) = '{ fst= a, snd= a }\nfun f(): pair(int) = g()")
+                .expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else {
+            panic!("expected a fun")
+        };
         assert_eq!(
             f.ret,
             Ty::Record(vec![
@@ -5550,7 +6482,9 @@ mod tests {
         // whole, and the name it bound went undefined.
         let p = Parser::parse("staload \"x.sats\"\nval a: int = 1").expect("parse");
         assert!(
-            p.defs().iter().any(|d| matches!(d, Def::Val(v) if v.name == "a")),
+            p.defs()
+                .iter()
+                .any(|d| matches!(d, Def::Val(v) if v.name == "a")),
             "the `val` was swallowed: {:?}",
             p.defs()
         );
@@ -5562,8 +6496,13 @@ mod tests {
         // ways.  Without the arity a juxtaposed name reads as a static
         // index and is dropped, which loses the element type.
         let p = Parser::parse("typedef N2 = int\nfun f(): stream N2 = g()").expect("parse");
-        let Def::Fun(f) = &p.defs()[0] else { panic!("expected a fun") };
-        assert_eq!(f.ret, Ty::App("stream".into(), vec![Ty::Name("int".into())]));
+        let Def::Fun(f) = &p.defs()[0] else {
+            panic!("expected a fun")
+        };
+        assert_eq!(
+            f.ret,
+            Ty::App("stream".into(), vec![Ty::Name("int".into())])
+        );
     }
 
     #[test]
@@ -5595,10 +6534,15 @@ mod tests {
     fn a_define_renames_a_constructor_in_patterns_and_expressions() {
         let src = "#define cons stream_vt_cons\n\
                    fun f(xs: list0(int)): int = case xs of | cons(n, r) => n | _ => 0";
-        let Expr::Case(_, arms) = body_of(src) else { panic!("expected a case") };
+        let Expr::Case(_, arms) = body_of(src) else {
+            panic!("expected a case")
+        };
         assert_eq!(
             arms[0].0,
-            Pattern::Ctor("stream_vt_cons".into(), vec![Pattern::Var("n".into()), Pattern::Var("r".into())])
+            Pattern::Ctor(
+                "stream_vt_cons".into(),
+                vec![Pattern::Var("n".into()), Pattern::Var("r".into())]
+            )
         );
     }
 
@@ -5613,17 +6557,23 @@ mod tests {
 
     #[test]
     fn a_vtypedef_names_a_type_the_same_way_a_typedef_does() {
-        let p = Parser::parse("vtypedef res = list0(int)
-fun f(): res = list0_nil()")
-            .expect("parse");
-        let Def::Fun(f) = &p.defs()[0] else { panic!("expected a fun") };
+        let p = Parser::parse(
+            "vtypedef res = list0(int)
+fun f(): res = list0_nil()",
+        )
+        .expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else {
+            panic!("expected a fun")
+        };
         assert_eq!(f.ret, Ty::App("list0".into(), vec![Ty::Name("int".into())]));
     }
 
     #[test]
     fn an_implement_may_take_its_template_parameters_in_parentheses() {
         let p = Parser::parse("implement(a) f<a> (x) = x").expect("parse");
-        let Def::Implement(i) = &p.defs()[0] else { panic!("expected an implement") };
+        let Def::Implement(i) = &p.defs()[0] else {
+            panic!("expected an implement")
+        };
         assert_eq!(i.ty_params, vec!["a".to_string()]);
     }
 
@@ -5632,7 +6582,14 @@ fun f(): res = list0_nil()")
         assert_eq!(
             body_of("fun f(): int = let val x = 1 in g(); x end"),
             Expr::Let(
-                vec![LetBind { opened: Vec::new(), proof: false, name: Some("x".into()), ty: None, value: int(1), mutable: false }],
+                vec![LetBind {
+                    opened: Vec::new(),
+                    proof: false,
+                    name: Some("x".into()),
+                    ty: None,
+                    value: int(1),
+                    mutable: false
+                }],
                 Box::new(Expr::Let(
                     vec![LetBind {
                         opened: Vec::new(),
@@ -5653,7 +6610,14 @@ fun f(): res = list0_nil()")
         assert_eq!(
             body_of("fun f(x: int): int = let val () = fold@ x in x end"),
             Expr::Let(
-                vec![LetBind { opened: Vec::new(), proof: false, name: None, ty: None, value: Expr::Unit, mutable: false }],
+                vec![LetBind {
+                    opened: Vec::new(),
+                    proof: false,
+                    name: None,
+                    ty: None,
+                    value: Expr::Unit,
+                    mutable: false
+                }],
                 Box::new(var("x")),
             )
         );
@@ -5661,8 +6625,12 @@ fun f(): res = list0_nil()")
 
     #[test]
     fn a_semicolon_may_follow_a_pattern_binding() {
-        let body = body_of("fun f(xs: list0(int)): int = let val-cons(n, r) = xs; val p = n in p end");
-        assert!(matches!(body, Expr::Case(..)), "expected a case, got {body:?}");
+        let body =
+            body_of("fun f(xs: list0(int)): int = let val-cons(n, r) = xs; val p = n in p end");
+        assert!(
+            matches!(body, Expr::Case(..)),
+            "expected a case, got {body:?}"
+        );
     }
 
     #[test]
@@ -5691,13 +6659,16 @@ fun f(): res = list0_nil()")
 
     #[test]
     fn a_local_block_inside_a_body_contributes_its_public_bindings() {
-        let Expr::Let(binds, body) = body_of(
-            "fun f(): int = let local val hidden = 1 in val shown = 2 end in shown end",
-        ) else {
+        let Expr::Let(binds, body) =
+            body_of("fun f(): int = let local val hidden = 1 in val shown = 2 end in shown end")
+        else {
             panic!("expected a let")
         };
         assert_eq!(
-            binds.iter().filter_map(|b| b.name.as_deref()).collect::<Vec<_>>(),
+            binds
+                .iter()
+                .filter_map(|b| b.name.as_deref())
+                .collect::<Vec<_>>(),
             vec!["hidden", "shown"]
         );
         assert_eq!(*body, var("shown"));
@@ -5706,7 +6677,9 @@ fun f(): res = list0_nil()")
     #[test]
     fn an_implement_may_qualify_its_name_with_a_module() {
         let p = Parser::parse("implement $RG.randgen_val<int> () = 1").expect("parse");
-        let Def::Implement(i) = &p.defs()[0] else { panic!("expected an implement") };
+        let Def::Implement(i) = &p.defs()[0] else {
+            panic!("expected an implement")
+        };
         assert_eq!(i.name, "randgen_val");
     }
 
@@ -5735,7 +6708,8 @@ fun f(): res = list0_nil()")
 
     #[test]
     fn an_at_marks_a_pattern_as_matching_in_place() {
-        let Expr::Case(_, arms) = body_of("fun f(xs: list0(int)): int = case xs of | @cons(n, r) => 1 | _ => 0")
+        let Expr::Case(_, arms) =
+            body_of("fun f(xs: list0(int)): int = case xs of | @cons(n, r) => 1 | _ => 0")
         else {
             panic!("expected a case")
         };
@@ -5750,8 +6724,7 @@ fun f(): res = list0_nil()")
 
     #[test]
     fn a_proof_bar_drops_the_proofs_from_a_tuple_pattern() {
-        let Expr::Let(binds, _) =
-            body_of("fun f(): int = let val (pfat, pfgc | p) = g() in p end")
+        let Expr::Let(binds, _) = body_of("fun f(): int = let val (pfat, pfgc | p) = g() in p end")
         else {
             panic!("expected a let")
         };
@@ -5760,34 +6733,39 @@ fun f(): res = list0_nil()")
 
     #[test]
     fn template_arguments_may_be_type_applications() {
-        let Expr::Call(head, _) = body_of(
-            "fun f(out: int): int = fprint_tupval2<int,tup(bool,char)> (out, 1)",
-        ) else {
+        let Expr::Call(head, _) =
+            body_of("fun f(out: int): int = fprint_tupval2<int,tup(bool,char)> (out, 1)")
+        else {
             panic!("expected a call")
         };
-        let Expr::Inst(name, args) = *head else { panic!("expected an instantiation, got {head:?}") };
+        let Expr::Inst(name, args) = *head else {
+            panic!("expected an instantiation, got {head:?}")
+        };
         assert_eq!(name, "fprint_tupval2");
         assert_eq!(args.len(), 2);
     }
 
     #[test]
     fn parses_cons_as_an_infix_pattern() {
-        let Expr::Case(_, arms) = body_of(
-            "fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
-        ) else {
+        let Expr::Case(_, arms) =
+            body_of("fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0")
+        else {
             panic!("expected a case")
         };
         assert_eq!(
             arms[0].0,
-            Pattern::Ctor("cons".into(), vec![Pattern::Var("x".into()), Pattern::Var("rest".into())])
+            Pattern::Ctor(
+                "cons".into(),
+                vec![Pattern::Var("x".into()), Pattern::Var("rest".into())]
+            )
         );
     }
 
     #[test]
     fn cons_patterns_nest_to_the_right() {
-        let Expr::Case(_, arms) = body_of(
-            "fun f(xs: list0(int)): int = case xs of | x :: y :: rest => 1 | _ => 0",
-        ) else {
+        let Expr::Case(_, arms) =
+            body_of("fun f(xs: list0(int)): int = case xs of | x :: y :: rest => 1 | _ => 0")
+        else {
             panic!("expected a case")
         };
         assert_eq!(
@@ -5809,10 +6787,7 @@ fun f(): res = list0_nil()")
     fn parses_cons_as_an_infix_expression() {
         assert_eq!(
             body_of("fun f(x: int, xs: list0(int)): list0(int) = x :: xs"),
-            Expr::Call(
-                Box::new(var("cons")),
-                vec![var("x"), var("xs")],
-            )
+            Expr::Call(Box::new(var("cons")), vec![var("x"), var("xs")],)
         );
     }
 
@@ -5838,9 +6813,17 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
         assert_eq!(
             body_of("fun f(): int = lam x => x + 1"),
             Expr::Lam(
-                vec![Param { borrowed: false, name: "x".into(), ty: Ty::Name("_".into()) }],
+                vec![Param {
+                    borrowed: false,
+                    name: "x".into(),
+                    ty: Ty::Name("_".into())
+                }],
                 None,
-                Box::new(Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(int(1)))),
+                Box::new(Expr::BinOp(
+                    BinOp::Add,
+                    Box::new(var("x")),
+                    Box::new(int(1))
+                )),
             )
         );
     }
@@ -5851,23 +6834,45 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
             body_of("fun f(): int = lam (x0, x1) => x0 + x1"),
             Expr::Lam(
                 vec![
-                    Param { borrowed: false, name: "x0".into(), ty: Ty::Name("_".into()) },
-                    Param { borrowed: false, name: "x1".into(), ty: Ty::Name("_".into()) },
+                    Param {
+                        borrowed: false,
+                        name: "x0".into(),
+                        ty: Ty::Name("_".into())
+                    },
+                    Param {
+                        borrowed: false,
+                        name: "x1".into(),
+                        ty: Ty::Name("_".into())
+                    },
                 ],
                 None,
-                Box::new(Expr::BinOp(BinOp::Add, Box::new(var("x0")), Box::new(var("x1")))),
+                Box::new(Expr::BinOp(
+                    BinOp::Add,
+                    Box::new(var("x0")),
+                    Box::new(var("x1"))
+                )),
             )
         );
     }
 
     #[test]
     fn parses_unary_negation_with_tilde_and_dash() {
-        assert_eq!(body_of("fun f(x: int): int = ~x"), Expr::UnaryNeg(Box::new(var("x"))));
-        assert_eq!(body_of("fun f(x: int): int = -x"), Expr::UnaryNeg(Box::new(var("x"))));
+        assert_eq!(
+            body_of("fun f(x: int): int = ~x"),
+            Expr::UnaryNeg(Box::new(var("x")))
+        );
+        assert_eq!(
+            body_of("fun f(x: int): int = -x"),
+            Expr::UnaryNeg(Box::new(var("x")))
+        );
         // Unary binds tighter than multiplication.
         assert_eq!(
             body_of("fun f(x: int): int = ~x * 2"),
-            Expr::BinOp(BinOp::Mul, Box::new(Expr::UnaryNeg(Box::new(var("x")))), Box::new(int(2)))
+            Expr::BinOp(
+                BinOp::Mul,
+                Box::new(Expr::UnaryNeg(Box::new(var("x")))),
+                Box::new(int(2))
+            )
         );
     }
 
@@ -5875,11 +6880,21 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
     fn parses_calls_and_chained_calls() {
         assert_eq!(
             body_of("fun f(): int = fact(n - 1)"),
-            Expr::Call(Box::new(var("fact")), vec![Expr::BinOp(BinOp::Sub, Box::new(var("n")), Box::new(int(1)))])
+            Expr::Call(
+                Box::new(var("fact")),
+                vec![Expr::BinOp(
+                    BinOp::Sub,
+                    Box::new(var("n")),
+                    Box::new(int(1))
+                )]
+            )
         );
         assert_eq!(
             body_of("fun f(): int = g(1)(2)"),
-            Expr::Call(Box::new(Expr::Call(Box::new(var("g")), vec![int(1)])), vec![int(2)])
+            Expr::Call(
+                Box::new(Expr::Call(Box::new(var("g")), vec![int(1)])),
+                vec![int(2)]
+            )
         );
     }
 
@@ -5894,20 +6909,25 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
     #[test]
     fn parses_function_types() {
         // A higher-order parameter type: (int, int) -> int   and   int -> int
-        let p = Parser::parse(
-            "fun apply(f: (int, int) -> int, x: int): int = f(x, x)",
-        ).expect("parse");
+        let p =
+            Parser::parse("fun apply(f: (int, int) -> int, x: int): int = f(x, x)").expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
         assert_eq!(
             f.params[0].ty,
-            Ty::Fun(vec![Ty::Name("int".into()), Ty::Name("int".into())], Box::new(Ty::Name("int".into())))
+            Ty::Fun(
+                vec![Ty::Name("int".into()), Ty::Name("int".into())],
+                Box::new(Ty::Name("int".into()))
+            )
         );
 
         let p = Parser::parse("fun id(f: int -> int): int = f(1)").expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };
         assert_eq!(
             f.params[0].ty,
-            Ty::Fun(vec![Ty::Name("int".into())], Box::new(Ty::Name("int".into())))
+            Ty::Fun(
+                vec![Ty::Name("int".into())],
+                Box::new(Ty::Name("int".into()))
+            )
         );
     }
 
@@ -5923,7 +6943,9 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
         );
 
         let p = Parser::parse("datatype tree = leaf | node(tree, tree)").expect("parse");
-        let Def::Datatype(d) = &p.defs()[0] else { panic!() };
+        let Def::Datatype(d) = &p.defs()[0] else {
+            panic!()
+        };
         assert_eq!(d.ctors[1].fields[0], Ty::Name("tree".into()));
     }
 
@@ -5964,14 +6986,20 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
     fn termination_metrics_are_skipped() {
         // `.<x>.` proves the recursion terminates — a promise to the ATS
         // type checker with no bearing on what we emit.
-        assert_eq!(body_of("fun f(x: int): int .<x>. = x"), Expr::Var("x".into()));
+        assert_eq!(
+            body_of("fun f(x: int): int .<x>. = x"),
+            Expr::Var("x".into())
+        );
     }
 
     #[test]
     fn template_parameters_are_skipped() {
         // `{a:type}` constrains the static language, which this compiler
         // does not check; the function underneath it parses normally.
-        assert_eq!(body_of("fun f{a:type}(x: int): int = x"), Expr::Var("x".into()));
+        assert_eq!(
+            body_of("fun f{a:type}(x: int): int = x"),
+            Expr::Var("x".into())
+        );
     }
 
     #[test]
@@ -5982,9 +7010,19 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
 
     #[test]
     fn truncated_inputs_yield_errors_not_panics() {
-        for src in ["fun f(", "fun f(): int =", "fun f(): int = 1 +", "implement main0(", "let x = 1 in 2"] {
+        for src in [
+            "fun f(",
+            "fun f(): int =",
+            "fun f(): int = 1 +",
+            "implement main0(",
+            "let x = 1 in 2",
+        ] {
             let err = expect_err(src);
-            assert_eq!(err.kind(), ats2_domain::errors::ErrorKind::Parse, "src: {src}");
+            assert_eq!(
+                err.kind(),
+                ats2_domain::errors::ErrorKind::Parse,
+                "src: {src}"
+            );
         }
     }
 
@@ -5995,7 +7033,11 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
     }
 
     fn expect_err_from_tokens(tokens: &[Token]) -> CompileError {
-        Parser::parse_tokens(tokens).expect_err("should fail").into_iter().next().expect("at least one error")
+        Parser::parse_tokens(tokens)
+            .expect_err("should fail")
+            .into_iter()
+            .next()
+            .expect("at least one error")
     }
 
     // --- integration: a realistic mini-program --------------------

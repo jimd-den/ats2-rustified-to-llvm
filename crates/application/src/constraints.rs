@@ -50,7 +50,10 @@ struct Linear {
 
 impl Linear {
     fn constant(k: i64) -> Linear {
-        Linear { terms: BTreeMap::new(), konst: k }
+        Linear {
+            terms: BTreeMap::new(),
+            konst: k,
+        }
     }
 
     fn var(name: String) -> Linear {
@@ -75,7 +78,10 @@ impl Linear {
                 terms.remove(v);
             }
         }
-        Linear { terms, konst: self.konst + other.konst }
+        Linear {
+            terms,
+            konst: self.konst + other.konst,
+        }
     }
 
     fn sub(&self, other: &Linear) -> Linear {
@@ -145,13 +151,17 @@ fn atoms(e: &SExp) -> Option<Vec<Linear>> {
         // Over the integers `a > b` is `a - b - 1 >= 0`.  Tightening
         // here is what lets the rational elimination below decide goals
         // that are only true because the variables are whole numbers.
-        (">", 2) => {
-            Some(vec![linearize(&args[0])?.sub(&linearize(&args[1])?).add(&Linear::constant(-1))])
-        }
+        (">", 2) => Some(vec![
+            linearize(&args[0])?
+                .sub(&linearize(&args[1])?)
+                .add(&Linear::constant(-1)),
+        ]),
         ("<=", 2) => Some(vec![linearize(&args[1])?.sub(&linearize(&args[0])?)]),
-        ("<", 2) => {
-            Some(vec![linearize(&args[1])?.sub(&linearize(&args[0])?).add(&Linear::constant(-1))])
-        }
+        ("<", 2) => Some(vec![
+            linearize(&args[1])?
+                .sub(&linearize(&args[0])?)
+                .add(&Linear::constant(-1)),
+        ]),
         ("==", 2) | ("=", 2) => {
             let d = linearize(&args[0])?.sub(&linearize(&args[1])?);
             Some(vec![d.clone(), d.scale(-1)])
@@ -168,7 +178,12 @@ fn atoms(e: &SExp) -> Option<Vec<Linear>> {
 /// single-atom systems, each of which must be refuted separately.
 fn negations(e: &SExp) -> Option<Vec<Linear>> {
     // `¬(L >= 0)` is `L <= -1`, i.e. `-L - 1 >= 0`.
-    Some(atoms(e)?.into_iter().map(|l| l.scale(-1).add(&Linear::constant(-1))).collect())
+    Some(
+        atoms(e)?
+            .into_iter()
+            .map(|l| l.scale(-1).add(&Linear::constant(-1)))
+            .collect(),
+    )
 }
 
 /// Whether a system of `>= 0` constraints has no rational solution.
@@ -266,19 +281,22 @@ fn congruences(hyps: &[SExp], goal: Option<&SExp>, base: &[Linear]) -> Vec<Linea
     let mut out = Vec::new();
     for (i, a) in terms.iter().enumerate() {
         for b in terms.iter().skip(i + 1) {
-            let (SExp::App(fa, xs), SExp::App(fb, ys)) = (a, b) else { continue };
+            let (SExp::App(fa, xs), SExp::App(fb, ys)) = (a, b) else {
+                continue;
+            };
             if fa != fb || xs.len() != ys.len() {
                 continue;
             }
-            let agree = xs.iter().zip(ys).all(|(x, y)| {
-                match (linearize(x), linearize(y)) {
+            let agree = xs
+                .iter()
+                .zip(ys)
+                .all(|(x, y)| match (linearize(x), linearize(y)) {
                     (Some(x), Some(y)) => {
                         let d = x.sub(&y);
                         proves(&d) && proves(&d.scale(-1))
                     }
                     _ => false,
-                }
-            });
+                });
             if agree {
                 let d = Linear::var(opaque_name(a)).sub(&Linear::var(opaque_name(b)));
                 out.push(d.clone());
@@ -379,8 +397,12 @@ pub fn entails(hyps: &[SExp], goal: &SExp) -> Verdict {
             };
         }
     }
-    let Some(goal_atoms) = atoms(goal) else { return Verdict::Unknown };
-    let Some(negated) = negations(goal) else { return Verdict::Unknown };
+    let Some(goal_atoms) = atoms(goal) else {
+        return Verdict::Unknown;
+    };
+    let Some(negated) = negations(goal) else {
+        return Verdict::Unknown;
+    };
 
     // One system per case the hypotheses leave open.  A claim holds only
     // if it holds in all of them, and is false only if it fails in all.
@@ -423,9 +445,15 @@ pub fn entails(hyps: &[SExp], goal: &SExp) -> Verdict {
 mod tests {
     use super::*;
 
-    fn v(n: &str) -> SExp { SExp::Var(n.into()) }
-    fn i(n: i64) -> SExp { SExp::IntLit(n) }
-    fn app(op: &str, a: SExp, b: SExp) -> SExp { SExp::App(op.into(), vec![a, b]) }
+    fn v(n: &str) -> SExp {
+        SExp::Var(n.into())
+    }
+    fn i(n: i64) -> SExp {
+        SExp::IntLit(n)
+    }
+    fn app(op: &str, a: SExp, b: SExp) -> SExp {
+        SExp::App(op.into(), vec![a, b])
+    }
 
     #[test]
     fn a_goal_that_follows_from_the_hypotheses_is_proved() {
@@ -495,7 +523,11 @@ mod tests {
         // and nothing in the source ever writes that equality down.
         let hyps = vec![
             app("==", v("n"), i(3)),
-            app("==", SExp::App("f".into(), vec![app("-", v("n"), i(1))]), i(7)),
+            app(
+                "==",
+                SExp::App("f".into(), vec![app("-", v("n"), i(1))]),
+                i(7),
+            ),
         ];
         let goal = app("==", SExp::App("f".into(), vec![i(2)]), i(7));
         assert_eq!(entails(&hyps, &goal), Verdict::Proved);
@@ -518,7 +550,10 @@ mod tests {
         // `!=` is a disjunction, so a conjunctive system cannot hold it —
         // but it can be *decided* by taking each side in turn.
         let hyps = vec![app(">=", v("i"), i(0)), app("!=", v("i"), i(0))];
-        assert_eq!(entails(&hyps, &app(">=", app("-", v("i"), i(1)), i(0))), Verdict::Proved);
+        assert_eq!(
+            entails(&hyps, &app(">=", app("-", v("i"), i(1)), i(0))),
+            Verdict::Proved
+        );
     }
 
     #[test]

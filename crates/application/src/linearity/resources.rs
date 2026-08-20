@@ -82,7 +82,11 @@ impl Resources {
 
     /// Every resource still held, in the order the names arrived.
     pub fn leaked(&self) -> Vec<String> {
-        self.order.iter().filter(|n| self.is_held(n)).cloned().collect()
+        self.order
+            .iter()
+            .filter(|n| self.is_held(n))
+            .cloned()
+            .collect()
     }
 
     /// The first resource these two paths do not agree about.

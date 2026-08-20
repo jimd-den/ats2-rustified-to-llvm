@@ -14,7 +14,7 @@
 //! a checker that cannot see those declarations cannot check anything but
 //! toy code.
 
-use ats2_application::checking::{check_program, Strictness};
+use ats2_application::checking::{Strictness, check_program};
 use ats2_infrastructure::parser::Parser;
 
 /// Parse `source` and check it strictly, returning the complaints.
@@ -25,7 +25,12 @@ fn check(source: &str) -> Vec<String> {
         ats2_infrastructure::prelude::PRELUDE_SOURCE,
         ats2_infrastructure::prelude::PRELUDE_STATIC_SOURCE,
     ] {
-        defs.extend(Parser::parse(text).expect("the prelude should parse").defs().to_vec());
+        defs.extend(
+            Parser::parse(text)
+                .expect("the prelude should parse")
+                .defs()
+                .to_vec(),
+        );
     }
     let prelude = ats2_domain::ast::Program::new(defs);
     check_program(&program, &prelude, Strictness::Strict)
@@ -53,7 +58,10 @@ fn a_program_may_still_declare_a_name_the_prelude_also_has() {
         "extern fun string_length {n:nat} (s: string n): int (n+1) \
          fun f {n:nat} (s: string n): int (n+1) = string_length(s)",
     );
-    assert!(errs.is_empty(), "the program's own declaration should win: {errs:?}");
+    assert!(
+        errs.is_empty(),
+        "the program's own declaration should win: {errs:?}"
+    );
 }
 
 #[test]
@@ -196,7 +204,11 @@ fn a_pattern_field_of_the_wrong_shape_still_claims_nothing() {
          fun f (xs: list0(int)): int = \
            case+ xs of | list0_cons (x, rest) => needs_nat(x) | list0_nil () => 0",
     );
-    assert_eq!(errs.len(), 1, "an `int` is not known to be a `nat`: {errs:?}");
+    assert_eq!(
+        errs.len(),
+        1,
+        "an `int` is not known to be a `nat`: {errs:?}"
+    );
 }
 
 #[test]
@@ -274,7 +286,11 @@ fn a_template_called_without_naming_an_instance_claims_nothing_new() {
         "extern fun{a:t@ype} nth (xs: int, i: int): a \
          fun f (n: Nat): Nat = nth(0, n)",
     );
-    assert_eq!(errs.len(), 1, "an unknown result cannot be shown to be a nat: {errs:?}");
+    assert_eq!(
+        errs.len(),
+        1,
+        "an unknown result cannot be shown to be a nat: {errs:?}"
+    );
 }
 
 #[test]
@@ -329,9 +345,7 @@ fn taking_an_element_out_of_a_list_leaves_one_fewer() {
 
 #[test]
 fn the_length_of_a_list_is_the_length_it_carries() {
-    let errs = check(
-        "fun f {n:nat} (xs: list(int, n)): int n = length<int>(xs)",
-    );
+    let errs = check("fun f {n:nat} (xs: list(int, n)): int n = length<int>(xs)");
     assert!(errs.is_empty(), "{errs:?}");
 }
 
@@ -367,9 +381,7 @@ fn an_unsafe_cast_is_the_programmers_word_and_is_taken() {
     // type the checker cannot derive, and takes responsibility for it.
     // That is what `$UNSAFE` means, and a checker that argued with it
     // would reject every program that reaches for the hatch on purpose.
-    let errs = check(
-        "fun f {n:int} (x: int n): intGte(0) = $UN.cast{intGte(0)}(x)",
-    );
+    let errs = check("fun f {n:int} (x: int n): intGte(0) = $UN.cast{intGte(0)}(x)");
     assert!(errs.is_empty(), "{errs:?}");
 }
 
@@ -426,4 +438,56 @@ fn measuring_something_owes_nothing() {
     // place.
     let errs = check("fun f (s: string): int = string_length(s)");
     assert!(errs.is_empty(), "{errs:?}");
+}
+
+/// Factorial as a proposition: the shape every ATS proof tutorial opens
+/// with, and the smallest thing that is a *derivation* rather than a
+/// claim.
+const FACT: &str = "\
+dataprop FACT (int, int) = \
+| FACTbas (0, 1) of () \
+| {n:pos} {r:int} FACTind (n, n*r) of (FACT (n-1, r)) \
+";
+
+#[test]
+fn a_proof_whose_derivation_holds_is_accepted() {
+    let errs = check(&format!("{FACT} prfun base (): FACT(0, 1) = FACTbas ()"));
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn a_proof_whose_derivation_does_not_hold_is_refused() {
+    // `FACTbas` witnesses `FACT(0, 1)` and nothing else.  Offering it as
+    // a proof of `FACT(0, 2)` is a false proof, and a proof language
+    // that accepts one is decoration.
+    let errs = check(&format!("{FACT} prfun bogus (): FACT(0, 2) = FACTbas ()"));
+    assert!(!errs.is_empty(), "a false proof was accepted");
+}
+
+#[test]
+fn an_axiom_is_still_taken_on_its_word() {
+    // `praxi` has no derivation behind it — that is what an axiom *is*.
+    // The checker must not invent an obligation it has no body to
+    // discharge, or every ATS program that states a lemma stops
+    // compiling.
+    let errs = check(&format!("{FACT} praxi assumed (): FACT(3, 6)"));
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn a_proposition_keeps_the_indices_it_was_written_with() {
+    // The gap this closes is upstream of the checker: `FACT(0, 1)` and
+    // `list(int)` are the same shape on the page, so a proposition's
+    // arguments were being read as *types* and the numbers dropped.
+    // Every proposition became the bare name `FACT`, which every
+    // derivation proved equally well.
+    let program = Parser::parse(&format!("{FACT} prfun p (): FACT(0, 1) = FACTbas ()"))
+        .expect("the source should parse");
+    let found = program.defs().iter().any(|d| match d {
+        ats2_domain::ast::Def::Fun(f) => {
+            matches!(&f.ret, ats2_domain::ast::Ty::Index(_, idx) if idx.len() == 2)
+        }
+        _ => false,
+    });
+    assert!(found, "the proposition lost its indices");
 }

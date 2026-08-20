@@ -701,9 +701,7 @@ pub fn canonical_type(name: &str) -> Option<(&'static str, usize)> {
         // declared over `&array(a, n)` be matched against an argument
         // whose type says `arrayptr(a)`.  The length is a static index,
         // so only the element type survives.
-        "array" | "arrayptr" | "arrayref" | "arrszref" | "Array" | "Arrayptr" => {
-            Some(("array", 1))
-        }
+        "array" | "arrayptr" | "arrayref" | "arrszref" | "Array" | "Arrayptr" => Some(("array", 1)),
         // `bytes(n)` is `n` bytes; `b0ytes(n)` is `n` bytes nobody has
         // written yet.  The difference is a view, which this compiler
         // does not track.  There is no element type to name — bytes are
@@ -714,9 +712,7 @@ pub fn canonical_type(name: &str) -> Option<(&'static str, usize)> {
         // it is a name a program is as likely to want for itself, and an
         // alias here would rename the program's own datatype out from
         // under it.
-        "option" | "Option" | "option0" | "option_vt" | "Option_vt" => {
-            Some(("option0", 1))
-        }
+        "option" | "Option" | "option0" | "option_vt" | "Option_vt" => Some(("option0", 1)),
         // A linear stream differs from a lazy one in who may force it
         // and how often — a question for the type checker.  Both are a
         // thunk and the cell that remembers what it produced, so they
@@ -774,7 +770,10 @@ pub fn is_a_suspension(name: &str) -> bool {
 /// formers whose argument is a type are listed — the list is short
 /// because most of what a program juxtaposes really is an index.
 pub fn takes_a_type_argument(name: &str) -> bool {
-    matches!(name, "stream" | "stream_vt" | "lazy" | "llazy" | "stream_con" | "list0")
+    matches!(
+        name,
+        "stream" | "stream_vt" | "lazy" | "llazy" | "stream_con" | "list0"
+    )
 }
 
 /// Every constructor alias the prelude provides, as (alias, declared).

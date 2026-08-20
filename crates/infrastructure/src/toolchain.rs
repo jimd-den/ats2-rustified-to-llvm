@@ -48,7 +48,11 @@ mod tests {
 
     fn temp_path(tag: &str, ext: &str) -> std::path::PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("ats2llvm-clang-test-{tag}-{}-{}.{ext}", std::process::id(), n))
+        std::env::temp_dir().join(format!(
+            "ats2llvm-clang-test-{tag}-{}-{}.{ext}",
+            std::process::id(),
+            n
+        ))
     }
 
     fn clang_available() -> bool {

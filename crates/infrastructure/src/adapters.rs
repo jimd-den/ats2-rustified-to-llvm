@@ -29,8 +29,15 @@ impl ParserPort for Parser {
     /// becomes unproved, which is loud in exactly the right way.
     fn prelude(&self) -> Program {
         let mut defs = Vec::new();
-        for source in [crate::prelude::PRELUDE_SOURCE, crate::prelude::PRELUDE_STATIC_SOURCE] {
-            defs.extend(Parser::parse(source).map(|p| p.defs().to_vec()).unwrap_or_default());
+        for source in [
+            crate::prelude::PRELUDE_SOURCE,
+            crate::prelude::PRELUDE_STATIC_SOURCE,
+        ] {
+            defs.extend(
+                Parser::parse(source)
+                    .map(|p| p.defs().to_vec())
+                    .unwrap_or_default(),
+            );
         }
         Program::new(defs)
     }

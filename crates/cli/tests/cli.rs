@@ -15,7 +15,10 @@ static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn temp_file(tag: &str, ext: &str) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("ats2llvm-cli-{tag}-{}-{n}.{ext}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "ats2llvm-cli-{tag}-{}-{n}.{ext}",
+        std::process::id()
+    ))
 }
 
 fn write_source() -> PathBuf {

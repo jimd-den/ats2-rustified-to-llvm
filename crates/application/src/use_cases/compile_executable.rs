@@ -15,7 +15,12 @@ use crate::checking::Strictness;
 use crate::ports::{LlvmEmitterPort, OutputPort, ParserPort, ToolchainPort};
 
 /// Compiles source text into an executable binary.
-pub struct CompileExecutableUseCase<P: ParserPort, E: LlvmEmitterPort, T: ToolchainPort, O: OutputPort> {
+pub struct CompileExecutableUseCase<
+    P: ParserPort,
+    E: LlvmEmitterPort,
+    T: ToolchainPort,
+    O: OutputPort,
+> {
     parser: P,
     emitter: E,
     toolchain: T,
@@ -30,7 +35,13 @@ impl<P: ParserPort, E: LlvmEmitterPort, T: ToolchainPort, O: OutputPort>
     CompileExecutableUseCase<P, E, T, O>
 {
     pub fn new(parser: P, emitter: E, toolchain: T, output: O) -> Self {
-        Self { parser, emitter, toolchain, output, strictness: Strictness::default() }
+        Self {
+            parser,
+            emitter,
+            toolchain,
+            output,
+            strictness: Strictness::default(),
+        }
     }
 
     /// Compile under a different strictness than the default.  See
@@ -43,7 +54,12 @@ impl<P: ParserPort, E: LlvmEmitterPort, T: ToolchainPort, O: OutputPort>
 
     /// Parse, emit, persist the IR at `ir_path`, and link it to
     /// `binary_path`.  Returns `()` on success.
-    pub fn execute(&self, source: &str, ir_path: &Path, binary_path: &Path) -> Result<(), Vec<CompileError>> {
+    pub fn execute(
+        &self,
+        source: &str,
+        ir_path: &Path,
+        binary_path: &Path,
+    ) -> Result<(), Vec<CompileError>> {
         let program = self.parser.parse(source)?;
         // See `compile_to_ir`: the static language is checked before it
         // is erased, and both entry points must check, or the guarantee
@@ -53,14 +69,15 @@ impl<P: ParserPort, E: LlvmEmitterPort, T: ToolchainPort, O: OutputPort>
         // both run and the reader sees everything wrong at once rather
         // than one thing per attempt.
         let prelude = self.parser.prelude();
-        let mut violations =
-            crate::checking::check_program(&program, &prelude, self.strictness);
+        let mut violations = crate::checking::check_program(&program, &prelude, self.strictness);
         violations.extend(crate::linearity::check_linearity(&program, &prelude));
         if !violations.is_empty() {
             return Err(violations);
         }
         let ir = self.emitter.emit(&program).map_err(|e| vec![e])?;
-        self.output.write(ir_path, &ir).map_err(|m| vec![CompileError::target(m)])?;
+        self.output
+            .write(ir_path, &ir)
+            .map_err(|m| vec![CompileError::target(m)])?;
         let mut inputs = vec![ir_path.to_path_buf()];
         // A program that brought its own C compiles to two files.  The
         // block is the body of some `extern fun` declared beside it, so
@@ -69,7 +86,9 @@ impl<P: ParserPort, E: LlvmEmitterPort, T: ToolchainPort, O: OutputPort>
         // half of the program already is.
         if let Some(c) = inline_c(&program) {
             let c_path = ir_path.with_extension("c");
-            self.output.write(&c_path, &c).map_err(|m| vec![CompileError::target(m)])?;
+            self.output
+                .write(&c_path, &c)
+                .map_err(|m| vec![CompileError::target(m)])?;
             inputs.push(c_path);
         }
         self.toolchain
@@ -120,10 +139,23 @@ mod tests {
             let events = Rc::new(RefCell::new(vec![]));
             Self {
                 events: events.clone(),
-                parser: FakeParser { events: events.clone(), fail: None },
-                emitter: FakeEmitter { events: events.clone(), ir: "ir-text".into(), fail: None },
-                output: FakeOutput { events: events.clone(), fail: false },
-                toolchain: FakeToolchain { events: events.clone(), fail: false },
+                parser: FakeParser {
+                    events: events.clone(),
+                    fail: None,
+                },
+                emitter: FakeEmitter {
+                    events: events.clone(),
+                    ir: "ir-text".into(),
+                    fail: None,
+                },
+                output: FakeOutput {
+                    events: events.clone(),
+                    fail: false,
+                },
+                toolchain: FakeToolchain {
+                    events: events.clone(),
+                    fail: false,
+                },
             }
         }
     }
@@ -137,7 +169,12 @@ mod tests {
         // Full orchestration contract, in order:
         assert_eq!(
             *h.events.borrow(),
-            ["parse:fun f(): int = 1", "emit:1", "write:out.ll:7", "link:out.ll:a.out"]
+            [
+                "parse:fun f(): int = 1",
+                "emit:1",
+                "write:out.ll:7",
+                "link:out.ll:a.out"
+            ]
         );
     }
 
@@ -155,23 +192,34 @@ mod tests {
     #[test]
     fn failed_ir_write_prevents_linking() {
         let h = Harness::new();
-        let output = FakeOutput { events: h.events.clone(), fail: true };
+        let output = FakeOutput {
+            events: h.events.clone(),
+            fail: true,
+        };
         let uc = CompileExecutableUseCase::new(h.parser, h.emitter, h.toolchain, output);
-        let err = uc.execute("fun f(): int = 1", Path::new("out.ll"), Path::new("a.out"))
+        let err = uc
+            .execute("fun f(): int = 1", Path::new("out.ll"), Path::new("a.out"))
             .expect_err("should fail");
         assert_eq!(err.len(), 1);
         assert_eq!(err[0].kind(), ErrorKind::Target);
         assert_eq!(err[0].message(), "disk full");
         // The toolchain is never consulted after a failed write.
-        assert_eq!(*h.events.borrow(), ["parse:fun f(): int = 1", "emit:1", "write:out.ll:7"]);
+        assert_eq!(
+            *h.events.borrow(),
+            ["parse:fun f(): int = 1", "emit:1", "write:out.ll:7"]
+        );
     }
 
     #[test]
     fn linker_failure_becomes_a_target_error() {
         let h = Harness::new();
-        let toolchain = FakeToolchain { events: h.events.clone(), fail: true };
+        let toolchain = FakeToolchain {
+            events: h.events.clone(),
+            fail: true,
+        };
         let uc = CompileExecutableUseCase::new(h.parser, h.emitter, toolchain, h.output);
-        let err = uc.execute("fun f(): int = 1", Path::new("out.ll"), Path::new("a.out"))
+        let err = uc
+            .execute("fun f(): int = 1", Path::new("out.ll"), Path::new("a.out"))
             .expect_err("should fail");
         assert_eq!(err.len(), 1);
         assert_eq!(err[0].kind(), ErrorKind::Target);
@@ -179,7 +227,12 @@ mod tests {
         // Order: everything up to and including the write happened.
         assert_eq!(
             *h.events.borrow(),
-            ["parse:fun f(): int = 1", "emit:1", "write:out.ll:7", "link:out.ll:a.out"]
+            [
+                "parse:fun f(): int = 1",
+                "emit:1",
+                "write:out.ll:7",
+                "link:out.ll:a.out"
+            ]
         );
     }
 }

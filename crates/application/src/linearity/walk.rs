@@ -26,7 +26,7 @@ use std::collections::HashSet;
 
 use ats2_domain::ast::{Def, Expr, FunDef, LetBind, Param, Pattern, Program, Ty};
 
-use crate::checking::signatures::{strip_index, SigTable};
+use crate::checking::signatures::{SigTable, strip_index};
 
 use super::resources::{Resources, Use};
 
@@ -45,9 +45,9 @@ impl Fault {
     /// The sentence a diagnostic prints.
     pub fn describe(&self) -> String {
         match self {
-            Fault::UsedAgain { function, name } => format!(
-                "in `{function}`, `{name}` is used after it has already been given away"
-            ),
+            Fault::UsedAgain { function, name } => {
+                format!("in `{function}`, `{name}` is used after it has already been given away")
+            }
             Fault::Leaked { function, name } => {
                 format!("in `{function}`, `{name}` is never given away")
             }
@@ -65,8 +65,14 @@ pub fn faults(program: &Program, ambient: &Program) -> Vec<Fault> {
     sigs.extend(SigTable::of(program));
     let linear = linear_types(ambient, program);
     let ctors = linear_ctors(ambient, program);
-    let mut walk =
-        Walk { sigs: &sigs, linear: &linear, ctors: &ctors, out: Vec::new(), function: String::new(), certain: true };
+    let mut walk = Walk {
+        sigs: &sigs,
+        linear: &linear,
+        ctors: &ctors,
+        out: Vec::new(),
+        function: String::new(),
+        certain: true,
+    };
     for def in program.defs() {
         match def {
             Def::Fun(f) => walk.function_def(f),
@@ -187,9 +193,7 @@ impl<'a> Walk<'a> {
                 self.record(held.consume(name), name);
             }
             Expr::Let(_, rest) | Expr::LetFun(_, rest) => self.consume_result(rest, held),
-            Expr::Ascribe(inner, _) | Expr::ProofPair(_, inner) => {
-                self.consume_result(inner, held)
-            }
+            Expr::Ascribe(inner, _) | Expr::ProofPair(_, inner) => self.consume_result(inner, held),
             _ => {}
         }
     }
@@ -326,7 +330,10 @@ impl<'a> Walk<'a> {
             return true;
         }
         matches!(e, Expr::Call(_, _))
-            && self.sigs.get(&name).is_some_and(|sig| self.is_linear(&sig.ret))
+            && self
+                .sigs
+                .get(&name)
+                .is_some_and(|sig| self.is_linear(&sig.ret))
     }
 
     /// A call: each argument changes hands, or does not, by what the
@@ -356,7 +363,10 @@ impl<'a> Walk<'a> {
             // Nobody declared it, so nobody knows what it took.  Every
             // argument is left alone and this body stops claiming to
             // know what it still holds.
-            if args.iter().any(|a| matches!(a, Expr::Var(n) if held.is_held(n))) {
+            if args
+                .iter()
+                .any(|a| matches!(a, Expr::Var(n) if held.is_held(n)))
+            {
                 self.certain = false;
             }
             return;

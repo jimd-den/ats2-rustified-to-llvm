@@ -60,8 +60,12 @@ mod tests {
     use ats2_domain::ast::{BinOp, Def, Expr, FunDef, ImplementDef, Param, Ty};
     use ats2_domain::statics::{Quant, SExp, Sort};
 
-    fn v(n: &str) -> SExp { SExp::Var(n.into()) }
-    fn int_of(idx: SExp) -> Ty { Ty::Index(Box::new(Ty::Name("int".into())), vec![idx]) }
+    fn v(n: &str) -> SExp {
+        SExp::Var(n.into())
+    }
+    fn int_of(idx: SExp) -> Ty {
+        Ty::Index(Box::new(Ty::Name("int".into())), vec![idx])
+    }
 
     /// `fun name {n:nat} (x: int n): int = 0`, and a `main0` calling it
     /// with `arg`.
@@ -70,12 +74,20 @@ mod tests {
             Def::Fun(FunDef {
                 metric: vec![],
                 ty_params: vec![],
-                universals: vec![Quant { vars: vec![("n".into(), Sort::Nat)], guard: None }],
+                universals: vec![Quant {
+                    vars: vec![("n".into(), Sort::Nat)],
+                    guard: None,
+                }],
                 existentials: vec![],
                 name: "fact".into(),
-                params: vec![Param { borrowed: false, name: "x".into(), ty: int_of(v("n")) }],
+                params: vec![Param {
+                    borrowed: false,
+                    name: "x".into(),
+                    ty: int_of(v("n")),
+                }],
                 ret: Ty::Name("int".into()),
                 body: Expr::IntLit(0),
+                proof: false,
             }),
             Def::Implement(ImplementDef {
                 ty_params: vec![],
@@ -132,12 +144,23 @@ mod tests {
         defs.push(Def::Fun(FunDef {
             metric: vec![],
             ty_params: vec![],
-            universals: vec![Quant { vars: vec![("m".into(), Sort::Nat)], guard: None }],
+            universals: vec![Quant {
+                vars: vec![("m".into(), Sort::Nat)],
+                guard: None,
+            }],
             existentials: vec![],
             name: "g".into(),
-            params: vec![Param { borrowed: false, name: "y".into(), ty: int_of(v("m")) }],
+            params: vec![Param {
+                borrowed: false,
+                name: "y".into(),
+                ty: int_of(v("m")),
+            }],
             ret: Ty::Name("int".into()),
-            body: Expr::Call(Box::new(Expr::Var("fact".into())), vec![Expr::Var("y".into())]),
+            body: Expr::Call(
+                Box::new(Expr::Var("fact".into())),
+                vec![Expr::Var("y".into())],
+            ),
+            proof: false,
         }));
         assert!(messages(&Program::new(defs), Strictness::Strict).is_empty());
     }
@@ -148,10 +171,18 @@ mod tests {
         // recursion over `nat`, and it must go through without help.
         let x = Expr::Var("x".into());
         let body = Expr::IfThenElse(
-            Box::new(Expr::BinOp(BinOp::Gt, Box::new(x.clone()), Box::new(Expr::IntLit(0)))),
+            Box::new(Expr::BinOp(
+                BinOp::Gt,
+                Box::new(x.clone()),
+                Box::new(Expr::IntLit(0)),
+            )),
             Box::new(Expr::Call(
                 Box::new(Expr::Var("fact".into())),
-                vec![Expr::BinOp(BinOp::Sub, Box::new(x), Box::new(Expr::IntLit(1)))],
+                vec![Expr::BinOp(
+                    BinOp::Sub,
+                    Box::new(x),
+                    Box::new(Expr::IntLit(1)),
+                )],
             )),
             Box::new(Expr::IntLit(0)),
         );
@@ -159,12 +190,20 @@ mod tests {
         defs.push(Def::Fun(FunDef {
             metric: vec![],
             ty_params: vec![],
-            universals: vec![Quant { vars: vec![("k".into(), Sort::Nat)], guard: None }],
+            universals: vec![Quant {
+                vars: vec![("k".into(), Sort::Nat)],
+                guard: None,
+            }],
             existentials: vec![],
             name: "rec".into(),
-            params: vec![Param { borrowed: false, name: "x".into(), ty: int_of(v("k")) }],
+            params: vec![Param {
+                borrowed: false,
+                name: "x".into(),
+                ty: int_of(v("k")),
+            }],
             ret: Ty::Name("int".into()),
             body,
+            proof: false,
         }));
         assert!(messages(&Program::new(defs), Strictness::Strict).is_empty());
     }
@@ -179,21 +218,40 @@ mod tests {
         // the guard; so does demanding one witness for both.
         let x = Expr::Var("x".into());
         let body = Expr::IfThenElse(
-            Box::new(Expr::BinOp(BinOp::Ge, Box::new(x.clone()), Box::new(Expr::IntLit(0)))),
+            Box::new(Expr::BinOp(
+                BinOp::Ge,
+                Box::new(x.clone()),
+                Box::new(Expr::IntLit(0)),
+            )),
             Box::new(x.clone()),
             Box::new(Expr::UnaryNeg(Box::new(x))),
         );
         let program = Program::new(vec![Def::Fun(FunDef {
             metric: vec![],
             ty_params: vec![],
-            universals: vec![Quant { vars: vec![("n".into(), Sort::Int)], guard: None }],
-            existentials: vec![Quant { vars: vec![("r".into(), Sort::Nat)], guard: None }],
+            universals: vec![Quant {
+                vars: vec![("n".into(), Sort::Int)],
+                guard: None,
+            }],
+            existentials: vec![Quant {
+                vars: vec![("r".into(), Sort::Nat)],
+                guard: None,
+            }],
             name: "abs".into(),
-            params: vec![Param { borrowed: false, name: "x".into(), ty: int_of(v("n")) }],
+            params: vec![Param {
+                borrowed: false,
+                name: "x".into(),
+                ty: int_of(v("n")),
+            }],
             ret: int_of(v("r")),
             body,
+            proof: false,
         })]);
-        assert!(messages(&program, Strictness::Strict).is_empty(), "{:?}", messages(&program, Strictness::Strict));
+        assert!(
+            messages(&program, Strictness::Strict).is_empty(),
+            "{:?}",
+            messages(&program, Strictness::Strict)
+        );
     }
 
     #[test]
@@ -202,19 +260,34 @@ mod tests {
         // returns a negative number and promises a `nat`.
         let x = Expr::Var("x".into());
         let body = Expr::IfThenElse(
-            Box::new(Expr::BinOp(BinOp::Ge, Box::new(x.clone()), Box::new(Expr::IntLit(0)))),
+            Box::new(Expr::BinOp(
+                BinOp::Ge,
+                Box::new(x.clone()),
+                Box::new(Expr::IntLit(0)),
+            )),
             Box::new(x.clone()),
             Box::new(x),
         );
         let program = Program::new(vec![Def::Fun(FunDef {
             metric: vec![],
             ty_params: vec![],
-            universals: vec![Quant { vars: vec![("n".into(), Sort::Int)], guard: None }],
-            existentials: vec![Quant { vars: vec![("r".into(), Sort::Nat)], guard: None }],
+            universals: vec![Quant {
+                vars: vec![("n".into(), Sort::Int)],
+                guard: None,
+            }],
+            existentials: vec![Quant {
+                vars: vec![("r".into(), Sort::Nat)],
+                guard: None,
+            }],
             name: "bad_abs".into(),
-            params: vec![Param { borrowed: false, name: "x".into(), ty: int_of(v("n")) }],
+            params: vec![Param {
+                borrowed: false,
+                name: "x".into(),
+                ty: int_of(v("n")),
+            }],
             ret: int_of(v("r")),
             body,
+            proof: false,
         })]);
         let errs = messages(&program, Strictness::Strict);
         assert_eq!(errs.len(), 1, "{errs:?}");
@@ -236,15 +309,26 @@ mod tests {
         let program = Program::new(vec![Def::Fun(FunDef {
             metric: vec![],
             ty_params: vec![],
-            universals: vec![Quant { vars: vec![("n".into(), Sort::Int)], guard: Some(guard) }],
+            universals: vec![Quant {
+                vars: vec![("n".into(), Sort::Int)],
+                guard: Some(guard),
+            }],
             existentials: vec![],
             name: "impossible".into(),
-            params: vec![Param { borrowed: false, name: "x".into(), ty: int_of(v("n")) }],
+            params: vec![Param {
+                borrowed: false,
+                name: "x".into(),
+                ty: int_of(v("n")),
+            }],
             ret: int_of(v("n")),
             body: Expr::Var("x".into()),
+            proof: false,
         })]);
         let errs = messages(&program, Strictness::Strict);
-        assert!(errs.iter().any(|e| e.contains("cannot be reached")), "{errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("cannot be reached")),
+            "{errs:?}"
+        );
     }
 
     #[test]

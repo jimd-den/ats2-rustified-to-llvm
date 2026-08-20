@@ -26,7 +26,7 @@ use ats2_domain::errors::{CompileError, ErrorKind};
 use ats2_domain::obligation::Obligation;
 use ats2_domain::statics::SExp;
 
-use crate::constraints::{entails, is_contradictory, Verdict};
+use crate::constraints::{Verdict, entails, is_contradictory};
 
 /// What to do with a claim the solver could neither prove nor refute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -45,7 +45,9 @@ pub enum Strictness {
 pub fn discharge(obligations: &[Obligation], policy: Strictness) -> Vec<CompileError> {
     let mut out: Vec<CompileError> = Vec::new();
     for o in obligations {
-        let Some(message) = verdict_message(o, policy) else { continue };
+        let Some(message) = verdict_message(o, policy) else {
+            continue;
+        };
         let error = CompileError {
             kind: ErrorKind::Check,
             span: o.span,
@@ -104,9 +106,15 @@ mod tests {
     use super::*;
     use ats2_domain::obligation::Origin;
 
-    fn v(n: &str) -> SExp { SExp::Var(n.into()) }
-    fn i(n: i64) -> SExp { SExp::IntLit(n) }
-    fn app(op: &str, a: SExp, b: SExp) -> SExp { SExp::App(op.into(), vec![a, b]) }
+    fn v(n: &str) -> SExp {
+        SExp::Var(n.into())
+    }
+    fn i(n: i64) -> SExp {
+        SExp::IntLit(n)
+    }
+    fn app(op: &str, a: SExp, b: SExp) -> SExp {
+        SExp::App(op.into(), vec![a, b])
+    }
 
     fn ob(hyps: Vec<SExp>, goal: SExp) -> Obligation {
         Obligation::new(hyps, goal, Origin::Call { callee: "f".into() })
@@ -116,7 +124,10 @@ mod tests {
     fn a_proved_obligation_is_not_reported_under_any_policy() {
         let o = ob(vec![app(">", v("n"), i(3))], app(">=", v("n"), i(0)));
         for policy in [Strictness::Strict, Strictness::Permissive] {
-            assert!(discharge(std::slice::from_ref(&o), policy).is_empty(), "{policy:?}");
+            assert!(
+                discharge(std::slice::from_ref(&o), policy).is_empty(),
+                "{policy:?}"
+            );
         }
     }
 
@@ -126,7 +137,11 @@ mod tests {
         // provably wrong, and compiling it would be a lie.
         let o = ob(vec![], app(">=", i(-1), i(0)));
         for policy in [Strictness::Strict, Strictness::Permissive] {
-            assert_eq!(discharge(std::slice::from_ref(&o), policy).len(), 1, "{policy:?}");
+            assert_eq!(
+                discharge(std::slice::from_ref(&o), policy).len(),
+                1,
+                "{policy:?}"
+            );
         }
     }
 
@@ -136,7 +151,10 @@ mod tests {
         // A checker that rejects a corpus it merely cannot yet reason
         // about is one nobody can adopt.  Both are true, so both exist.
         let o = ob(vec![], app(">=", v("n"), i(0)));
-        assert_eq!(discharge(std::slice::from_ref(&o), Strictness::Strict).len(), 1);
+        assert_eq!(
+            discharge(std::slice::from_ref(&o), Strictness::Strict).len(),
+            1
+        );
         assert!(discharge(std::slice::from_ref(&o), Strictness::Permissive).is_empty());
     }
 
@@ -147,15 +165,27 @@ mod tests {
         // bug that is not there.
         let refuted = discharge(&[ob(vec![], app(">=", i(-1), i(0)))], Strictness::Strict);
         let unknown = discharge(&[ob(vec![], app(">=", v("n"), i(0)))], Strictness::Strict);
-        assert!(refuted[0].message.contains("is false"), "{}", refuted[0].message);
-        assert!(unknown[0].message.contains("could not be proved"), "{}", unknown[0].message);
+        assert!(
+            refuted[0].message.contains("is false"),
+            "{}",
+            refuted[0].message
+        );
+        assert!(
+            unknown[0].message.contains("could not be proved"),
+            "{}",
+            unknown[0].message
+        );
     }
 
     #[test]
     fn every_reported_failure_is_a_check_error_and_names_its_origin() {
         let errs = discharge(&[ob(vec![], app(">=", i(-1), i(0)))], Strictness::Strict);
         assert_eq!(errs[0].kind, ErrorKind::Check);
-        assert!(errs[0].message.contains("the call to `f`"), "{}", errs[0].message);
+        assert!(
+            errs[0].message.contains("the call to `f`"),
+            "{}",
+            errs[0].message
+        );
     }
 
     #[test]
@@ -163,10 +193,17 @@ mod tests {
         // Hypotheses that contradict each other prove every goal, so a
         // silent pass here would hide a branch that cannot run.  Saying
         // so is more useful than the vacuous success.
-        let o = ob(vec![app(">", v("n"), i(5)), app("<", v("n"), i(2))], app(">=", v("n"), i(0)));
+        let o = ob(
+            vec![app(">", v("n"), i(5)), app("<", v("n"), i(2))],
+            app(">=", v("n"), i(0)),
+        );
         let errs = discharge(&[o], Strictness::Strict);
         assert_eq!(errs.len(), 1);
-        assert!(errs[0].message.contains("cannot be reached"), "{}", errs[0].message);
+        assert!(
+            errs[0].message.contains("cannot be reached"),
+            "{}",
+            errs[0].message
+        );
     }
 
     #[test]

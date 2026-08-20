@@ -37,12 +37,15 @@ mod tests {
     use ats2_domain::errors::CompileError;
 
     use super::*;
-    use crate::use_cases::fakes::{canned_program, FakeParser};
+    use crate::use_cases::fakes::{FakeParser, canned_program};
 
     #[test]
     fn parses_source_into_a_program() {
         let events = Rc::new(RefCell::new(vec![]));
-        let parser = FakeParser { events: events.clone(), fail: None };
+        let parser = FakeParser {
+            events: events.clone(),
+            fail: None,
+        };
         let uc = ParseUseCase::new(parser);
         let program = uc.execute("fun f(): int = 1").expect("parse");
         assert_eq!(program, canned_program());
@@ -53,7 +56,10 @@ mod tests {
     fn forwards_parser_errors_unmodified() {
         let events = Rc::new(RefCell::new(vec![]));
         let errs = vec![CompileError::emit("bad"), CompileError::emit("worse")];
-        let parser = FakeParser { events: events.clone(), fail: Some(errs.clone()) };
+        let parser = FakeParser {
+            events: events.clone(),
+            fail: Some(errs.clone()),
+        };
         let uc = ParseUseCase::new(parser);
         let got = uc.execute("nonsense").expect_err("should fail");
         assert_eq!(got, errs);

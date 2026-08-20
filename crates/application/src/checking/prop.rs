@@ -71,15 +71,25 @@ pub fn negate(p: &SExp) -> SExp {
 mod tests {
     use super::*;
 
-    fn v(n: &str) -> SExp { SExp::Var(n.into()) }
-    fn i(n: i64) -> SExp { SExp::IntLit(n) }
-    fn app(op: &str, args: Vec<SExp>) -> SExp { SExp::App(op.into(), args) }
+    fn v(n: &str) -> SExp {
+        SExp::Var(n.into())
+    }
+    fn i(n: i64) -> SExp {
+        SExp::IntLit(n)
+    }
+    fn app(op: &str, args: Vec<SExp>) -> SExp {
+        SExp::App(op.into(), args)
+    }
 
     #[test]
     fn each_comparison_names_the_relation_it_states() {
         let cases = [
-            (BinOp::Gt, ">"), (BinOp::Ge, ">="), (BinOp::Lt, "<"),
-            (BinOp::Le, "<="), (BinOp::Eq, "=="), (BinOp::Ne, "!="),
+            (BinOp::Gt, ">"),
+            (BinOp::Ge, ">="),
+            (BinOp::Lt, "<"),
+            (BinOp::Le, "<="),
+            (BinOp::Eq, "=="),
+            (BinOp::Ne, "!="),
         ];
         for (op, name) in cases {
             assert_eq!(relation(op), Some(name), "{name}");
@@ -103,12 +113,30 @@ mod tests {
 
     #[test]
     fn negating_a_proposition_flips_the_relation_rather_than_wrapping_it() {
-        assert_eq!(negate(&app(">", vec![v("x"), i(0)])), app("<=", vec![v("x"), i(0)]));
-        assert_eq!(negate(&app("<=", vec![v("x"), i(0)])), app(">", vec![v("x"), i(0)]));
-        assert_eq!(negate(&app("<", vec![v("x"), i(0)])), app(">=", vec![v("x"), i(0)]));
-        assert_eq!(negate(&app(">=", vec![v("x"), i(0)])), app("<", vec![v("x"), i(0)]));
-        assert_eq!(negate(&app("==", vec![v("x"), i(0)])), app("!=", vec![v("x"), i(0)]));
-        assert_eq!(negate(&app("!=", vec![v("x"), i(0)])), app("==", vec![v("x"), i(0)]));
+        assert_eq!(
+            negate(&app(">", vec![v("x"), i(0)])),
+            app("<=", vec![v("x"), i(0)])
+        );
+        assert_eq!(
+            negate(&app("<=", vec![v("x"), i(0)])),
+            app(">", vec![v("x"), i(0)])
+        );
+        assert_eq!(
+            negate(&app("<", vec![v("x"), i(0)])),
+            app(">=", vec![v("x"), i(0)])
+        );
+        assert_eq!(
+            negate(&app(">=", vec![v("x"), i(0)])),
+            app("<", vec![v("x"), i(0)])
+        );
+        assert_eq!(
+            negate(&app("==", vec![v("x"), i(0)])),
+            app("!=", vec![v("x"), i(0)])
+        );
+        assert_eq!(
+            negate(&app("!=", vec![v("x"), i(0)])),
+            app("==", vec![v("x"), i(0)])
+        );
     }
 
     #[test]
@@ -121,7 +149,10 @@ mod tests {
         // `~(A && B)` is a disjunction, which the solver cannot hold, so
         // it becomes an opaque `~` the solver declines — costing
         // strength, never soundness.
-        let both = app("&&", vec![app(">", vec![v("x"), i(0)]), app("<", vec![v("x"), i(9)])]);
+        let both = app(
+            "&&",
+            vec![app(">", vec![v("x"), i(0)]), app("<", vec![v("x"), i(9)])],
+        );
         assert_eq!(negate(&both), app("~", vec![both]));
     }
 

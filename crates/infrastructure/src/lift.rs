@@ -58,8 +58,12 @@ impl Lifter {
             })
             .collect();
 
-        let mut ctx =
-            LiftCtx { globals, lifted: Vec::new(), used: HashSet::new(), hole_rewrites: Vec::new() };
+        let mut ctx = LiftCtx {
+            globals,
+            lifted: Vec::new(),
+            used: HashSet::new(),
+            hole_rewrites: Vec::new(),
+        };
         for def in &program.defs {
             if let Def::Fun(f) = def {
                 ctx.used.insert(f.name.clone());
@@ -77,7 +81,10 @@ impl Lifter {
                 Def::Implement(im) => {
                     let scope = scope_of_params(&im.params);
                     let body = ctx.walk(&im.body, &scope)?;
-                    defs.push(Def::Implement(ats2_domain::ast::ImplementDef { body, ..im.clone() }));
+                    defs.push(Def::Implement(ats2_domain::ast::ImplementDef {
+                        body,
+                        ..im.clone()
+                    }));
                 }
                 other => defs.push(other.clone()),
             }
@@ -110,7 +117,10 @@ impl Lifter {
 type Scope = HashMap<String, Ty>;
 
 fn scope_of_params(params: &[Param]) -> Scope {
-    params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect()
+    params
+        .iter()
+        .map(|p| (p.name.clone(), p.ty.clone()))
+        .collect()
 }
 
 struct LiftCtx {
@@ -134,7 +144,16 @@ impl LiftCtx {
     /// Rewrite one expression, hoisting any `LetFun` it contains.
     fn walk(&mut self, expr: &Expr, scope: &Scope) -> Result<Expr, CompileError> {
         Ok(match expr {
-            Expr::Unit | Expr::Uninit | Expr::Wildcard | Expr::IntLit(_) | Expr::CharLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StrLit(_) | Expr::Var(_) | Expr::Inst(..) => expr.clone(),
+            Expr::Unit
+            | Expr::Uninit
+            | Expr::Wildcard
+            | Expr::IntLit(_)
+            | Expr::CharLit(_)
+            | Expr::FloatLit(_)
+            | Expr::BoolLit(_)
+            | Expr::StrLit(_)
+            | Expr::Var(_)
+            | Expr::Inst(..) => expr.clone(),
             // Static instantiation has no dynamic content; lifting
             // looks through it and keeps the claim in place.
             Expr::StaticInst(inner, at) => {
@@ -148,8 +167,15 @@ impl LiftCtx {
                 Expr::Ascribe(Box::new(self.walk(inner, scope)?), ty.clone())
             }
             Expr::UnaryNeg(e) => Expr::UnaryNeg(Box::new(self.walk(e, scope)?)),
-            Expr::BinOp(op, l, r) => Expr::BinOp(*op, Box::new(self.walk(l, scope)?), Box::new(self.walk(r, scope)?)),
-            Expr::Index(b, i) => Expr::Index(Box::new(self.walk(b, scope)?), Box::new(self.walk(i, scope)?)),
+            Expr::BinOp(op, l, r) => Expr::BinOp(
+                *op,
+                Box::new(self.walk(l, scope)?),
+                Box::new(self.walk(r, scope)?),
+            ),
+            Expr::Index(b, i) => Expr::Index(
+                Box::new(self.walk(b, scope)?),
+                Box::new(self.walk(i, scope)?),
+            ),
             Expr::Proj(b, i) => Expr::Proj(Box::new(self.walk(b, scope)?), *i),
             Expr::Field(b, n) => Expr::Field(Box::new(self.walk(b, scope)?), n.clone()),
             Expr::RecordLit(fields) => Expr::RecordLit(
@@ -159,17 +185,27 @@ impl LiftCtx {
                     .collect::<Result<Vec<_>, CompileError>>()?,
             ),
             Expr::Deref(b) => Expr::Deref(Box::new(self.walk(b, scope)?)),
-            Expr::Store(p, v) => Expr::Store(Box::new(self.walk(p, scope)?), Box::new(self.walk(v, scope)?)),
+            Expr::Store(p, v) => Expr::Store(
+                Box::new(self.walk(p, scope)?),
+                Box::new(self.walk(v, scope)?),
+            ),
             Expr::Call(callee, args) => Expr::Call(
                 Box::new(self.walk(callee, scope)?),
-                args.iter().map(|a| self.walk(a, scope)).collect::<Result<_, _>>()?,
+                args.iter()
+                    .map(|a| self.walk(a, scope))
+                    .collect::<Result<_, _>>()?,
             ),
             Expr::MacroCall(name, args) => Expr::MacroCall(
                 name.clone(),
-                args.iter().map(|a| self.walk(a, scope)).collect::<Result<_, _>>()?,
+                args.iter()
+                    .map(|a| self.walk(a, scope))
+                    .collect::<Result<_, _>>()?,
             ),
             Expr::TupleLit(items) => Expr::TupleLit(
-                items.iter().map(|a| self.walk(a, scope)).collect::<Result<_, _>>()?,
+                items
+                    .iter()
+                    .map(|a| self.walk(a, scope))
+                    .collect::<Result<_, _>>()?,
             ),
             Expr::IfThenElse(c, t, e) => Expr::IfThenElse(
                 Box::new(self.walk(c, scope)?),
@@ -178,7 +214,10 @@ impl LiftCtx {
             ),
             Expr::Lam(ps, r, b) => Expr::Lam(ps.clone(), r.clone(), Box::new(self.walk(b, scope)?)),
             Expr::Assign(n, v) => Expr::Assign(n.clone(), Box::new(self.walk(v, scope)?)),
-            Expr::While(c, b) => Expr::While(Box::new(self.walk(c, scope)?), Box::new(self.walk(b, scope)?)),
+            Expr::While(c, b) => Expr::While(
+                Box::new(self.walk(c, scope)?),
+                Box::new(self.walk(b, scope)?),
+            ),
             Expr::For(i, c, st, b) => Expr::For(
                 Box::new(self.walk(i, scope)?),
                 Box::new(self.walk(c, scope)?),
@@ -191,7 +230,9 @@ impl LiftCtx {
                 let mut out = Vec::new();
                 for b in binds {
                     let value = self.walk(&b.value, &inner)?;
-                    if let (Some(name), Some(ty)) = (&b.name, binding_type(b, &inner, &self.globals)) {
+                    if let (Some(name), Some(ty)) =
+                        (&b.name, binding_type(b, &inner, &self.globals))
+                    {
                         inner.insert(name.clone(), ty);
                     }
                     out.push(LetBind { value, ..b.clone() });
@@ -213,7 +254,12 @@ impl LiftCtx {
     }
 
     /// Lift one group of sibling nested functions and rewrite their scope.
-    fn lift_group(&mut self, funs: &[FunDef], body: &Expr, scope: &Scope) -> Result<Expr, CompileError> {
+    fn lift_group(
+        &mut self,
+        funs: &[FunDef],
+        body: &Expr,
+        scope: &Scope,
+    ) -> Result<Expr, CompileError> {
         let sibling_names: HashSet<String> = funs.iter().map(|f| f.name.clone()).collect();
 
         // The union of what the group reads from the enclosing function.
@@ -234,7 +280,11 @@ impl LiftCtx {
             let ty = scope.get(name).ok_or_else(|| {
                 CompileError::emit(format!("cannot lift a nested function: the type of the captured variable `{name}` is unknown"))
             })?;
-            extra.push(Param { borrowed: false, name: name.clone(), ty: ty.clone() });
+            extra.push(Param {
+                borrowed: false,
+                name: name.clone(),
+                ty: ty.clone(),
+            });
         }
 
         // Give each sibling a top-level name that is not already taken.
@@ -270,6 +320,7 @@ impl LiftCtx {
                 params,
                 ret: f.ret.clone(),
                 body,
+                proof: f.proof,
             }));
         }
 
@@ -293,7 +344,9 @@ fn binding_type(bind: &LetBind, scope: &Scope, globals: &HashSet<String>) -> Opt
         Expr::StrLit(_) => Some(Ty::Name("string".into())),
         Expr::Var(v) => scope.get(v).cloned(),
         // Arithmetic on ints stays int; a comparison yields bool.
-        Expr::BinOp(op, _, _) => Some(Ty::Name(if op.is_comparison() { "bool" } else { "int" }.into())),
+        Expr::BinOp(op, _, _) => Some(Ty::Name(
+            if op.is_comparison() { "bool" } else { "int" }.into(),
+        )),
         Expr::UnaryNeg(_) => Some(Ty::Name("int".into())),
         _ => None,
     }
@@ -309,7 +362,15 @@ pub fn free_variables(expr: &Expr, bound: &mut HashSet<String>, out: &mut BTreeS
 
 fn free_vars(expr: &Expr, bound: &mut HashSet<String>, out: &mut BTreeSet<String>) {
     match expr {
-        Expr::Unit | Expr::Uninit | Expr::Wildcard | Expr::IntLit(_) | Expr::CharLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StrLit(_) | Expr::Inst(..) => {}
+        Expr::Unit
+        | Expr::Uninit
+        | Expr::Wildcard
+        | Expr::IntLit(_)
+        | Expr::CharLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_)
+        | Expr::StrLit(_)
+        | Expr::Inst(..) => {}
         Expr::StaticInst(inner, _) => free_vars(inner, bound, out),
         // A proof mentions names, but none of them survives to be
         // captured: the half that runs is the value.
@@ -405,10 +466,22 @@ fn free_vars(expr: &Expr, bound: &mut HashSet<String>, out: &mut BTreeSet<String
 
 /// Point every call to a lifted sibling at its new name, and hand it the
 /// captured values as trailing arguments.
-fn rewrite_calls(expr: &Expr, renames: &HashMap<String, String>, captured: &BTreeSet<String>) -> Expr {
+fn rewrite_calls(
+    expr: &Expr,
+    renames: &HashMap<String, String>,
+    captured: &BTreeSet<String>,
+) -> Expr {
     let go = |e: &Expr| rewrite_calls(e, renames, captured);
     match expr {
-        Expr::Unit | Expr::Uninit | Expr::Wildcard | Expr::IntLit(_) | Expr::CharLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StrLit(_) | Expr::Inst(..) => expr.clone(),
+        Expr::Unit
+        | Expr::Uninit
+        | Expr::Wildcard
+        | Expr::IntLit(_)
+        | Expr::CharLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_)
+        | Expr::StrLit(_)
+        | Expr::Inst(..) => expr.clone(),
         Expr::StaticInst(inner, at) => Expr::StaticInst(Box::new(go(inner)), at.clone()),
         Expr::ProofPair(p, v) => Expr::ProofPair(Box::new(go(p)), Box::new(go(v))),
         Expr::Ascribe(inner, ty) => Expr::Ascribe(Box::new(go(inner)), ty.clone()),
@@ -423,13 +496,26 @@ fn rewrite_calls(expr: &Expr, renames: &HashMap<String, String>, captured: &BTre
         Expr::BinOp(op, l, r) => Expr::BinOp(*op, Box::new(go(l)), Box::new(go(r))),
         Expr::MacroCall(n, args) => Expr::MacroCall(n.clone(), args.iter().map(go).collect()),
         Expr::TupleLit(items) => Expr::TupleLit(items.iter().map(go).collect()),
-        Expr::IfThenElse(c, t, e) => Expr::IfThenElse(Box::new(go(c)), Box::new(go(t)), Box::new(go(e))),
+        Expr::IfThenElse(c, t, e) => {
+            Expr::IfThenElse(Box::new(go(c)), Box::new(go(t)), Box::new(go(e)))
+        }
         Expr::Lam(ps, r, b) => Expr::Lam(ps.clone(), r.clone(), Box::new(go(b))),
         Expr::Assign(n, v) => Expr::Assign(n.clone(), Box::new(go(v))),
         Expr::While(c, b) => Expr::While(Box::new(go(c)), Box::new(go(b))),
-        Expr::For(i, c, st, b) => Expr::For(Box::new(go(i)), Box::new(go(c)), Box::new(go(st)), Box::new(go(b))),
+        Expr::For(i, c, st, b) => Expr::For(
+            Box::new(go(i)),
+            Box::new(go(c)),
+            Box::new(go(st)),
+            Box::new(go(b)),
+        ),
         Expr::Let(binds, body) => Expr::Let(
-            binds.iter().map(|b| LetBind { value: go(&b.value), ..b.clone() }).collect(),
+            binds
+                .iter()
+                .map(|b| LetBind {
+                    value: go(&b.value),
+                    ..b.clone()
+                })
+                .collect(),
             Box::new(go(body)),
         ),
         Expr::Case(scrutinee, arms) => Expr::Case(
@@ -488,29 +574,44 @@ mod tests {
 
     #[test]
     fn a_nested_function_becomes_a_top_level_one() {
-        let p = lift_src("fun outer(n: int): int = let fun inner(i: int): int = i * 2 in inner(n) end");
+        let p =
+            lift_src("fun outer(n: int): int = let fun inner(i: int): int = i * 2 in inner(n) end");
         // `inner` captures nothing, so it lifts with its own parameters.
         let inner = fun_named(&p, "inner");
         assert_eq!(inner.params.len(), 1);
-        assert!(matches!(&p.defs[..], [Def::Fun(_), Def::Fun(_)]), "{:?}", p.defs);
+        assert!(
+            matches!(&p.defs[..], [Def::Fun(_), Def::Fun(_)]),
+            "{:?}",
+            p.defs
+        );
     }
 
     #[test]
     fn a_captured_variable_becomes_a_trailing_parameter() {
-        let p = lift_src("fun outer(m: int, n: int): int = let fun inner(i: int): int = i + m in inner(n) end");
+        let p = lift_src(
+            "fun outer(m: int, n: int): int = let fun inner(i: int): int = i + m in inner(n) end",
+        );
         let inner = fun_named(&p, "inner");
         let names: Vec<&str> = inner.params.iter().map(|x| x.name.as_str()).collect();
-        assert_eq!(names, vec!["i", "m"], "the capture is appended, not prepended");
+        assert_eq!(
+            names,
+            vec!["i", "m"],
+            "the capture is appended, not prepended"
+        );
         assert_eq!(inner.params[1].ty, Ty::Name("int".into()));
     }
 
     #[test]
     fn call_sites_pass_the_captured_values() {
-        let p = lift_src("fun outer(m: int, n: int): int = let fun inner(i: int): int = i + m in inner(n) end");
+        let p = lift_src(
+            "fun outer(m: int, n: int): int = let fun inner(i: int): int = i + m in inner(n) end",
+        );
         let outer = fun_named(&p, "outer");
         // The nested `fun` is lifted away, and an empty binding run no
         // longer leaves an empty `let` behind: the body is the call.
-        let Expr::Call(callee, args) = &outer.body else { panic!("expected a call, got {:?}", outer.body) };
+        let Expr::Call(callee, args) = &outer.body else {
+            panic!("expected a call, got {:?}", outer.body)
+        };
         assert_eq!(**callee, Expr::Var("inner".into()));
         assert_eq!(args, &vec![Expr::Var("n".into()), Expr::Var("m".into())]);
     }
@@ -542,7 +643,8 @@ mod tests {
 
     #[test]
     fn a_where_clause_lifts_like_a_nested_let() {
-        let p = lift_src("fun outer(n: int): int = twice(n) where { fun twice(k: int): int = 2 * k }");
+        let p =
+            lift_src("fun outer(n: int): int = twice(n) where { fun twice(k: int): int = 2 * k }");
         assert_eq!(fun_named(&p, "twice").params.len(), 1);
     }
 
@@ -556,8 +658,16 @@ mod tests {
                  and odd(i: int): int = if i = 0 then bias else even(i - 1) \
              in even(n) end",
         );
-        let e: Vec<&str> = fun_named(&p, "even").params.iter().map(|x| x.name.as_str()).collect();
-        let o: Vec<&str> = fun_named(&p, "odd").params.iter().map(|x| x.name.as_str()).collect();
+        let e: Vec<&str> = fun_named(&p, "even")
+            .params
+            .iter()
+            .map(|x| x.name.as_str())
+            .collect();
+        let o: Vec<&str> = fun_named(&p, "odd")
+            .params
+            .iter()
+            .map(|x| x.name.as_str())
+            .collect();
         assert_eq!(e, vec!["i", "bias"]);
         assert_eq!(o, vec!["i", "bias"]);
     }
@@ -581,7 +691,11 @@ mod tests {
                 // If it did lift, `mystery` must not have become a
                 // parameter of unknown type.
                 let inner = fun_named(&p, "inner");
-                assert_eq!(inner.params.len(), 1, "an untyped capture must not be added silently");
+                assert_eq!(
+                    inner.params.len(),
+                    1,
+                    "an untyped capture must not be added silently"
+                );
             }
             Err(e) => assert!(e.message().contains("mystery"), "{e}"),
         }

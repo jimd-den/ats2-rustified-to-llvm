@@ -30,7 +30,10 @@ pub struct Match {
 impl Match {
     /// The term a static variable was determined to be.
     pub fn get(&self, name: &str) -> Option<SExp> {
-        self.bindings.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+        self.bindings
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
     }
 
     /// The bindings, in the shape [`SExp::substitute`] takes.
@@ -106,11 +109,27 @@ impl Match {
         let open = |e: &SExp| e.vars().iter().any(|v| vars.contains(v));
         let (left, right) = (&args[0], &args[1]);
         let (unknown, known, rebuilt) = match (op, open(left), open(right)) {
-            ("+", true, false) => (left, right, SExp::App("-".into(), vec![actual.clone(), right.clone()])),
-            ("+", false, true) => (right, left, SExp::App("-".into(), vec![actual.clone(), left.clone()])),
-            ("-", true, false) => (left, right, SExp::App("+".into(), vec![actual.clone(), right.clone()])),
+            ("+", true, false) => (
+                left,
+                right,
+                SExp::App("-".into(), vec![actual.clone(), right.clone()]),
+            ),
+            ("+", false, true) => (
+                right,
+                left,
+                SExp::App("-".into(), vec![actual.clone(), left.clone()]),
+            ),
+            ("-", true, false) => (
+                left,
+                right,
+                SExp::App("+".into(), vec![actual.clone(), right.clone()]),
+            ),
             // `k - n = a` gives `n = k - a`.
-            ("-", false, true) => (right, left, SExp::App("-".into(), vec![left.clone(), actual.clone()])),
+            ("-", false, true) => (
+                right,
+                left,
+                SExp::App("-".into(), vec![left.clone(), actual.clone()]),
+            ),
             _ => return false,
         };
         let _ = known;
@@ -123,9 +142,15 @@ impl Match {
 mod tests {
     use super::*;
 
-    fn v(n: &str) -> SExp { SExp::Var(n.into()) }
-    fn i(n: i64) -> SExp { SExp::IntLit(n) }
-    fn app(op: &str, a: SExp, b: SExp) -> SExp { SExp::App(op.into(), vec![a, b]) }
+    fn v(n: &str) -> SExp {
+        SExp::Var(n.into())
+    }
+    fn i(n: i64) -> SExp {
+        SExp::IntLit(n)
+    }
+    fn app(op: &str, a: SExp, b: SExp) -> SExp {
+        SExp::App(op.into(), vec![a, b])
+    }
 
     fn unify(pattern: SExp, actual: SExp, vars: &[&str]) -> Match {
         let names: Vec<String> = vars.iter().map(|s| s.to_string()).collect();
@@ -183,8 +208,14 @@ mod tests {
 
     #[test]
     fn a_subtraction_inverts_on_either_side() {
-        assert_eq!(unify(app("-", v("n"), i(2)), v("k"), &["n"]).get("n"), Some(app("+", v("k"), i(2))));
-        assert_eq!(unify(app("-", i(10), v("n")), v("k"), &["n"]).get("n"), Some(app("-", i(10), v("k"))));
+        assert_eq!(
+            unify(app("-", v("n"), i(2)), v("k"), &["n"]).get("n"),
+            Some(app("+", v("k"), i(2)))
+        );
+        assert_eq!(
+            unify(app("-", i(10), v("n")), v("k"), &["n"]).get("n"),
+            Some(app("-", i(10), v("k")))
+        );
     }
 
     #[test]
@@ -194,7 +225,10 @@ mod tests {
         // demand survives as something to prove rather than vanishing.
         let m = unify(app("*", v("m"), v("n")), i(12), &["m", "n"]);
         assert_eq!(m.get("m"), None);
-        assert_eq!(m.equations, vec![app("==", app("*", v("m"), v("n")), i(12))]);
+        assert_eq!(
+            m.equations,
+            vec![app("==", app("*", v("m"), v("n")), i(12))]
+        );
     }
 
     #[test]

@@ -25,7 +25,10 @@ extern fun peek_vt (b: !box_vt(int)): int \
 fn faults(source: &str) -> Vec<String> {
     let program = Parser::parse(&format!("{SETUP}{source}")).expect("the source should parse");
     let prelude = Parser::parse(ats2_infrastructure::prelude::PRELUDE_SOURCE).expect("prelude");
-    check_linearity(&program, &prelude).into_iter().map(|e| e.message).collect()
+    check_linearity(&program, &prelude)
+        .into_iter()
+        .map(|e| e.message)
+        .collect()
 }
 
 #[test]
@@ -38,9 +41,7 @@ fn giving_the_same_resource_away_twice_is_refused() {
     // The second `free_vt(b)` is reaching for something that is not
     // there any more.  This is the mistake the whole discipline exists
     // to catch, and no amount of arithmetic would have found it.
-    let errs = faults(
-        "fun f (b: box_vt(int)): void = let val () = free_vt(b) in free_vt(b) end",
-    );
+    let errs = faults("fun f (b: box_vt(int)): void = let val () = free_vt(b) in free_vt(b) end");
     assert_eq!(errs.len(), 1, "{errs:?}");
     assert!(errs[0].contains('b'), "{}", errs[0]);
     assert!(errs[0].contains("already"), "{}", errs[0]);
@@ -62,41 +63,45 @@ fn a_borrowed_resource_is_not_the_bodys_to_give_away() {
 
 #[test]
 fn borrowing_does_not_use_a_resource_up() {
-    assert!(faults(
-        "fun f (b: box_vt(int)): void = let val _ = peek_vt(b) in free_vt(b) end"
-    )
-    .is_empty());
+    assert!(
+        faults("fun f (b: box_vt(int)): void = let val _ = peek_vt(b) in free_vt(b) end")
+            .is_empty()
+    );
 }
 
 #[test]
 fn branches_must_agree_about_what_they_gave_away() {
     // After the `if`, whether `b` is still there depends on which way it
     // went — and then nothing after it can be checked at all.
-    let errs = faults(
-        "fun f (c: bool, b: box_vt(int)): void = if c then free_vt(b) else ()",
-    );
+    let errs = faults("fun f (c: bool, b: box_vt(int)): void = if c then free_vt(b) else ()");
     assert_eq!(errs.len(), 1, "{errs:?}");
-    assert!(errs[0].contains("branch") || errs[0].contains("path"), "{}", errs[0]);
+    assert!(
+        errs[0].contains("branch") || errs[0].contains("path"),
+        "{}",
+        errs[0]
+    );
 }
 
 #[test]
 fn branches_that_agree_are_accepted() {
-    assert!(faults(
-        "fun f (c: bool, b: box_vt(int)): void = if c then free_vt(b) else free_vt(b)"
-    )
-    .is_empty());
+    assert!(
+        faults("fun f (c: bool, b: box_vt(int)): void = if c then free_vt(b) else free_vt(b)")
+            .is_empty()
+    );
 }
 
 #[test]
 fn an_ordinary_value_is_not_policed() {
     // Everything that is not declared linear is used as often as it
     // likes.  A check that said otherwise would be one nobody keeps on.
-    assert!(faults(
-        "datatype box (a) = mk of (a) \
+    assert!(
+        faults(
+            "datatype box (a) = mk of (a) \
          extern fun use_box (b: box(int)): void \
          fun f (b: box(int)): void = let val () = use_box(b) in use_box(b) end"
-    )
-    .is_empty());
+        )
+        .is_empty()
+    );
 }
 
 #[test]
@@ -118,9 +123,8 @@ fn a_resource_the_body_made_and_gave_away_twice_is_refused() {
     // `free_vt(b)` calls sit in separate statements of one block, which
     // is the shape a person actually writes — and the shape the earlier
     // tests, all phrased on a parameter, never put the walk through.
-    let errs = faults(
-        "fun f (): void = let val b = make_vt () val () = free_vt(b) in free_vt(b) end",
-    );
+    let errs =
+        faults("fun f (): void = let val b = make_vt () val () = free_vt(b) in free_vt(b) end");
     assert_eq!(errs.len(), 1, "{errs:?}");
     assert!(errs[0].contains('b'), "{}", errs[0]);
     assert!(errs[0].contains("already"), "{}", errs[0]);
@@ -139,9 +143,8 @@ fn a_resource_a_constructor_built_is_still_a_resource() {
 
 #[test]
 fn a_constructor_built_resource_given_away_twice_is_refused() {
-    let errs = faults(
-        "fun f (): void = let val b = mk_vt(3) val () = free_vt(b) in free_vt(b) end",
-    );
+    let errs =
+        faults("fun f (): void = let val b = mk_vt(3) val () = free_vt(b) in free_vt(b) end");
     assert_eq!(errs.len(), 1, "{errs:?}");
     assert!(errs[0].contains('b'), "{}", errs[0]);
     assert!(errs[0].contains("already"), "{}", errs[0]);
@@ -158,8 +161,7 @@ fn a_constructor_built_resource_nobody_gives_away_is_refused() {
 fn building_with_a_resource_hands_it_to_the_structure() {
     // `b` goes into the box and is the box's from then on.  The body
     // owes the box, not `b` — and must not be told it leaked `b`.
-    let errs = faults(
-        "fun f (b: box_vt(int)): void = let val outer = mk_vt(b) in free_vt(outer) end",
-    );
+    let errs =
+        faults("fun f (b: box_vt(int)): void = let val outer = mk_vt(b) in free_vt(outer) end");
     assert!(errs.is_empty(), "{errs:?}");
 }

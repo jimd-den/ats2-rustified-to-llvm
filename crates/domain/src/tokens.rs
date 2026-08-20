@@ -37,7 +37,11 @@ pub struct Pos {
 impl Pos {
     /// Build a source position from its three coordinates.
     pub fn new(line: usize, column: usize, offset: usize) -> Self {
-        Self { line, column, offset }
+        Self {
+            line,
+            column,
+            offset,
+        }
     }
 }
 
@@ -294,7 +298,10 @@ mod tests {
 
     #[test]
     fn string_literals_carry_the_raw_interior() {
-        let t = Token::new(TokenKind::StrLit("a\\n".to_string()), Span::new(Pos::new(1, 1, 0), Pos::new(1, 5, 4)));
+        let t = Token::new(
+            TokenKind::StrLit("a\\n".to_string()),
+            Span::new(Pos::new(1, 1, 0), Pos::new(1, 5, 4)),
+        );
         // The raw, still-escaped interior is preserved verbatim.
         assert_eq!(t.kind(), &TokenKind::StrLit("a\\n".to_string()));
     }

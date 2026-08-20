@@ -44,6 +44,7 @@ pub(crate) mod fakes {
             params: vec![],
             ret: Ty::Name("int".into()),
             body: Expr::IntLit(1),
+            proof: false,
         })])
     }
 
@@ -70,7 +71,9 @@ pub(crate) mod fakes {
 
     impl LlvmEmitterPort for FakeEmitter {
         fn emit(&self, program: &Program) -> Result<String, CompileError> {
-            self.events.borrow_mut().push(format!("emit:{}", program.defs().len()));
+            self.events
+                .borrow_mut()
+                .push(format!("emit:{}", program.defs().len()));
             match &self.fail {
                 Some(err) => Err(err.clone()),
                 None => Ok(self.ir.clone()),
@@ -85,8 +88,14 @@ pub(crate) mod fakes {
 
     impl OutputPort for FakeOutput {
         fn write(&self, path: &Path, contents: &str) -> Result<(), String> {
-            self.events.borrow_mut().push(format!("write:{}:{}", path.display(), contents.len()));
-            if self.fail { Err("disk full".into()) } else { Ok(()) }
+            self.events
+                .borrow_mut()
+                .push(format!("write:{}:{}", path.display(), contents.len()));
+            if self.fail {
+                Err("disk full".into())
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -98,8 +107,16 @@ pub(crate) mod fakes {
     impl ToolchainPort for FakeToolchain {
         fn link_all(&self, inputs: &[std::path::PathBuf], output: &Path) -> Result<(), String> {
             let listed: Vec<String> = inputs.iter().map(|i| i.display().to_string()).collect();
-            self.events.borrow_mut().push(format!("link:{}:{}", listed.join(","), output.display()));
-            if self.fail { Err("clang failed".into()) } else { Ok(()) }
+            self.events.borrow_mut().push(format!(
+                "link:{}:{}",
+                listed.join(","),
+                output.display()
+            ));
+            if self.fail {
+                Err("clang failed".into())
+            } else {
+                Ok(())
+            }
         }
     }
 }

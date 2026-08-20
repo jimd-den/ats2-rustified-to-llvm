@@ -25,7 +25,11 @@ pub struct CompileToIrUseCase<P: ParserPort, E: LlvmEmitterPort> {
 
 impl<P: ParserPort, E: LlvmEmitterPort> CompileToIrUseCase<P, E> {
     pub fn new(parser: P, emitter: E) -> Self {
-        Self { parser, emitter, strictness: Strictness::default() }
+        Self {
+            parser,
+            emitter,
+            strictness: Strictness::default(),
+        }
     }
 
     /// Compile under a different strictness than the default.
@@ -46,8 +50,7 @@ impl<P: ParserPort, E: LlvmEmitterPort> CompileToIrUseCase<P, E> {
         // both run and the reader sees everything wrong at once rather
         // than one thing per attempt.
         let prelude = self.parser.prelude();
-        let mut violations =
-            crate::checking::check_program(&program, &prelude, self.strictness);
+        let mut violations = crate::checking::check_program(&program, &prelude, self.strictness);
         violations.extend(crate::linearity::check_linearity(&program, &prelude));
         if !violations.is_empty() {
             return Err(violations);
@@ -70,7 +73,10 @@ mod tests {
     #[test]
     fn happy_path_parses_then_emits_and_returns_ir() {
         let events = Rc::new(RefCell::new(vec![]));
-        let parser = FakeParser { events: events.clone(), fail: None };
+        let parser = FakeParser {
+            events: events.clone(),
+            fail: None,
+        };
         let emitter = FakeEmitter {
             events: events.clone(),
             ir: "define i64 @f()".into(),
@@ -87,8 +93,15 @@ mod tests {
     fn parse_failure_short_circuits_the_emitter() {
         let events = Rc::new(RefCell::new(vec![]));
         let parse_errs = vec![CompileError::parse(canned_span(), "syntax")];
-        let parser = FakeParser { events: events.clone(), fail: Some(parse_errs.clone()) };
-        let emitter = FakeEmitter { events: events.clone(), ir: String::new(), fail: None };
+        let parser = FakeParser {
+            events: events.clone(),
+            fail: Some(parse_errs.clone()),
+        };
+        let emitter = FakeEmitter {
+            events: events.clone(),
+            ir: String::new(),
+            fail: None,
+        };
         let uc = CompileToIrUseCase::new(parser, emitter);
         let got = uc.execute("garbage").expect_err("should fail");
         assert_eq!(got, parse_errs);
@@ -99,7 +112,10 @@ mod tests {
     #[test]
     fn emitter_failure_is_wrapped_into_the_error_list() {
         let events = Rc::new(RefCell::new(vec![]));
-        let parser = FakeParser { events: events.clone(), fail: None };
+        let parser = FakeParser {
+            events: events.clone(),
+            fail: None,
+        };
         let emitter = FakeEmitter {
             events: events.clone(),
             ir: String::new(),

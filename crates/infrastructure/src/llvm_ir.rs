@@ -60,7 +60,11 @@ impl LlvmIrEmitter {
                         .params
                         .iter()
                         .zip(&sig.params)
-                        .map(|(p, ty)| Param { borrowed: false, name: p.name.clone(), ty: ty_for(*ty) })
+                        .map(|(p, ty)| Param {
+                            borrowed: false,
+                            name: p.name.clone(),
+                            ty: ty_for(*ty),
+                        })
                         .collect();
                     let f = ats2_domain::ast::FunDef {
                         metric: Vec::new(),
@@ -73,6 +77,8 @@ impl LlvmIrEmitter {
                         params,
                         ret: im.ret.clone().unwrap_or_else(|| ty_for(sig.ret)),
                         body: im.body.clone(),
+                        // An `implement` fills in a function, never a proof.
+                        proof: false,
                     };
                     emit_function(&f, &registry, &mut module)?
                 }
@@ -83,7 +89,9 @@ impl LlvmIrEmitter {
                 // A declaration promises a definition elsewhere; only the
                 // definition emits anything.
                 Def::Extern(d) => module.lines.push(format!("; extern {}", d.name)),
-                Def::Overload { op, func } => module.lines.push(format!("; overload {op} with {func}")),
+                Def::Overload { op, func } => {
+                    module.lines.push(format!("; overload {op} with {func}"))
+                }
                 // The storage is declared here; the value is computed in
                 // `main`, in the order the program wrote them.
                 Def::Val(v) if v.name.starts_with(crate::parser::TOPLEVEL_STATEMENT) => {}
@@ -108,8 +116,9 @@ impl LlvmIrEmitter {
 /// gaps rather than shadowing.  Anything unused is dropped later, since
 /// datatypes are only instantiated on demand.
 fn with_prelude(program: &Program) -> Result<Program, CompileError> {
-    let prelude = crate::parser::Parser::parse(crate::prelude::PRELUDE_SOURCE)
-        .map_err(|e| CompileError::emit(format!("the built-in prelude does not parse: {}", e[0])))?;
+    let prelude = crate::parser::Parser::parse(crate::prelude::PRELUDE_SOURCE).map_err(|e| {
+        CompileError::emit(format!("the built-in prelude does not parse: {}", e[0]))
+    })?;
 
     // A name the program defines for itself is the program's; the prelude
     // only fills gaps.
@@ -159,8 +168,7 @@ fn with_prelude(program: &Program) -> Result<Program, CompileError> {
             // program actually instantiates it.
             None => true,
             Some(name) => {
-                !own.contains(&name)
-                    && (wanted.contains(&name) || matches!(d, Def::Datatype(_)))
+                !own.contains(&name) && (wanted.contains(&name) || matches!(d, Def::Datatype(_)))
             }
         })
         .cloned()
@@ -199,8 +207,14 @@ fn global_type_of(expr: &Expr, registry: &Registry) -> Option<LlvmType> {
         }
         // `setmod_int.sing` — one field of a record global.
         Expr::Field(base, name) => {
-            let LlvmType::Record(index) = global_type_of(base, registry)? else { return None };
-            registry.record_fields(index).into_iter().find(|(n, _)| n == name).map(|(_, t)| t)
+            let LlvmType::Record(index) = global_type_of(base, registry)? else {
+                return None;
+            };
+            registry
+                .record_fields(index)
+                .into_iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, t)| t)
         }
         Expr::Call(callee, args) => match &**callee {
             // `setmod_int.sing (0)` — applying a field means the type it
@@ -223,7 +237,8 @@ fn global_type_of(expr: &Expr, registry: &Registry) -> Option<LlvmType> {
                         Expr::Call(c, a) if matches!(&**c, Expr::Var(m) if m == "addr@" || m == "view@" || m == "ptrof") => {
                             global_type_of(a.first()?, registry)
                         }
-                        a => global_type_of(a, registry).map(|t| LlvmType::Tuple(registry.intern_tuple(vec![t]))),
+                        a => global_type_of(a, registry)
+                            .map(|t| LlvmType::Tuple(registry.intern_tuple(vec![t]))),
                     };
                 }
                 registry.fns.get(n).map(|s| s.ret)
@@ -237,7 +252,9 @@ fn global_type_of(expr: &Expr, registry: &Registry) -> Option<LlvmType> {
                 .collect::<Result<Vec<_>, _>>()
                 .ok()?;
             let r = llvm_type_in(ret, registry).ok()?;
-            Some(LlvmType::Closure(registry.intern_closure(FnSig { params: ps, ret: r })))
+            Some(LlvmType::Closure(
+                registry.intern_closure(FnSig { params: ps, ret: r }),
+            ))
         }
         _ => None,
     }
@@ -255,9 +272,15 @@ fn zero_literal(ty: LlvmType) -> &'static str {
     match ty {
         LlvmType::F64 => "0.0",
         LlvmType::I1 => "false",
-        LlvmType::I8Ptr | LlvmType::Argv | LlvmType::FileRef | LlvmType::Data(_)
-        | LlvmType::Tuple(_) | LlvmType::Array(_) | LlvmType::Closure(_)
-        | LlvmType::Lazy(_) | LlvmType::Record(_) => "null",
+        LlvmType::I8Ptr
+        | LlvmType::Argv
+        | LlvmType::FileRef
+        | LlvmType::Data(_)
+        | LlvmType::Tuple(_)
+        | LlvmType::Array(_)
+        | LlvmType::Closure(_)
+        | LlvmType::Lazy(_)
+        | LlvmType::Record(_) => "null",
         _ => "0",
     }
 }
@@ -616,7 +639,10 @@ impl Registry {
     /// The index of a closure signature, adding it if it is new.
     fn intern_closure(&self, sig: FnSig) -> usize {
         let mut closures = self.closures.borrow_mut();
-        if let Some(i) = closures.iter().position(|c| c.params == sig.params && c.ret == sig.ret) {
+        if let Some(i) = closures
+            .iter()
+            .position(|c| c.params == sig.params && c.ret == sig.ret)
+        {
             return i;
         }
         closures.push(sig);
@@ -749,14 +775,21 @@ fn registry_of(program: &Program) -> Result<Registry, CompileError> {
     for def in &program.defs {
         if let Def::Datatype(d) = def {
             if registry.datatypes.contains(&d.name) {
-                return Err(CompileError::emit(format!("datatype `{}` is declared twice", d.name)));
+                return Err(CompileError::emit(format!(
+                    "datatype `{}` is declared twice",
+                    d.name
+                )));
             }
             registry.datatypes.push(d.name.clone());
         }
     }
     for def in &program.defs {
         if let Def::Datatype(d) = def {
-            let index = registry.datatypes.iter().position(|n| n == &d.name).expect("just added");
+            let index = registry
+                .datatypes
+                .iter()
+                .position(|n| n == &d.name)
+                .expect("just added");
             let widest = d.ctors.iter().map(|c| c.fields.len()).max().unwrap_or(0);
             let _ = widest;
             for (tag, ctor) in d.ctors.iter().enumerate() {
@@ -772,7 +805,12 @@ fn registry_of(program: &Program) -> Result<Registry, CompileError> {
                         ctor.name, d.name
                     )));
                 }
-                candidates.push(CtorInfo { datatype: index, tag: tag as i64, fields, width: 0 });
+                candidates.push(CtorInfo {
+                    datatype: index,
+                    tag: tag as i64,
+                    fields,
+                    width: 0,
+                });
             }
             // Now that every constructor is known, give them all the
             // width of the widest.
@@ -803,19 +841,26 @@ fn registry_of(program: &Program) -> Result<Registry, CompileError> {
             // Not this compiler's language; the toolchain reads it.
             Def::InlineC(_) => {}
             Def::Fun(f) => {
-                let params = f.params.iter().map(|p| llvm_type_in(&p.ty, &registry)).collect::<Result<Vec<_>, _>>()?;
+                let params = f
+                    .params
+                    .iter()
+                    .map(|p| llvm_type_in(&p.ty, &registry))
+                    .collect::<Result<Vec<_>, _>>()?;
                 // `fun f (m: int) = lam (n: int): int => ...` writes no
                 // return type.  The lambda's own annotations give it, and
                 // they must be read *before* the body is emitted, because
                 // the body may call `f` again.
                 let declared = match (&f.ret, &f.body) {
-                    (Ty::Name(n), Expr::Lam(ps, Some(r), _)) if n == "_" => {
-                        Ty::Fun(ps.iter().map(|p| p.ty.clone()).collect(), Box::new(r.clone()))
-                    }
+                    (Ty::Name(n), Expr::Lam(ps, Some(r), _)) if n == "_" => Ty::Fun(
+                        ps.iter().map(|p| p.ty.clone()).collect(),
+                        Box::new(r.clone()),
+                    ),
                     (other, _) => other.clone(),
                 };
                 let ret = llvm_type_in(&declared, &registry)?;
-                registry.by_ref.insert(f.name.clone(), assigned_parameters(&f.params, &f.body));
+                registry
+                    .by_ref
+                    .insert(f.name.clone(), assigned_parameters(&f.params, &f.body));
                 registry.defined.insert(f.name.clone());
                 registry.fns.insert(f.name.clone(), FnSig { params, ret });
             }
@@ -857,9 +902,19 @@ fn registry_of(program: &Program) -> Result<Registry, CompileError> {
                 let params = match im.params.len() {
                     0 => vec![],
                     2 => vec![LlvmType::I64, LlvmType::Argv],
-                    _ => return Err(CompileError::emit("main0 takes either no parameters or `(argc, argv)`")),
+                    _ => {
+                        return Err(CompileError::emit(
+                            "main0 takes either no parameters or `(argc, argv)`",
+                        ));
+                    }
                 };
-                registry.fns.insert(im.name.clone(), FnSig { params, ret: LlvmType::I32 });
+                registry.fns.insert(
+                    im.name.clone(),
+                    FnSig {
+                        params,
+                        ret: LlvmType::I32,
+                    },
+                );
             }
             Def::Const(c) => {
                 registry.consts.insert(c.name.clone(), c.value.clone());
@@ -892,7 +947,11 @@ fn registry_of(program: &Program) -> Result<Registry, CompileError> {
             }
             Def::Extern(d) if !d.ty_params.is_empty() => {}
             Def::Extern(d) => {
-                let params = d.params.iter().map(|p| llvm_type_in(&p.ty, &registry)).collect::<Result<Vec<_>, _>>()?;
+                let params = d
+                    .params
+                    .iter()
+                    .map(|p| llvm_type_in(&p.ty, &registry))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let ret = llvm_type_in(&d.ret, &registry)?;
                 registry.fns.insert(d.name.clone(), FnSig { params, ret });
             }
@@ -927,9 +986,14 @@ fn llvm_type_in(ty: &Ty, registry: &Registry) -> Result<LlvmType, CompileError> 
     // `(int) -> int` is a function *value*, which in this subset means a
     // closure: nothing else can produce one.
     if let Ty::Fun(params, ret) = ty {
-        let params = params.iter().map(|p| llvm_type_in(p, registry)).collect::<Result<Vec<_>, _>>()?;
+        let params = params
+            .iter()
+            .map(|p| llvm_type_in(p, registry))
+            .collect::<Result<Vec<_>, _>>()?;
         let ret = llvm_type_in(ret, registry)?;
-        return Ok(LlvmType::Closure(registry.intern_closure(FnSig { params, ret })));
+        return Ok(LlvmType::Closure(
+            registry.intern_closure(FnSig { params, ret }),
+        ));
     }
     if let Ty::Record(fields) = ty {
         let parts = fields
@@ -939,7 +1003,10 @@ fn llvm_type_in(ty: &Ty, registry: &Registry) -> Result<LlvmType, CompileError> 
         return Ok(LlvmType::Record(registry.intern_record(parts)));
     }
     if let Ty::Tuple(items) = ty {
-        let parts = items.iter().map(|i| llvm_type_in(i, registry)).collect::<Result<Vec<_>, _>>()?;
+        let parts = items
+            .iter()
+            .map(|i| llvm_type_in(i, registry))
+            .collect::<Result<Vec<_>, _>>()?;
         return Ok(LlvmType::Tuple(registry.intern_tuple(parts)));
     }
     // `arrayptr(t)`, `array(t, n)`, `@[t][n]` — one name each for the
@@ -1014,21 +1081,35 @@ fn llvm_type_of(ty: &Ty) -> Result<LlvmType, CompileError> {
         // `argv` is C's `char **`.  Under opaque pointers every pointer is
         // spelled `ptr`, so it shares a representation with `string` and
         // is told apart only by how it may be used.
-        Ty::Name(n) => base_type_named(n)
-            .ok_or_else(|| CompileError::emit(format!("unsupported type `{n}` (only int, bool, string)"))),
-        Ty::Fun(_, _) => Err(CompileError::emit("higher-order function types are not supported yet")),
+        Ty::Name(n) => base_type_named(n).ok_or_else(|| {
+            CompileError::emit(format!("unsupported type `{n}` (only int, bool, string)"))
+        }),
+        Ty::Fun(_, _) => Err(CompileError::emit(
+            "higher-order function types are not supported yet",
+        )),
         Ty::Tuple(_) => Err(CompileError::emit("tuple types are not supported yet")),
-        Ty::Record(_) => Err(CompileError::emit("internal: a record type reached the fallback mapper")),
+        Ty::Record(_) => Err(CompileError::emit(
+            "internal: a record type reached the fallback mapper",
+        )),
     }
 }
 
 /// How an operator is written, for looking it up among the overloads.
 fn operator_symbol(op: BinOp) -> &'static str {
     match op {
-        BinOp::Add => "+", BinOp::Sub => "-", BinOp::Mul => "*", BinOp::Div => "/",
-        BinOp::Mod => "mod", BinOp::Eq => "=", BinOp::Ne => "<>", BinOp::Lt => "<",
-        BinOp::Le => "<=", BinOp::Gt => ">", BinOp::Ge => ">=",
-        BinOp::Andalso => "andalso", BinOp::Orelse => "orelse",
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Mod => "mod",
+        BinOp::Eq => "=",
+        BinOp::Ne => "<>",
+        BinOp::Lt => "<",
+        BinOp::Le => "<=",
+        BinOp::Gt => ">",
+        BinOp::Ge => ">=",
+        BinOp::Andalso => "andalso",
+        BinOp::Orelse => "orelse",
     }
 }
 
@@ -1062,7 +1143,12 @@ fn collect_assigned(expr: &Expr, out: &mut std::collections::HashSet<String>) {
 /// instances of one parameterized datatype — the expected type is what
 /// settles it, and when the context supplies none the program is genuinely
 /// ambiguous and is told so rather than guessed at.
-fn resolve_ctor(name: &str, ty_args: &[Ty], expected: Option<LlvmType>, registry: &Registry) -> Result<CtorInfo, CompileError> {
+fn resolve_ctor(
+    name: &str,
+    ty_args: &[Ty],
+    expected: Option<LlvmType>,
+    registry: &Registry,
+) -> Result<CtorInfo, CompileError> {
     let candidates = &registry.ctors[name];
     if let [only] = &candidates[..] {
         return Ok(only.clone());
@@ -1075,7 +1161,9 @@ fn resolve_ctor(name: &str, ty_args: &[Ty], expected: Option<LlvmType>, registry
     if !ty_args.is_empty() {
         let wanted = instance_name(candidates, ty_args, registry);
         if let Some(found) = wanted.and_then(|w| {
-            candidates.iter().find(|c| registry.datatypes[c.datatype] == w)
+            candidates
+                .iter()
+                .find(|c| registry.datatypes[c.datatype] == w)
         }) {
             return Ok(found.clone());
         }
@@ -1089,7 +1177,10 @@ fn resolve_ctor(name: &str, ty_args: &[Ty], expected: Option<LlvmType>, registry
             registry.datatypes[want]
         )));
     }
-    let names: Vec<&str> = candidates.iter().map(|c| registry.datatypes[c.datatype].as_str()).collect();
+    let names: Vec<&str> = candidates
+        .iter()
+        .map(|c| registry.datatypes[c.datatype].as_str())
+        .collect();
     Err(CompileError::emit(format!(
         "`{name}` could build any of {}; say which with a type annotation",
         names.join(", ")
@@ -1133,8 +1224,12 @@ fn ty_for(t: LlvmType) -> Ty {
             // A datatype's name is recovered from the registry by the
             // caller when it matters; this path only needs a placeholder
             // the type mapper will accept.
-            LlvmType::Data(_) | LlvmType::Tuple(_) | LlvmType::Array(_)
-            | LlvmType::Closure(_) | LlvmType::Lazy(_) | LlvmType::Record(_) => "void",
+            LlvmType::Data(_)
+            | LlvmType::Tuple(_)
+            | LlvmType::Array(_)
+            | LlvmType::Closure(_)
+            | LlvmType::Lazy(_)
+            | LlvmType::Record(_) => "void",
         }
         .into(),
     )
@@ -1171,10 +1266,11 @@ fn base_type_named(name: &str) -> Option<LlvmType> {
         // which static sort tracks it — is one machine word here.  The
         // distinctions are real to its type checker and invisible to a
         // 64-bit target.
-        "int" | "intGt" | "intGte" | "intLt" | "intLte" | "nat" | "pos"
-        | "size_t" | "sizeGt" | "sizeGte" | "sizeLt" | "sizeLte" | "ssize_t"
-        | "uint" | "lint" | "ulint" | "llint" | "ullint" | "sint" | "usint"
-        | "Int" | "Nat" | "Uint" | "intmax" | "uintmax" => Some(LlvmType::I64),
+        "int" | "intGt" | "intGte" | "intLt" | "intLte" | "nat" | "pos" | "size_t" | "sizeGt"
+        | "sizeGte" | "sizeLt" | "sizeLte" | "ssize_t" | "uint" | "lint" | "ulint" | "llint"
+        | "ullint" | "sint" | "usint" | "Int" | "Nat" | "Uint" | "intmax" | "uintmax" => {
+            Some(LlvmType::I64)
+        }
         // `ptr` is an address with nothing said about what is at it.
         "ptr" | "ptr0" | "ptr1" | "Ptr" | "Ptr0" | "Ptr1" => Some(LlvmType::I8Ptr),
         // `bytes(n)` is `n` bytes and `b0ytes(n)` the same bytes before
@@ -1254,7 +1350,13 @@ fn llvm_ty_str(t: LlvmType) -> &'static str {
 /// source `$` only ever appears inside a template hole.
 fn sanitize(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '$' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -1452,7 +1554,9 @@ impl ModuleBuilder {
             // it is walked.  Each chunk is threaded onto a list and the
             // whole list is handed back before `main` returns, so the
             // samples still run clean under valgrind.
-            out.push_str(&format!("@.heap = internal global [{HEAP_BYTES} x i8] zeroinitializer\n"));
+            out.push_str(&format!(
+                "@.heap = internal global [{HEAP_BYTES} x i8] zeroinitializer\n"
+            ));
             out.push_str("@.heap.cur = internal global ptr null\n");
             out.push_str("@.heap.off = internal global i64 0\n");
             out.push_str(&format!("@.heap.cap = internal global i64 {HEAP_BYTES}\n"));
@@ -1466,11 +1570,17 @@ impl ModuleBuilder {
         }
         for (i, s) in self.strings.iter().enumerate() {
             let len = s.len() + 1;
-            out.push_str(&format!("@.str.{i} = private unnamed_addr constant [{len} x i8] c\"{}\\00\"\n", llvm_escape(s)));
+            out.push_str(&format!(
+                "@.str.{i} = private unnamed_addr constant [{len} x i8] c\"{}\\00\"\n",
+                llvm_escape(s)
+            ));
         }
         for (i, f) in self.formats.iter().enumerate() {
             let len = f.len() + 1;
-            out.push_str(&format!("@.fmt.{i} = private unnamed_addr constant [{len} x i8] c\"{}\\00\"\n", llvm_escape(f)));
+            out.push_str(&format!(
+                "@.fmt.{i} = private unnamed_addr constant [{len} x i8] c\"{}\\00\"\n",
+                llvm_escape(f)
+            ));
         }
         out.push('\n');
         if self.needs_heap {
@@ -1548,11 +1658,16 @@ impl FnBuilder {
     fn alloca(&mut self, name: &str, ty: LlvmType) -> String {
         let mut ptr = format!("%{}.cell", sanitize(name));
         let mut k = 0;
-        while self.allocas.iter().any(|a| a.starts_with(&format!("{ptr} "))) {
+        while self
+            .allocas
+            .iter()
+            .any(|a| a.starts_with(&format!("{ptr} ")))
+        {
             k += 1;
             ptr = format!("%{}.cell.{k}", sanitize(name));
         }
-        self.allocas.push(format!("{ptr} = alloca {}", llvm_ty_str(ty)));
+        self.allocas
+            .push(format!("{ptr} = alloca {}", llvm_ty_str(ty)));
         ptr
     }
 
@@ -1600,7 +1715,11 @@ fn is_label(line: &str) -> bool {
 }
 
 /// Emit one `fun` definition as an LLVM function.
-fn emit_function(f: &ats2_domain::ast::FunDef, registry: &Registry, module: &mut ModuleBuilder) -> Result<(), CompileError> {
+fn emit_function(
+    f: &ats2_domain::ast::FunDef,
+    registry: &Registry,
+    module: &mut ModuleBuilder,
+) -> Result<(), CompileError> {
     let sig = &registry.fns[&f.name];
     let by_ref = registry.by_ref.get(&f.name).cloned().unwrap_or_default();
     let is_by_ref = |i: usize| by_ref.get(i).copied().unwrap_or(false);
@@ -1617,17 +1736,36 @@ fn emit_function(f: &ats2_domain::ast::FunDef, registry: &Registry, module: &mut
             fb.env.insert(p.name.clone(), FnValue { reg, ty: *ty });
         }
     }
-    let value = LlvmIrEmitter.emit_expr_expecting(&f.body, Some(sig.ret), &mut fb, registry, module)?;
+    let value =
+        LlvmIrEmitter.emit_expr_expecting(&f.body, Some(sig.ret), &mut fb, registry, module)?;
     if value.ty != sig.ret && sig.ret != LlvmType::Void && value.ty != LlvmType::Never {
-        return Err(CompileError::emit(format!("function `{}` body has type {}, annotation says {}", f.name, llvm_ty_str(value.ty), llvm_ty_str(sig.ret))));
+        return Err(CompileError::emit(format!(
+            "function `{}` body has type {}, annotation says {}",
+            f.name,
+            llvm_ty_str(value.ty),
+            llvm_ty_str(sig.ret)
+        )));
     }
-    let params: Vec<String> = f.params.iter().zip(&sig.params).enumerate()
+    let params: Vec<String> = f
+        .params
+        .iter()
+        .zip(&sig.params)
+        .enumerate()
         .map(|(i, (p, ty))| {
-            let ty = if is_by_ref(i) { "ptr" } else { llvm_ty_str(*ty) };
+            let ty = if is_by_ref(i) {
+                "ptr"
+            } else {
+                llvm_ty_str(*ty)
+            };
             format!("{ty} %{}", sanitize(&p.name))
         })
         .collect();
-    let mut text = format!("define {} @{}({}) {{", llvm_ty_str(sig.ret), sanitize(&f.name), params.join(", "));
+    let mut text = format!(
+        "define {} @{}({}) {{",
+        llvm_ty_str(sig.ret),
+        sanitize(&f.name),
+        params.join(", ")
+    );
     text.push_str("\nentry:");
     for line in fb.allocas.iter().chain(&fb.lines) {
         push_line(&mut text, line);
@@ -1653,7 +1791,12 @@ fn ret_instruction(ret: LlvmType, value: &FnValue) -> String {
 }
 
 /// Emit the `implement main0() = ...` clause as the program entry `@main`.
-fn emit_main(im: &ats2_domain::ast::ImplementDef, inits: &[&ats2_domain::ast::ValDef], registry: &Registry, module: &mut ModuleBuilder) -> Result<(), CompileError> {
+fn emit_main(
+    im: &ats2_domain::ast::ImplementDef,
+    inits: &[&ats2_domain::ast::ValDef],
+    registry: &Registry,
+    module: &mut ModuleBuilder,
+) -> Result<(), CompileError> {
     let mut fb = FnBuilder::new();
     // A top-level `val` is worked out once, here, before the program's own
     // body runs.  There is nowhere else it could go: its right-hand side
@@ -1665,7 +1808,8 @@ fn emit_main(im: &ats2_domain::ast::ImplementDef, inits: &[&ats2_domain::ast::Va
             LlvmIrEmitter.emit_expr(&v.value, &mut fb, registry, module)?;
             continue;
         };
-        let value = LlvmIrEmitter.emit_expr_expecting(&v.value, Some(ty), &mut fb, registry, module)?;
+        let value =
+            LlvmIrEmitter.emit_expr_expecting(&v.value, Some(ty), &mut fb, registry, module)?;
         if value.ty != ty {
             return Err(CompileError::emit(format!(
                 "`{}` is declared as {} but its value is {}",
@@ -1674,15 +1818,32 @@ fn emit_main(im: &ats2_domain::ast::ImplementDef, inits: &[&ats2_domain::ast::Va
                 llvm_ty_str(value.ty)
             )));
         }
-        fb.line(format!("store {} {}, ptr @{}", llvm_ty_str(ty), value.reg, sanitize(&v.name)));
+        fb.line(format!(
+            "store {} {}, ptr @{}",
+            llvm_ty_str(ty),
+            value.reg,
+            sanitize(&v.name)
+        ));
     }
     // C hands `main` an `i32` argument count; every `int` in the subset is
     // an `i64`, so the count is widened once on entry and the ATS name is
     // bound to the widened value.
     let takes_argv = im.params.len() == 2;
     if takes_argv {
-        fb.env.insert(im.params[0].name.clone(), FnValue { reg: format!("%{}", sanitize(&im.params[0].name)), ty: LlvmType::I64 });
-        fb.env.insert(im.params[1].name.clone(), FnValue { reg: format!("%{}", sanitize(&im.params[1].name)), ty: LlvmType::Argv });
+        fb.env.insert(
+            im.params[0].name.clone(),
+            FnValue {
+                reg: format!("%{}", sanitize(&im.params[0].name)),
+                ty: LlvmType::I64,
+            },
+        );
+        fb.env.insert(
+            im.params[1].name.clone(),
+            FnValue {
+                reg: format!("%{}", sanitize(&im.params[1].name)),
+                ty: LlvmType::Argv,
+            },
+        );
     }
     let value = LlvmIrEmitter.emit_expr(&im.body, &mut fb, registry, module)?;
     // `main0` throws its result away; `main` hands it back as the exit
@@ -1733,7 +1894,13 @@ fn emit_main(im: &ats2_domain::ast::ImplementDef, inits: &[&ats2_domain::ast::Va
 
 impl LlvmIrEmitter {
     /// Lower one expression, appending its instructions to `fb`.
-    fn emit_expr(&self, expr: &Expr, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_expr(
+        &self,
+        expr: &Expr,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         self.emit_expr_expecting(expr, None, fb, registry, module)
     }
 
@@ -1746,9 +1913,19 @@ impl LlvmIrEmitter {
     /// type is the only thing that can decide.  This is the *checking*
     /// direction of bidirectional typing, added exactly where inference
     /// runs out rather than as a whole type checker.
-    fn emit_expr_expecting(&self, expr: &Expr, expected: Option<LlvmType>, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_expr_expecting(
+        &self,
+        expr: &Expr,
+        expected: Option<LlvmType>,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         match expr {
-            Expr::Unit => Ok(FnValue { reg: String::new(), ty: LlvmType::Void }),
+            Expr::Unit => Ok(FnValue {
+                reg: String::new(),
+                ty: LlvmType::Void,
+            }),
             // `fact_ind{n}()` — a static instantiation.  It picks which
             // *claim* is being made and no bits at all, so emission
             // looks straight through it.  This is where the static
@@ -1795,7 +1972,10 @@ impl LlvmIrEmitter {
                 }
                 let shape: Vec<(String, LlvmType)> =
                     values.into_iter().map(|(n, v)| (n, v.ty)).collect();
-                Ok(FnValue { reg: ptr, ty: LlvmType::Record(registry.intern_record(shape)) })
+                Ok(FnValue {
+                    reg: ptr,
+                    ty: LlvmType::Record(registry.intern_record(shape)),
+                })
             }
             // `r.cmp` — one field, or, when the left-hand side is not a
             // record with that field, ATS's dot notation for a call with
@@ -1814,7 +1994,9 @@ impl LlvmIrEmitter {
                 }
                 let v = self.emit_expr(base, fb, registry, module)?;
                 let Some((slot, ty)) = self.record_slot(&v, name, registry) else {
-                    return Err(CompileError::emit(format!("this record has no field `{name}`")));
+                    return Err(CompileError::emit(format!(
+                        "this record has no field `{name}`"
+                    )));
                 };
                 let addr = self.emit_slot_address(&v.reg, slot, fb);
                 let reg = fb.fresh_temp();
@@ -1823,11 +2005,16 @@ impl LlvmIrEmitter {
             }
             Expr::TupleLit(items) => {
                 let want: Vec<Option<LlvmType>> = match expected {
-                    Some(LlvmType::Tuple(i)) => registry.tuple_parts(i).into_iter().map(Some).collect(),
+                    Some(LlvmType::Tuple(i)) => {
+                        registry.tuple_parts(i).into_iter().map(Some).collect()
+                    }
                     _ => vec![None; items.len()],
                 };
                 let mut values = Vec::new();
-                for (item, w) in items.iter().zip(want.into_iter().chain(std::iter::repeat(None))) {
+                for (item, w) in items
+                    .iter()
+                    .zip(want.into_iter().chain(std::iter::repeat(None)))
+                {
                     values.push(self.emit_expr_expecting(item, w, fb, registry, module)?);
                 }
                 let parts: Vec<LlvmType> = values.iter().map(|v| v.ty).collect();
@@ -1836,21 +2023,37 @@ impl LlvmIrEmitter {
                     let addr = self.emit_slot_address(&ptr, i, fb);
                     fb.line(format!("store {} {}, ptr {addr}", llvm_ty_str(v.ty), v.reg));
                 }
-                Ok(FnValue { reg: ptr, ty: LlvmType::Tuple(registry.intern_tuple(parts)) })
+                Ok(FnValue {
+                    reg: ptr,
+                    ty: LlvmType::Tuple(registry.intern_tuple(parts)),
+                })
             }
-            Expr::Wildcard => Err(CompileError::emit("`_` stands for a value the compiler must infer, which this one cannot")),
+            Expr::Wildcard => Err(CompileError::emit(
+                "`_` stands for a value the compiler must infer, which this one cannot",
+            )),
             // An uninitialized `var`.  The annotation is the only thing
             // that says what the cell holds, so without one there is
             // nothing to start it from.
             Expr::Uninit => match expected {
-                Some(ty) => Ok(FnValue { reg: zero_literal(ty).to_string(), ty }),
+                Some(ty) => Ok(FnValue {
+                    reg: zero_literal(ty).to_string(),
+                    ty,
+                }),
                 None => Err(CompileError::emit(
                     "an uninitialized `var` needs a type annotation to say what its cell holds",
                 )),
             },
-            Expr::Inst(name, _) => Err(CompileError::emit(format!("internal: the template `{name}` was not expanded"))),
-            Expr::IntLit(n) => Ok(FnValue { reg: n.to_string(), ty: LlvmType::I64 }),
-            Expr::CharLit(b) => Ok(FnValue { reg: b.to_string(), ty: LlvmType::I8 }),
+            Expr::Inst(name, _) => Err(CompileError::emit(format!(
+                "internal: the template `{name}` was not expanded"
+            ))),
+            Expr::IntLit(n) => Ok(FnValue {
+                reg: n.to_string(),
+                ty: LlvmType::I64,
+            }),
+            Expr::CharLit(b) => Ok(FnValue {
+                reg: b.to_string(),
+                ty: LlvmType::I8,
+            }),
             // LLVM wants a float constant to look like one, so a whole
             // number still carries its point: `1` would be an integer.
             Expr::FloatLit(v) => {
@@ -1860,15 +2063,24 @@ impl LlvmIrEmitter {
                 } else {
                     format!("{x}")
                 };
-                Ok(FnValue { reg: text, ty: LlvmType::F64 })
+                Ok(FnValue {
+                    reg: text,
+                    ty: LlvmType::F64,
+                })
             }
-            Expr::BoolLit(b) => Ok(FnValue { reg: if *b { "true".into() } else { "false".into() }, ty: LlvmType::I1 }),
+            Expr::BoolLit(b) => Ok(FnValue {
+                reg: if *b { "true".into() } else { "false".into() },
+                ty: LlvmType::I1,
+            }),
             Expr::StrLit(s) => {
                 // With opaque pointers, a constant's address is the global
                 // itself: `ptr @.str.k`.  No GEP is needed for whole
                 // constants (modern LLVM style).
                 let reg = module.add_string(s);
-                Ok(FnValue { reg, ty: LlvmType::I8Ptr })
+                Ok(FnValue {
+                    reg,
+                    ty: LlvmType::I8Ptr,
+                })
             }
             // A `var` is storage, so reading it is a load; a `val` is an
             // SSA value already in hand.
@@ -1886,12 +2098,19 @@ impl LlvmIrEmitter {
                 let id = fb.fresh_block_id();
                 fb.label(&format!("break.after.{id}"));
                 fb.line("unreachable");
-                Ok(FnValue { reg: String::new(), ty: LlvmType::Never })
+                Ok(FnValue {
+                    reg: String::new(),
+                    ty: LlvmType::Never,
+                })
             }
             Expr::Var(name) if fb.cells.contains_key(name) => {
                 let cell = fb.cells[name].clone();
                 let reg = fb.fresh_temp();
-                fb.line(format!("{reg} = load {}, ptr {}", llvm_ty_str(cell.ty), cell.ptr));
+                fb.line(format!(
+                    "{reg} = load {}, ptr {}",
+                    llvm_ty_str(cell.ty),
+                    cell.ptr
+                ));
                 Ok(FnValue { reg, ty: cell.ty })
             }
             // A top-level `val` lives in storage, so reading it is a load.
@@ -1902,7 +2121,11 @@ impl LlvmIrEmitter {
             {
                 let ty = registry.globals[name];
                 let reg = fb.fresh_temp();
-                fb.line(format!("{reg} = load {}, ptr @{}", llvm_ty_str(ty), sanitize(name)));
+                fb.line(format!(
+                    "{reg} = load {}, ptr @{}",
+                    llvm_ty_str(ty),
+                    sanitize(name)
+                ));
                 Ok(FnValue { reg, ty })
             }
             // `stdin_ref` and friends: C keeps the streams in globals, so
@@ -1916,17 +2139,26 @@ impl LlvmIrEmitter {
                 });
                 let reg = fb.fresh_temp();
                 fb.line(format!("{reg} = load ptr, ptr @{c_name}"));
-                Ok(FnValue { reg, ty: LlvmType::FileRef })
+                Ok(FnValue {
+                    reg,
+                    ty: LlvmType::FileRef,
+                })
             }
             // `file_mode_r` / `file_mode_w` are the C mode strings.
             Expr::Var(name) if !fb.env.contains_key(name) && file_mode(name).is_some() => {
                 let reg = module.add_string(file_mode(name).expect("just checked"));
-                Ok(FnValue { reg, ty: LlvmType::I8Ptr })
+                Ok(FnValue {
+                    reg,
+                    ty: LlvmType::I8Ptr,
+                })
             }
             // `Nil` without parentheses still builds the value.
             Expr::Var(name)
                 if !fb.env.contains_key(name)
-                    && registry.ctors.get(name).is_some_and(|c| c.iter().all(|i| i.fields.is_empty())) =>
+                    && registry
+                        .ctors
+                        .get(name)
+                        .is_some_and(|c| c.iter().all(|i| i.fields.is_empty())) =>
             {
                 let info = resolve_ctor(name, &[], expected, registry)?;
                 self.emit_ctor(name, &info, &[], fb, registry, module)
@@ -1939,9 +2171,9 @@ impl LlvmIrEmitter {
                     let value = registry.consts[name].clone();
                     self.emit_expr(&value, fb, registry, module)
                 }
-                None if registry.fns.contains_key(name) => {
-                    Err(CompileError::emit(format!("function `{name}` used as a value; higher-order functions are not supported yet")))
-                }
+                None if registry.fns.contains_key(name) => Err(CompileError::emit(format!(
+                    "function `{name}` used as a value; higher-order functions are not supported yet"
+                ))),
                 None => Err(CompileError::emit(format!("undefined variable `{name}`"))),
             },
             Expr::UnaryNeg(e) => {
@@ -1950,12 +2182,18 @@ impl LlvmIrEmitter {
                     LlvmType::I64 => {
                         let reg = fb.fresh_temp();
                         fb.line(format!("{reg} = sub i64 0, {}", v.reg));
-                        Ok(FnValue { reg, ty: LlvmType::I64 })
+                        Ok(FnValue {
+                            reg,
+                            ty: LlvmType::I64,
+                        })
                     }
                     LlvmType::F64 => {
                         let reg = fb.fresh_temp();
                         fb.line(format!("{reg} = fneg double {}", v.reg));
-                        Ok(FnValue { reg, ty: LlvmType::F64 })
+                        Ok(FnValue {
+                            reg,
+                            ty: LlvmType::F64,
+                        })
                     }
                     // `~xs` on anything else *consumes* it: ATS spells
                     // "negate" and "free this linear value" with the same
@@ -1964,11 +2202,16 @@ impl LlvmIrEmitter {
                     // a call that does the real work — and then there is
                     // nothing to free, because the arena frees
                     // everything at once.
-                    _ => Ok(FnValue { reg: String::new(), ty: LlvmType::Void }),
+                    _ => Ok(FnValue {
+                        reg: String::new(),
+                        ty: LlvmType::Void,
+                    }),
                 }
             }
             Expr::BinOp(op, l, r) => self.emit_binop(*op, l, r, fb, registry, module),
-            Expr::Call(callee, args) => self.emit_call(callee, args, expected, fb, registry, module),
+            Expr::Call(callee, args) => {
+                self.emit_call(callee, args, expected, fb, registry, module)
+            }
             Expr::Index(base, index) => self.emit_index(base, index, fb, registry, module),
             Expr::Proj(base, slot) => self.emit_proj(base, *slot, fb, registry, module),
             Expr::Deref(inner) => self.emit_deref(inner, fb, registry, module),
@@ -1984,18 +2227,33 @@ impl LlvmIrEmitter {
                     if bind.proof {
                         continue;
                     }
-                    let annotated = bind.ty.as_ref().map(|t| llvm_type_in(t, registry)).transpose()?;
-                    let v = self.emit_expr_expecting(&bind.value, annotated, fb, registry, module)?;
+                    let annotated = bind
+                        .ty
+                        .as_ref()
+                        .map(|t| llvm_type_in(t, registry))
+                        .transpose()?;
+                    let v =
+                        self.emit_expr_expecting(&bind.value, annotated, fb, registry, module)?;
                     if let Some(ann) = &bind.ty {
                         let expected = llvm_type_in(ann, registry)?;
                         if v.ty != expected {
-                            return Err(CompileError::emit(format!("binding `{}` has type {}, annotation says {}", bind.name.as_deref().unwrap_or("()"), llvm_ty_str(v.ty), llvm_ty_str(expected))));
+                            return Err(CompileError::emit(format!(
+                                "binding `{}` has type {}, annotation says {}",
+                                bind.name.as_deref().unwrap_or("()"),
+                                llvm_ty_str(v.ty),
+                                llvm_ty_str(expected)
+                            )));
                         }
                     }
                     if let Some(name) = &bind.name {
                         if bind.mutable {
                             let ptr = fb.alloca(name, v.ty);
-                            fb.line(format!("store {} {}, ptr {}", llvm_ty_str(v.ty), v.reg, ptr));
+                            fb.line(format!(
+                                "store {} {}, ptr {}",
+                                llvm_ty_str(v.ty),
+                                v.reg,
+                                ptr
+                            ));
                             fb.cells.insert(name.clone(), Cell { ptr, ty: v.ty });
                             // A cell shadows any value of the same name.
                             fb.env.remove(name);
@@ -2007,18 +2265,35 @@ impl LlvmIrEmitter {
                 }
                 self.emit_expr_expecting(body, expected, fb, registry, module)
             }
-            Expr::Lam(params, ret, body) => self.emit_lambda(params, ret.as_ref(), body, expected, fb, registry, module),
-            Expr::LetFun(_, _) => Err(CompileError::emit("internal: a nested function survived lambda lifting")),
+            Expr::Lam(params, ret, body) => {
+                self.emit_lambda(params, ret.as_ref(), body, expected, fb, registry, module)
+            }
+            Expr::LetFun(_, _) => Err(CompileError::emit(
+                "internal: a nested function survived lambda lifting",
+            )),
             Expr::Assign(name, value) => self.emit_assign(name, value, fb, registry, module),
             Expr::While(c, b) => self.emit_while(c, b, fb, registry, module),
             Expr::For(i, c, st, b) => self.emit_for(i, c, st, b, fb, registry, module),
-            Expr::Case(scrutinee, arms) => self.emit_case(scrutinee, arms, expected, fb, registry, module),
+            Expr::Case(scrutinee, arms) => {
+                self.emit_case(scrutinee, arms, expected, fb, registry, module)
+            }
             Expr::MacroCall(name, args) => self.emit_macro(name, args, fb, registry, module),
         }
     }
 
-    fn emit_binop(&self, op: BinOp, l: &Expr, r: &Expr, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
-        let (lv, rv) = (self.emit_expr(l, fb, registry, module)?, self.emit_expr(r, fb, registry, module)?);
+    fn emit_binop(
+        &self,
+        op: BinOp,
+        l: &Expr,
+        r: &Expr,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
+        let (lv, rv) = (
+            self.emit_expr(l, fb, registry, module)?,
+            self.emit_expr(r, fb, registry, module)?,
+        );
         // The connectives are not value operations: the right operand may
         // never be evaluated, so it is handed over unevaluated.
         if matches!(op, BinOp::Andalso | BinOp::Orelse) {
@@ -2043,29 +2318,45 @@ impl LlvmIrEmitter {
     }
 
     /// Apply an operator to two values already in hand.
-    fn emit_binop_values(&self, op: BinOp, lv: FnValue, rv: FnValue, fb: &mut FnBuilder) -> Result<FnValue, CompileError> {
+    fn emit_binop_values(
+        &self,
+        op: BinOp,
+        lv: FnValue,
+        rv: FnValue,
+        fb: &mut FnBuilder,
+    ) -> Result<FnValue, CompileError> {
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                 if lv.ty == LlvmType::F64 && rv.ty == LlvmType::F64 {
                     let instr = match op {
-                        BinOp::Add => "fadd", BinOp::Sub => "fsub", BinOp::Mul => "fmul",
-                        BinOp::Div => "fdiv", _ => "frem",
+                        BinOp::Add => "fadd",
+                        BinOp::Sub => "fsub",
+                        BinOp::Mul => "fmul",
+                        BinOp::Div => "fdiv",
+                        _ => "frem",
                     };
                     let reg = fb.fresh_temp();
                     fb.line(format!("{reg} = {instr} double {}, {}", lv.reg, rv.reg));
-                    return Ok(FnValue { reg, ty: LlvmType::F64 });
+                    return Ok(FnValue {
+                        reg,
+                        ty: LlvmType::F64,
+                    });
                 }
                 let instr = match op {
-                    BinOp::Add => "add", BinOp::Sub => "sub", BinOp::Mul => "mul", BinOp::Div => "sdiv", _ => "srem",
+                    BinOp::Add => "add",
+                    BinOp::Sub => "sub",
+                    BinOp::Mul => "mul",
+                    BinOp::Div => "sdiv",
+                    _ => "srem",
                 };
                 self.emit_arithmetic(instr, lv, rv, fb)
             }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 self.emit_comparison(op, lv, rv, fb)
             }
-            BinOp::Andalso | BinOp::Orelse => {
-                Err(CompileError::emit("andalso/orelse are not value operations"))
-            }
+            BinOp::Andalso | BinOp::Orelse => Err(CompileError::emit(
+                "andalso/orelse are not value operations",
+            )),
         }
     }
 
@@ -2074,15 +2365,28 @@ impl LlvmIrEmitter {
     /// Only the generic numeric shims are reachable this way so far, which
     /// is what the samples declare; a user function of the right shape
     /// would need its arguments passed rather than its meaning inlined.
-    fn emit_overload(&self, func: &str, op: BinOp, lv: FnValue, rv: FnValue, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_overload(
+        &self,
+        func: &str,
+        op: BinOp,
+        lv: FnValue,
+        rv: FnValue,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         if func.starts_with('g') && (func.contains("_int_val") || func.contains("_val_int")) {
             return self.emit_promoted(op, lv, rv, fb);
         }
         let sig = registry.fns.get(func).ok_or_else(|| {
-            CompileError::emit(format!("`{func}` is named by an `overload` but is not defined"))
+            CompileError::emit(format!(
+                "`{func}` is named by an `overload` but is not defined"
+            ))
         })?;
         if sig.params.len() != 2 {
-            return Err(CompileError::emit(format!("`{func}` is an overload, so it must take two arguments")));
+            return Err(CompileError::emit(format!(
+                "`{func}` is an overload, so it must take two arguments"
+            )));
         }
         let _ = module;
         let operands = [
@@ -2090,12 +2394,23 @@ impl LlvmIrEmitter {
             format!("{} {}", llvm_ty_str(rv.ty), rv.reg),
         ];
         let reg = fb.fresh_temp();
-        fb.line(format!("{reg} = call {} @{}({})", llvm_ty_str(sig.ret), sanitize(func), operands.join(", ")));
+        fb.line(format!(
+            "{reg} = call {} @{}({})",
+            llvm_ty_str(sig.ret),
+            sanitize(func),
+            operands.join(", ")
+        ));
         Ok(FnValue { reg, ty: sig.ret })
     }
 
     /// `+ - * / mod` on ints.
-    fn emit_arithmetic(&self, instr: &str, lv: FnValue, rv: FnValue, fb: &mut FnBuilder) -> Result<FnValue, CompileError> {
+    fn emit_arithmetic(
+        &self,
+        instr: &str,
+        lv: FnValue,
+        rv: FnValue,
+        fb: &mut FnBuilder,
+    ) -> Result<FnValue, CompileError> {
         // A character is a small integer, and ATS treats it as one:
         // `c - '0'` is the idiom every digit-parsing loop is built on.
         // Widening here keeps that spelling working without making
@@ -2123,20 +2438,32 @@ impl LlvmIrEmitter {
             };
             let reg = fb.fresh_temp();
             fb.line(format!("{reg} = {fop} double {}, {}", lv.reg, rv.reg));
-            return Ok(FnValue { reg, ty: LlvmType::F64 });
+            return Ok(FnValue {
+                reg,
+                ty: LlvmType::F64,
+            });
         }
         if lv.ty != LlvmType::I64 || rv.ty != LlvmType::I64 {
             return Err(CompileError::emit("arithmetic requires int operands"));
         }
         let reg = fb.fresh_temp();
         fb.line(format!("{reg} = {instr} i64 {}, {}", lv.reg, rv.reg));
-        Ok(FnValue { reg, ty: LlvmType::I64 })
+        Ok(FnValue {
+            reg,
+            ty: LlvmType::I64,
+        })
     }
 
     /// Comparisons, lowered to `icmp` with the code dictated by the
     /// operand type (`slt` for ints; `eq`/`ne` for bools; ordering a bool
     /// is an error).
-    fn emit_comparison(&self, op: BinOp, lv: FnValue, rv: FnValue, fb: &mut FnBuilder) -> Result<FnValue, CompileError> {
+    fn emit_comparison(
+        &self,
+        op: BinOp,
+        lv: FnValue,
+        rv: FnValue,
+        fb: &mut FnBuilder,
+    ) -> Result<FnValue, CompileError> {
         // `p > 0`, `p = 0` — ATS's way of asking whether a call handed
         // back anything.  A pointer is not a number, so the only reading
         // that means something is the null test, and that is what is
@@ -2145,7 +2472,9 @@ impl LlvmIrEmitter {
             return Ok(v);
         }
         if lv.ty != rv.ty {
-            return Err(CompileError::emit("cannot compare values of different types"));
+            return Err(CompileError::emit(
+                "cannot compare values of different types",
+            ));
         }
         if lv.ty == LlvmType::I8Ptr {
             return Err(CompileError::emit("string comparison is not supported yet"));
@@ -2167,25 +2496,57 @@ impl LlvmIrEmitter {
         // is what `o` selects and what every other language means by `<`.
         if lv.ty == LlvmType::F64 {
             let fcode = match op {
-                BinOp::Eq => "oeq", BinOp::Ne => "one", BinOp::Lt => "olt",
-                BinOp::Le => "ole", BinOp::Gt => "ogt", _ => "oge",
+                BinOp::Eq => "oeq",
+                BinOp::Ne => "one",
+                BinOp::Lt => "olt",
+                BinOp::Le => "ole",
+                BinOp::Gt => "ogt",
+                _ => "oge",
             };
             let reg = fb.fresh_temp();
-            fb.line(format!("{reg} = fcmp {fcode} double {}, {}", lv.reg, rv.reg));
-            return Ok(FnValue { reg, ty: LlvmType::I1 });
+            fb.line(format!(
+                "{reg} = fcmp {fcode} double {}, {}",
+                lv.reg, rv.reg
+            ));
+            return Ok(FnValue {
+                reg,
+                ty: LlvmType::I1,
+            });
         }
         let reg = fb.fresh_temp();
-        fb.line(format!("{reg} = icmp {code} {} {}, {}", llvm_ty_str(lv.ty), lv.reg, rv.reg));
-        Ok(FnValue { reg, ty: LlvmType::I1 })
+        fb.line(format!(
+            "{reg} = icmp {code} {} {}, {}",
+            llvm_ty_str(lv.ty),
+            lv.reg,
+            rv.reg
+        ));
+        Ok(FnValue {
+            reg,
+            ty: LlvmType::I1,
+        })
     }
 
     /// A comparison of a pointer against the literal zero, as the null
     /// test it means.  `None` when this is not that comparison.
-    fn emit_null_test(&self, op: BinOp, lv: &FnValue, rv: &FnValue, fb: &mut FnBuilder) -> Option<FnValue> {
+    fn emit_null_test(
+        &self,
+        op: BinOp,
+        lv: &FnValue,
+        rv: &FnValue,
+        fb: &mut FnBuilder,
+    ) -> Option<FnValue> {
         let pointerish = |t: LlvmType| {
-            matches!(t, LlvmType::I8Ptr | LlvmType::Data(_) | LlvmType::Tuple(_)
-                | LlvmType::Array(_) | LlvmType::Closure(_) | LlvmType::Lazy(_)
-                | LlvmType::Record(_) | LlvmType::FileRef)
+            matches!(
+                t,
+                LlvmType::I8Ptr
+                    | LlvmType::Data(_)
+                    | LlvmType::Tuple(_)
+                    | LlvmType::Array(_)
+                    | LlvmType::Closure(_)
+                    | LlvmType::Lazy(_)
+                    | LlvmType::Record(_)
+                    | LlvmType::FileRef
+            )
         };
         let (ptr, zero) = match (pointerish(lv.ty), pointerish(rv.ty)) {
             (true, false) if rv.reg == "0" => (lv, rv),
@@ -2202,12 +2563,23 @@ impl LlvmIrEmitter {
         };
         let reg = fb.fresh_temp();
         fb.line(format!("{reg} = icmp {code} ptr {}, null", ptr.reg));
-        Some(FnValue { reg, ty: LlvmType::I1 })
+        Some(FnValue {
+            reg,
+            ty: LlvmType::I1,
+        })
     }
 
     /// `a andalso b` / `a orelse b` with ATS short-circuit semantics:
     /// evaluate `b` only when the first operand decides the outcome.
-    fn emit_short_circuit(&self, op: BinOp, cond: String, r: &Expr, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_short_circuit(
+        &self,
+        op: BinOp,
+        cond: String,
+        r: &Expr,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         let id = fb.fresh_block_id();
         let prefix = if op == BinOp::Andalso { "and" } else { "or" };
         let t = format!("{prefix}.t.{id}");
@@ -2221,7 +2593,10 @@ impl LlvmIrEmitter {
             rv
         } else {
             fb.line(format!("br label %{m}"));
-            FnValue { reg: "true".into(), ty: LlvmType::I1 }
+            FnValue {
+                reg: "true".into(),
+                ty: LlvmType::I1,
+            }
         };
         // As in `emit_if`: the right operand may itself branch, so the
         // block reaching the merge is the one open now, not `t`/`f`.
@@ -2233,7 +2608,10 @@ impl LlvmIrEmitter {
             rv
         } else {
             fb.line(format!("br label %{m}"));
-            FnValue { reg: "false".into(), ty: LlvmType::I1 }
+            FnValue {
+                reg: "false".into(),
+                ty: LlvmType::I1,
+            }
         };
         let epred = fb.cur_block.clone();
         for v in [&then_done, &else_done] {
@@ -2243,11 +2621,25 @@ impl LlvmIrEmitter {
         }
         fb.label(&m);
         let reg = fb.fresh_temp();
-        fb.line(format!("{reg} = phi i1 [ {}, %{tpred} ], [ {}, %{epred} ]", then_done.reg, else_done.reg));
-        Ok(FnValue { reg, ty: LlvmType::I1 })
+        fb.line(format!(
+            "{reg} = phi i1 [ {}, %{tpred} ], [ {}, %{epred} ]",
+            then_done.reg, else_done.reg
+        ));
+        Ok(FnValue {
+            reg,
+            ty: LlvmType::I1,
+        })
     }
 
-    fn emit_call(&self, callee: &Expr, args: &[Expr], expected: Option<LlvmType>, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_call(
+        &self,
+        callee: &Expr,
+        args: &[Expr],
+        expected: Option<LlvmType>,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         // `f(a)(b)` has two readings.  It is a *curried* call when `f`
         // is one function of two parameters, and an application of the
         // *result* when `f` returns a closure.  Which one it is depends on
@@ -2291,7 +2683,14 @@ impl LlvmIrEmitter {
             }
             let mut all: Vec<Expr> = vec![(**base).clone()];
             all.extend(args.iter().cloned());
-            return self.emit_call(&Expr::Var(field.clone()), &all, expected, fb, registry, module);
+            return self.emit_call(
+                &Expr::Var(field.clone()),
+                &all,
+                expected,
+                fb,
+                registry,
+                module,
+            );
         }
 
         // `f<t>(x)` reaches here when `f` is a shim rather than a
@@ -2302,10 +2701,16 @@ impl LlvmIrEmitter {
         let (name, ty_args) = match callee {
             Expr::Var(n) => (n, Vec::new()),
             Expr::Inst(n, tys) => (n, tys.clone()),
-            _ => return Err(CompileError::emit("only named functions can be called (no higher-order calls)")),
+            _ => {
+                return Err(CompileError::emit(
+                    "only named functions can be called (no higher-order calls)",
+                ));
+            }
         };
         if name == "main0" || name == "main" {
-            return Err(CompileError::emit(format!("`{name}` is the program entry and cannot be called")));
+            return Err(CompileError::emit(format!(
+                "`{name}` is the program entry and cannot be called"
+            )));
         }
         // `assertloc` looks like a call but lowers to a branch, so it is
         // intercepted before the ordinary call path.
@@ -2348,18 +2753,30 @@ impl LlvmIrEmitter {
                 return self.emit_closure_call(v, args, fb, registry, module);
             }
         }
-        let sig = registry.fns.get(name).ok_or_else(|| CompileError::emit(format!("unknown function `{name}`")))?;
+        let sig = registry
+            .fns
+            .get(name)
+            .ok_or_else(|| CompileError::emit(format!("unknown function `{name}`")))?;
         // Declared here, defined nowhere and answered by no shim: it is
         // C's, and a declaration is what lets the call reach it.
         if !registry.defined.contains(name) {
             let ps: Vec<&str> = sig.params.iter().map(|p| llvm_ty_str(*p)).collect();
             module.externs.insert(Box::leak(
-                format!("declare {} @{}({})", llvm_ty_str(sig.ret), sanitize(name), ps.join(", "))
-                    .into_boxed_str(),
+                format!(
+                    "declare {} @{}({})",
+                    llvm_ty_str(sig.ret),
+                    sanitize(name),
+                    ps.join(", ")
+                )
+                .into_boxed_str(),
             ));
         }
         if args.len() != sig.params.len() {
-            return Err(CompileError::emit(format!("function `{name}` expects {} argument(s), got {}", sig.params.len(), args.len())));
+            return Err(CompileError::emit(format!(
+                "function `{name}` expects {} argument(s), got {}",
+                sig.params.len(),
+                args.len()
+            )));
         }
         let by_ref = registry.by_ref.get(name).cloned().unwrap_or_default();
         let mut operands = Vec::new();
@@ -2389,21 +2806,46 @@ impl LlvmIrEmitter {
             }
             let v = self.emit_expr_expecting(arg, Some(*want), fb, registry, module)?;
             if v.ty != *want {
-                return Err(CompileError::emit(format!("argument to `{name}` has type {}, expected {}", llvm_ty_str(v.ty), llvm_ty_str(*want))));
+                return Err(CompileError::emit(format!(
+                    "argument to `{name}` has type {}, expected {}",
+                    llvm_ty_str(v.ty),
+                    llvm_ty_str(*want)
+                )));
             }
             operands.push(format!("{} {}", llvm_ty_str(v.ty), v.reg));
         }
         // A void call names no result: `%t = call void @f()` is invalid IR.
         if sig.ret == LlvmType::Void {
-            fb.line(format!("call void @{}({})", sanitize(name), operands.join(", ")));
-            return Ok(FnValue { reg: String::new(), ty: LlvmType::Void });
+            fb.line(format!(
+                "call void @{}({})",
+                sanitize(name),
+                operands.join(", ")
+            ));
+            return Ok(FnValue {
+                reg: String::new(),
+                ty: LlvmType::Void,
+            });
         }
         let reg = fb.fresh_temp();
-        fb.line(format!("{reg} = call {} @{}({})", llvm_ty_str(sig.ret), sanitize(name), operands.join(", ")));
+        fb.line(format!(
+            "{reg} = call {} @{}({})",
+            llvm_ty_str(sig.ret),
+            sanitize(name),
+            operands.join(", ")
+        ));
         Ok(FnValue { reg, ty: sig.ret })
     }
 
-    fn emit_if(&self, c: &Expr, t: &Expr, e: &Expr, expected: Option<LlvmType>, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_if(
+        &self,
+        c: &Expr,
+        t: &Expr,
+        e: &Expr,
+        expected: Option<LlvmType>,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         let cv = self.emit_expr(c, fb, registry, module)?;
         if cv.ty != LlvmType::I1 {
             return Err(CompileError::emit("if condition must be a bool"));
@@ -2440,7 +2882,10 @@ impl LlvmIrEmitter {
             // Both branches diverge, so the whole `if` does.
             fb.label(&mlab);
             fb.line("unreachable");
-            return Ok(FnValue { reg: String::new(), ty: LlvmType::Never });
+            return Ok(FnValue {
+                reg: String::new(),
+                ty: LlvmType::Never,
+            });
         };
         if let Some((other, _)) = rest.first() {
             if first.ty != other.ty {
@@ -2456,11 +2901,21 @@ impl LlvmIrEmitter {
         // A conditional *statement* merges control but produces no value,
         // so there is nothing for a phi to choose between.
         if ty == LlvmType::Void {
-            return Ok(FnValue { reg: String::new(), ty: LlvmType::Void });
+            return Ok(FnValue {
+                reg: String::new(),
+                ty: LlvmType::Void,
+            });
         }
-        let incoming: Vec<String> = arms.iter().map(|(v, p)| format!("[ {}, %{p} ]", v.reg)).collect();
+        let incoming: Vec<String> = arms
+            .iter()
+            .map(|(v, p)| format!("[ {}, %{p} ]", v.reg))
+            .collect();
         let reg = fb.fresh_temp();
-        fb.line(format!("{reg} = phi {} {}", llvm_ty_str(ty), incoming.join(", ")));
+        fb.line(format!(
+            "{reg} = phi {} {}",
+            llvm_ty_str(ty),
+            incoming.join(", ")
+        ));
         Ok(FnValue { reg, ty })
     }
 
@@ -2470,7 +2925,14 @@ impl LlvmIrEmitter {
     /// stream as their first argument.  All of them collapse to a single
     /// `printf`/`fprintf` call with one synthesized format string, which
     /// is both the simplest lowering and the fastest one.
-    fn emit_macro(&self, name: &str, args: &[Expr], fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_macro(
+        &self,
+        name: &str,
+        args: &[Expr],
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         let (stream, newline, takes_stream) = match name {
             "print!" => (Stream::Stdout, false, false),
             "println!" => (Stream::Stdout, true, false),
@@ -2478,7 +2940,11 @@ impl LlvmIrEmitter {
             "prerrln!" => (Stream::Stderr, true, false),
             "fprint!" => (Stream::Stdout, false, true),
             "fprintln!" => (Stream::Stdout, true, true),
-            _ => return Err(CompileError::emit(format!("unsupported macro `{name}` (the print family and `assertloc` are what exist)"))),
+            _ => {
+                return Err(CompileError::emit(format!(
+                    "unsupported macro `{name}` (the print family and `assertloc` are what exist)"
+                )));
+            }
         };
         // `fprint!(out, ...)`: the stream argument is read from the first
         // position.  It may be any expression of type `FILEref`; the two
@@ -2486,14 +2952,22 @@ impl LlvmIrEmitter {
         // them needs no stream operand.
         let (stream, args) = if takes_stream {
             let Some((first, rest)) = args.split_first() else {
-                return Err(CompileError::emit(format!("`{name}` needs a stream as its first argument")));
+                return Err(CompileError::emit(format!(
+                    "`{name}` needs a stream as its first argument"
+                )));
             };
-            (self.emit_stream_argument(name, first, fb, registry, module)?, rest)
+            (
+                self.emit_stream_argument(name, first, fb, registry, module)?,
+                rest,
+            )
         } else {
             (stream, args)
         };
         self.emit_format(&stream, args, newline, fb, registry, module)?;
-        Ok(FnValue { reg: String::new(), ty: LlvmType::Void })
+        Ok(FnValue {
+            reg: String::new(),
+            ty: LlvmType::Void,
+        })
     }
 
     /// The destination named by a print form's first argument.
@@ -2501,7 +2975,14 @@ impl LlvmIrEmitter {
     /// It may be any expression of type `FILEref`; the two standard
     /// streams are recognised by name as well, because writing to those
     /// needs no stream operand at all.
-    fn emit_stream_argument(&self, name: &str, first: &Expr, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<Stream, CompileError> {
+    fn emit_stream_argument(
+        &self,
+        name: &str,
+        first: &Expr,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<Stream, CompileError> {
         match first {
             Expr::Var(v) if v == "stdout_ref" => Ok(Stream::Stdout),
             Expr::Var(v) if v == "stderr_ref" => Ok(Stream::Stderr),
@@ -2522,7 +3003,15 @@ impl LlvmIrEmitter {
     /// varargs that fill it.  String *literals* become format text
     /// directly (so `%` in them must be doubled); everything else is
     /// evaluated and placed behind the placeholder its type calls for.
-    fn emit_format(&self, stream: &Stream, args: &[Expr], newline: bool, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<(), CompileError> {
+    fn emit_format(
+        &self,
+        stream: &Stream,
+        args: &[Expr],
+        newline: bool,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<(), CompileError> {
         let mut fmt = String::new();
         let mut operands = Vec::new();
         for arg in args {
@@ -2548,7 +3037,16 @@ impl LlvmIrEmitter {
     /// Split out of `emit_format` because a tuple prints as its parts do,
     /// with brackets and commas around them — so printing is recursive
     /// even though a print macro's argument list is not.
-    fn format_one(&self, stream: &Stream, v: FnValue, fmt: &mut String, operands: &mut Vec<String>, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<(), CompileError> {
+    fn format_one(
+        &self,
+        stream: &Stream,
+        v: FnValue,
+        fmt: &mut String,
+        operands: &mut Vec<String>,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<(), CompileError> {
         {
             {
                 {
@@ -2558,19 +3056,34 @@ impl LlvmIrEmitter {
                         // that recurses.
                         LlvmType::Tuple(index) => {
                             fmt.push('(');
-                            for (slot, part) in registry.tuple_parts(index).into_iter().enumerate() {
+                            for (slot, part) in registry.tuple_parts(index).into_iter().enumerate()
+                            {
                                 if slot > 0 {
                                     fmt.push_str(", ");
                                 }
                                 let addr = self.emit_slot_address(&v.reg, slot, fb);
                                 let reg = fb.fresh_temp();
                                 fb.line(format!("{reg} = load {}, ptr {addr}", llvm_ty_str(part)));
-                                self.format_one(stream, FnValue { reg, ty: part }, fmt, operands, fb, registry, module)?;
+                                self.format_one(
+                                    stream,
+                                    FnValue { reg, ty: part },
+                                    fmt,
+                                    operands,
+                                    fb,
+                                    registry,
+                                    module,
+                                )?;
                             }
                             fmt.push(')');
                         }
-                        LlvmType::I64 => { fmt.push_str("%ld"); operands.push(format!("i64 {}", v.reg)); }
-                        LlvmType::I8Ptr => { fmt.push_str("%s"); operands.push(format!("ptr {}", v.reg)); }
+                        LlvmType::I64 => {
+                            fmt.push_str("%ld");
+                            operands.push(format!("i64 {}", v.reg));
+                        }
+                        LlvmType::I8Ptr => {
+                            fmt.push_str("%s");
+                            operands.push(format!("ptr {}", v.reg));
+                        }
                         // ATS prints a bool as the word; a `select` picks
                         // between two constants, so no branch is needed.
                         LlvmType::I1 => {
@@ -2581,18 +3094,32 @@ impl LlvmIrEmitter {
                             fmt.push_str("%s");
                             operands.push(format!("ptr {reg}"));
                         }
-                        LlvmType::I32 => { fmt.push_str("%d"); operands.push(format!("i32 {}", v.reg)); }
+                        LlvmType::I32 => {
+                            fmt.push_str("%d");
+                            operands.push(format!("i32 {}", v.reg));
+                        }
                         // varargs promote a byte to an int, so the
                         // operand must be widened to match.
-                        LlvmType::F64 => { fmt.push_str("%f"); operands.push(format!("double {}", v.reg)); }
+                        LlvmType::F64 => {
+                            fmt.push_str("%f");
+                            operands.push(format!("double {}", v.reg));
+                        }
                         LlvmType::I8 => {
                             let reg = fb.fresh_temp();
                             fb.line(format!("{reg} = sext i8 {} to i32", v.reg));
                             fmt.push_str("%c");
                             operands.push(format!("i32 {reg}"));
                         }
-                        LlvmType::Argv => return Err(CompileError::emit("cannot print `argv` itself; index it first")),
-                        LlvmType::Never => return Err(CompileError::emit("cannot print the result of an expression that never returns")),
+                        LlvmType::Argv => {
+                            return Err(CompileError::emit(
+                                "cannot print `argv` itself; index it first",
+                            ));
+                        }
+                        LlvmType::Never => {
+                            return Err(CompileError::emit(
+                                "cannot print the result of an expression that never returns",
+                            ));
+                        }
                         // A list prints as its elements, comma-separated.
                         // That cannot be a placeholder — how many there
                         // are is not known until the list is walked — so
@@ -2606,14 +3133,36 @@ impl LlvmIrEmitter {
                             }
                             self.emit_list_print(stream, &v, index, fb, registry, module)?;
                         }
-                        LlvmType::Data(_) => return Err(CompileError::emit("cannot print a datatype value; match on it first")),
+                        LlvmType::Data(_) => {
+                            return Err(CompileError::emit(
+                                "cannot print a datatype value; match on it first",
+                            ));
+                        }
 
-                        LlvmType::Array(_) => return Err(CompileError::emit("cannot print an array; index it first")),
-                        LlvmType::Closure(_) => return Err(CompileError::emit("cannot print a function")),
-                        LlvmType::Lazy(_) => return Err(CompileError::emit("cannot print a stream; force it with `!` first")),
-                        LlvmType::Record(_) => return Err(CompileError::emit("cannot print a record; name a field of it")),
-                        LlvmType::FileRef => return Err(CompileError::emit("cannot print a FILEref; it names a stream, it is not data")),
-                        LlvmType::Void => return Err(CompileError::emit("cannot print a void value")),
+                        LlvmType::Array(_) => {
+                            return Err(CompileError::emit("cannot print an array; index it first"));
+                        }
+                        LlvmType::Closure(_) => {
+                            return Err(CompileError::emit("cannot print a function"));
+                        }
+                        LlvmType::Lazy(_) => {
+                            return Err(CompileError::emit(
+                                "cannot print a stream; force it with `!` first",
+                            ));
+                        }
+                        LlvmType::Record(_) => {
+                            return Err(CompileError::emit(
+                                "cannot print a record; name a field of it",
+                            ));
+                        }
+                        LlvmType::FileRef => {
+                            return Err(CompileError::emit(
+                                "cannot print a FILEref; it names a stream, it is not data",
+                            ));
+                        }
+                        LlvmType::Void => {
+                            return Err(CompileError::emit("cannot print a void value"));
+                        }
                     }
                 }
             }
@@ -2623,7 +3172,14 @@ impl LlvmIrEmitter {
 
     /// Emit the call itself.  Writing to stderr costs one extra load,
     /// because `stderr` is a libc *variable* holding the stream.
-    fn emit_printf(&self, stream: Stream, fmt: &str, operands: &[String], fb: &mut FnBuilder, module: &mut ModuleBuilder) {
+    fn emit_printf(
+        &self,
+        stream: Stream,
+        fmt: &str,
+        operands: &[String],
+        fb: &mut FnBuilder,
+        module: &mut ModuleBuilder,
+    ) {
         let fmt_reg = module.add_format(fmt);
         let mut tail = String::new();
         if !operands.is_empty() {
@@ -2633,12 +3189,16 @@ impl LlvmIrEmitter {
         let reg = fb.fresh_temp();
         match stream {
             Stream::Stdout => {
-                fb.line(format!("{reg} = call i32 (ptr, ...) @printf(ptr {fmt_reg}{tail})"));
+                fb.line(format!(
+                    "{reg} = call i32 (ptr, ...) @printf(ptr {fmt_reg}{tail})"
+                ));
             }
             Stream::Stderr => {
                 let s = fb.fresh_temp();
                 fb.line(format!("{s} = load ptr, ptr @stderr"));
-                fb.line(format!("{reg} = call i32 (ptr, ptr, ...) @fprintf(ptr {s}, ptr {fmt_reg}{tail})"));
+                fb.line(format!(
+                    "{reg} = call i32 (ptr, ptr, ...) @fprintf(ptr {s}, ptr {fmt_reg}{tail})"
+                ));
             }
             Stream::Ref(stream_reg) => {
                 fb.line(format!("{reg} = call i32 (ptr, ptr, ...) @fprintf(ptr {stream_reg}, ptr {fmt_reg}{tail})"));
@@ -2656,7 +3216,15 @@ impl LlvmIrEmitter {
     ///
     /// `Ok(None)` means "not a shim" — the caller falls through to the
     /// ordinary call path so the error stays "unknown function".
-    fn emit_shim(&self, name: &str, ty_args: &[Ty], args: &[Expr], fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<Option<FnValue>, CompileError> {
+    fn emit_shim(
+        &self,
+        name: &str,
+        ty_args: &[Ty],
+        args: &[Expr],
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<Option<FnValue>, CompileError> {
         match name {
             // --- arrays ------------------------------------------------
             //
@@ -2673,7 +3241,11 @@ impl LlvmIrEmitter {
                     None => LlvmType::I64,
                 };
                 let n = self.emit_expr(&args[0], fb, registry, module)?;
-                self.require(n.ty, LlvmType::I64, "the length given to an array constructor")?;
+                self.require(
+                    n.ty,
+                    LlvmType::I64,
+                    "the length given to an array constructor",
+                )?;
                 let ptr = self.emit_alloc_dynamic(&n.reg, fb, module);
                 // `array_ptr_alloc` leaves the cells uninitialised; the
                 // others fill them.  Uninitialised here still means
@@ -2682,7 +3254,10 @@ impl LlvmIrEmitter {
                     let v = self.emit_expr_expecting(init, Some(elem), fb, registry, module)?;
                     self.emit_fill(&ptr, &n.reg, &v, fb);
                 }
-                Ok(Some(FnValue { reg: ptr, ty: LlvmType::Array(registry.intern_array(elem)) }))
+                Ok(Some(FnValue {
+                    reg: ptr,
+                    ty: LlvmType::Array(registry.intern_array(elem)),
+                }))
             }
             // `arrayptr_foreach_env<a><env>(A, n, env)` — run the hole
             // `list_tabulate<a> (n)` — the list [f 0, ..., f (n-1)],
@@ -2708,7 +3283,7 @@ impl LlvmIrEmitter {
                     None => {
                         return Err(CompileError::emit(format!(
                             "`{name}` must say what it builds a list of, as in `{name}<int>(n)`"
-                        )))
+                        )));
                     }
                 };
                 let (nil, cons) = self.list_constructors(elem, registry).ok_or_else(|| {
@@ -2746,7 +3321,10 @@ impl LlvmIrEmitter {
                 fb.label(&body);
                 let x = self.inline_hole(
                     &hole,
-                    &[FnValue { reg: i.clone(), ty: LlvmType::I64 }],
+                    &[FnValue {
+                        reg: i.clone(),
+                        ty: LlvmType::I64,
+                    }],
                     None,
                     fb,
                     registry,
@@ -2756,7 +3334,13 @@ impl LlvmIrEmitter {
                 fb.line(format!("{tail} = load ptr, ptr {acc}"));
                 let cell = self.emit_ctor_from_values(
                     &cons,
-                    &[x, FnValue { reg: tail, ty: list_ty }],
+                    &[
+                        x,
+                        FnValue {
+                            reg: tail,
+                            ty: list_ty,
+                        },
+                    ],
                     fb,
                     module,
                 );
@@ -2771,11 +3355,18 @@ impl LlvmIrEmitter {
                 fb.label(&done);
                 let out = fb.fresh_temp();
                 fb.line(format!("{out} = load ptr, ptr {acc}"));
-                Ok(Some(FnValue { reg: out, ty: list_ty }))
+                Ok(Some(FnValue {
+                    reg: out,
+                    ty: list_ty,
+                }))
             }
             // `array_foreach$fwork` over every cell.
-            "arrayptr_foreach_env" | "array_foreach_env" | "arrayref_foreach_env"
-            | "arrayptr_foreach" | "array_foreach" | "arrayref_foreach" => {
+            "arrayptr_foreach_env"
+            | "array_foreach_env"
+            | "arrayref_foreach_env"
+            | "arrayptr_foreach"
+            | "array_foreach"
+            | "arrayref_foreach" => {
                 let a = self.emit_expr(&args[0], fb, registry, module)?;
                 let LlvmType::Array(elem) = a.ty else {
                     return Err(CompileError::emit(format!(
@@ -2806,10 +3397,16 @@ impl LlvmIrEmitter {
                 let off = fb.fresh_temp();
                 fb.line(format!("{off} = mul i64 {i}, {WORD}"));
                 let addr = fb.fresh_temp();
-                fb.line(format!("{addr} = getelementptr i8, ptr {}, i64 {off}", a.reg));
+                fb.line(format!(
+                    "{addr} = getelementptr i8, ptr {}, i64 {off}",
+                    a.reg
+                ));
                 let x = fb.fresh_temp();
                 fb.line(format!("{x} = load {}, ptr {addr}", llvm_ty_str(elem_ty)));
-                let bound = FnValue { reg: x, ty: elem_ty };
+                let bound = FnValue {
+                    reg: x,
+                    ty: elem_ty,
+                };
                 self.inline_hole(&hole, &[bound], args.get(2), fb, registry, module)?;
                 let next = fb.fresh_temp();
                 fb.line(format!("{next} = add i64 {i}, 1"));
@@ -2820,7 +3417,10 @@ impl LlvmIrEmitter {
                 // handled; a caller that does not care writes `val _ =`.
                 let processed = fb.fresh_temp();
                 fb.line(format!("{processed} = load i64, ptr {cell}"));
-                Ok(Some(FnValue { reg: processed, ty: LlvmType::I64 }))
+                Ok(Some(FnValue {
+                    reg: processed,
+                    ty: LlvmType::I64,
+                }))
             }
             // `intrange_foreach(lo, hi)` — run the hole
             // `intrange_foreach$fwork` on each integer in the range.
@@ -2846,7 +3446,10 @@ impl LlvmIrEmitter {
                 fb.line(format!("{more} = icmp slt i64 {i}, {}", hi.reg));
                 fb.line(format!("br i1 {more}, label %{body}, label %{done}"));
                 fb.label(&body);
-                let bound = FnValue { reg: i.clone(), ty: LlvmType::I64 };
+                let bound = FnValue {
+                    reg: i.clone(),
+                    ty: LlvmType::I64,
+                };
                 self.inline_hole(&hole, &[bound], args.get(2), fb, registry, module)?;
                 let next = fb.fresh_temp();
                 fb.line(format!("{next} = add i64 {i}, 1"));
@@ -2855,14 +3458,21 @@ impl LlvmIrEmitter {
                 fb.label(&done);
                 let processed = fb.fresh_temp();
                 fb.line(format!("{processed} = sub i64 {}, {}", hi.reg, lo.reg));
-                Ok(Some(FnValue { reg: processed, ty: LlvmType::I64 }))
+                Ok(Some(FnValue {
+                    reg: processed,
+                    ty: LlvmType::I64,
+                }))
             }
             // `string_foreach_env<env>(s, env)` — the same over a
             // string's characters, with an optional `$cont` hole deciding
             // whether to keep going.
             "string_foreach_env" | "string_foreach" => {
                 let s = self.emit_expr(&args[0], fb, registry, module)?;
-                self.require(s.ty, LlvmType::I8Ptr, "the string given to `string_foreach`")?;
+                self.require(
+                    s.ty,
+                    LlvmType::I8Ptr,
+                    "the string given to `string_foreach`",
+                )?;
                 let hole = self.require_hole("string_foreach$fwork", registry)?;
                 let cont = registry.holes.get("string_foreach$cont").cloned();
                 let id = fb.fresh_block_id();
@@ -2891,7 +3501,10 @@ impl LlvmIrEmitter {
                         let keep = format!("sforeach.cont.{id}");
                         fb.line(format!("br i1 {more}, label %{keep}, label %{done}"));
                         fb.label(&keep);
-                        let bound = FnValue { reg: c.clone(), ty: LlvmType::I8 };
+                        let bound = FnValue {
+                            reg: c.clone(),
+                            ty: LlvmType::I8,
+                        };
                         let v = self.inline_hole(k, &[bound], args.get(1), fb, registry, module)?;
                         self.require(v.ty, LlvmType::I1, "`string_foreach$cont`")?;
                         v.reg
@@ -2899,7 +3512,10 @@ impl LlvmIrEmitter {
                 };
                 fb.line(format!("br i1 {more}, label %{body}, label %{done}"));
                 fb.label(&body);
-                let bound = FnValue { reg: c, ty: LlvmType::I8 };
+                let bound = FnValue {
+                    reg: c,
+                    ty: LlvmType::I8,
+                };
                 self.inline_hole(&hole, &[bound], args.get(1), fb, registry, module)?;
                 let next = fb.fresh_temp();
                 fb.line(format!("{next} = add i64 {i}, 1"));
@@ -2910,7 +3526,10 @@ impl LlvmIrEmitter {
                 // handled; a caller that does not care writes `val _ =`.
                 let processed = fb.fresh_temp();
                 fb.line(format!("{processed} = load i64, ptr {cell}"));
-                Ok(Some(FnValue { reg: processed, ty: LlvmType::I64 }))
+                Ok(Some(FnValue {
+                    reg: processed,
+                    ty: LlvmType::I64,
+                }))
             }
             // --- strings as pointers ---------------------------------
             //
@@ -2921,17 +3540,25 @@ impl LlvmIrEmitter {
             // is here.
             "string_test_at" | "string_get_at" | "string_get_at_size" => {
                 let [s, i] = args else {
-                    return Err(CompileError::emit(format!("`{name}` takes a string and an index")));
+                    return Err(CompileError::emit(format!(
+                        "`{name}` takes a string and an index"
+                    )));
                 };
                 let sv = self.emit_expr(s, fb, registry, module)?;
                 self.require(sv.ty, LlvmType::I8Ptr, name)?;
                 let iv = self.emit_expr(i, fb, registry, module)?;
                 let iv = self.emit_numeric_cast(iv, LlvmType::I64, fb)?;
                 let addr = fb.fresh_temp();
-                fb.line(format!("{addr} = getelementptr i8, ptr {}, i64 {}", sv.reg, iv.reg));
+                fb.line(format!(
+                    "{addr} = getelementptr i8, ptr {}, i64 {}",
+                    sv.reg, iv.reg
+                ));
                 let reg = fb.fresh_temp();
                 fb.line(format!("{reg} = load i8, ptr {addr}"));
-                Ok(Some(FnValue { reg, ty: LlvmType::I8 }))
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I8,
+                }))
             }
             // `s.tail()` — the string starting one character later.
             "string_tail" | "string1_tail" | "tail" => {
@@ -2942,7 +3569,10 @@ impl LlvmIrEmitter {
                 self.require(sv.ty, LlvmType::I8Ptr, name)?;
                 let reg = fb.fresh_temp();
                 fb.line(format!("{reg} = getelementptr i8, ptr {}, i64 1", sv.reg));
-                Ok(Some(FnValue { reg, ty: LlvmType::I8Ptr }))
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I8Ptr,
+                }))
             }
             // `ptr_add<char>(p, n)` / `ptr_succ<char>(p)` — move a
             // pointer by whole elements.
@@ -2958,12 +3588,21 @@ impl LlvmIrEmitter {
                         let v = self.emit_expr(e, fb, registry, module)?;
                         self.emit_numeric_cast(v, LlvmType::I64, fb)?.reg
                     }
-                    None => if name.ends_with("pred") { "-1".into() } else { "1".into() },
+                    None => {
+                        if name.ends_with("pred") {
+                            "-1".into()
+                        } else {
+                            "1".into()
+                        }
+                    }
                 };
                 let off = fb.fresh_temp();
                 fb.line(format!("{off} = mul i64 {step}, {width}"));
                 let reg = fb.fresh_temp();
-                fb.line(format!("{reg} = getelementptr i8, ptr {}, i64 {off}", pv.reg));
+                fb.line(format!(
+                    "{reg} = getelementptr i8, ptr {}, i64 {off}",
+                    pv.reg
+                ));
                 Ok(Some(FnValue { reg, ty: pv.ty }))
             }
             // `$UN.ptr0_get<char>(p)` — read what a pointer points at.
@@ -2974,7 +3613,11 @@ impl LlvmIrEmitter {
                 };
                 let pv = self.emit_expr(&args[0], fb, registry, module)?;
                 let reg = fb.fresh_temp();
-                fb.line(format!("{reg} = load {}, ptr {}", llvm_ty_str(elem), pv.reg));
+                fb.line(format!(
+                    "{reg} = load {}, ptr {}",
+                    llvm_ty_str(elem),
+                    pv.reg
+                ));
                 Ok(Some(FnValue { reg, ty: elem }))
             }
             // `$UN.cast{t}(e)` — an assertion to the type checker that
@@ -2997,18 +3640,30 @@ impl LlvmIrEmitter {
                 // because the cast never changed it.
                 match ty_args.first().and_then(|t| llvm_type_in(t, registry).ok()) {
                     Some(want) if want != v.ty => {
-                        let reinterpreted = FnValue { reg: v.reg.clone(), ty: want };
+                        let reinterpreted = FnValue {
+                            reg: v.reg.clone(),
+                            ty: want,
+                        };
                         // A numeric conversion is a real instruction; a
                         // cast between two pointer-shaped types is not.
-                        Ok(Some(self.emit_numeric_cast(v, want, fb).unwrap_or(reinterpreted)))
+                        Ok(Some(
+                            self.emit_numeric_cast(v, want, fb).unwrap_or(reinterpreted),
+                        ))
                     }
                     _ => Ok(Some(v)),
                 }
             }
             // `double(n)`, `int2double(n)` — a number as a float, and
             // back.
-            "double" | "int2double" | "g0int2float" | "g1int2float" | "double_of_int"
-            | "g0int2float_int_double" | "g1int2float_int_double" | "g0i2f" | "g1i2f" => {
+            "double"
+            | "int2double"
+            | "g0int2float"
+            | "g1int2float"
+            | "double_of_int"
+            | "g0int2float_int_double"
+            | "g1int2float_int_double"
+            | "g0i2f"
+            | "g1i2f" => {
                 let [x] = args else {
                     return Err(CompileError::emit(format!("`{name}` takes one number")));
                 };
@@ -3023,7 +3678,10 @@ impl LlvmIrEmitter {
                 if v.ty == LlvmType::F64 {
                     let reg = fb.fresh_temp();
                     fb.line(format!("{reg} = fptosi double {} to i64", v.reg));
-                    return Ok(Some(FnValue { reg, ty: LlvmType::I64 }));
+                    return Ok(Some(FnValue {
+                        reg,
+                        ty: LlvmType::I64,
+                    }));
                 }
                 Ok(Some(self.emit_numeric_cast(v, LlvmType::I64, fb)?))
             }
@@ -3045,7 +3703,10 @@ impl LlvmIrEmitter {
                 }
                 let ptr = self.emit_alloc(WORD, fb, module);
                 fb.line(format!("store {} {}, ptr {ptr}", llvm_ty_str(v.ty), v.reg));
-                Ok(Some(FnValue { reg: ptr, ty: LlvmType::Tuple(registry.intern_tuple(vec![v.ty])) }))
+                Ok(Some(FnValue {
+                    reg: ptr,
+                    ty: LlvmType::Tuple(registry.intern_tuple(vec![v.ty])),
+                }))
             }
             // `addr@ x` — where `x` lives.  A top-level `var` already
             // *is* its cell, so its address is itself; a proof of the
@@ -3060,9 +3721,9 @@ impl LlvmIrEmitter {
             // about *which* integer sort is meant.  `g0` is unindexed and
             // `g1` indexed, `n` means the operands are non-negative — all
             // of it static, and all of it one machine instruction.
-            "g0int_add" | "g1int_add" | "g0int_sub" | "g1int_sub" | "g0int_mul"
-            | "g1int_mul" | "g0int_div" | "g1int_div" | "g0int_mod" | "g1int_mod"
-            | "g0int_nmod" | "g1int_nmod" | "g0int_ndiv" | "g1int_ndiv" => {
+            "g0int_add" | "g1int_add" | "g0int_sub" | "g1int_sub" | "g0int_mul" | "g1int_mul"
+            | "g0int_div" | "g1int_div" | "g0int_mod" | "g1int_mod" | "g0int_nmod"
+            | "g1int_nmod" | "g0int_ndiv" | "g1int_ndiv" => {
                 let [a, b] = args else {
                     return Err(CompileError::emit(format!("`{name}` takes two numbers")));
                 };
@@ -3108,7 +3769,10 @@ impl LlvmIrEmitter {
                 let reg = fb.fresh_temp();
                 let test = if name.ends_with("is_nil") { "eq" } else { "ne" };
                 fb.line(format!("{reg} = icmp {test} i64 {tag}, {}", nil.tag));
-                Ok(Some(FnValue { reg, ty: LlvmType::I1 }))
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I1,
+                }))
             }
             // `fprint_val (out, x)` — the default of ATS's printing
             // protocol, for the types the compiler already knows how to
@@ -3117,19 +3781,30 @@ impl LlvmIrEmitter {
             // call here when nothing was supplied.
             "fprint_val" | "print_val" | "prerr_val" => {
                 let (stream, value) = match (name, args) {
-                    ("fprint_val", [out, x]) => {
-                        (self.emit_stream_argument(name, out, fb, registry, module)?, x)
-                    }
+                    ("fprint_val", [out, x]) => (
+                        self.emit_stream_argument(name, out, fb, registry, module)?,
+                        x,
+                    ),
                     ("print_val", [x]) => (Stream::Stdout, x),
                     ("prerr_val", [x]) => (Stream::Stderr, x),
                     _ => {
                         return Err(CompileError::emit(format!(
                             "`{name}` takes a value to print"
-                        )))
+                        )));
                     }
                 };
-                self.emit_format(&stream, std::slice::from_ref(value), false, fb, registry, module)?;
-                Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Void }))
+                self.emit_format(
+                    &stream,
+                    std::slice::from_ref(value),
+                    false,
+                    fb,
+                    registry,
+                    module,
+                )?;
+                Ok(Some(FnValue {
+                    reg: String::new(),
+                    ty: LlvmType::Void,
+                }))
             }
             // `malloc_gc (n)` — `n` bytes of storage.  It comes from the
             // arena like everything else: the `_gc` in the name says the
@@ -3142,25 +3817,37 @@ impl LlvmIrEmitter {
                 let v = self.emit_expr(n, fb, registry, module)?;
                 self.require(v.ty, LlvmType::I64, name)?;
                 let ptr = self.emit_alloc_bytes(&v.reg, fb, module);
-                Ok(Some(FnValue { reg: ptr, ty: LlvmType::I8Ptr }))
+                Ok(Some(FnValue {
+                    reg: ptr,
+                    ty: LlvmType::I8Ptr,
+                }))
             }
             // Lemmas are proofs.  They say something the type checker
             // needed to hear and nothing the machine does.
-            "lemma_list_param" | "lemma_list_vt_param" | "lemma_array_param"
-            | "lemma_g1uint_param" | "lemma_g1int_param" => {
-                Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Void }))
-            }
+            "lemma_list_param"
+            | "lemma_list_vt_param"
+            | "lemma_array_param"
+            | "lemma_g1uint_param"
+            | "lemma_g1int_param" => Ok(Some(FnValue {
+                reg: String::new(),
+                ty: LlvmType::Void,
+            })),
             "mfree_gc" | "free_gc" | "mfree" => {
                 for a in args {
                     self.emit_expr(a, fb, registry, module)?;
                 }
-                Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Void }))
+                Ok(Some(FnValue {
+                    reg: String::new(),
+                    ty: LlvmType::Void,
+                }))
             }
             // `fgets (buf, n, filr)` — a line into the caller's buffer,
             // or null at end of input.
             "fgets" => {
                 let [buf, n, filr] = args else {
-                    return Err(CompileError::emit("`fgets` takes a buffer, a size and a stream"));
+                    return Err(CompileError::emit(
+                        "`fgets` takes a buffer, a size and a stream",
+                    ));
                 };
                 let b = self.emit_expr(buf, fb, registry, module)?;
                 let count = self.emit_expr(n, fb, registry, module)?;
@@ -3175,17 +3862,25 @@ impl LlvmIrEmitter {
                     "{reg} = call ptr @fgets(ptr {}, i32 {narrowed}, ptr {})",
                     b.reg, f.reg
                 ));
-                Ok(Some(FnValue { reg, ty: LlvmType::I8Ptr }))
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I8Ptr,
+                }))
             }
             "fputs" | "fputs_exn" => {
                 let [s, filr] = args else {
-                    return Err(CompileError::emit(format!("`{name}` takes a string and a stream")));
+                    return Err(CompileError::emit(format!(
+                        "`{name}` takes a string and a stream"
+                    )));
                 };
                 let sv = self.emit_expr(s, fb, registry, module)?;
                 self.require(sv.ty, LlvmType::I8Ptr, name)?;
                 let stream = self.emit_stream_argument(name, filr, fb, registry, module)?;
                 self.emit_printf(stream, "%s", &[format!("ptr {}", sv.reg)], fb, module);
-                Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Void }))
+                Ok(Some(FnValue {
+                    reg: String::new(),
+                    ty: LlvmType::Void,
+                }))
             }
             // The libc random numbers ATS reaches for.  Seeding from the
             // clock is one call in C and three here, which is why ATS
@@ -3201,7 +3896,10 @@ impl LlvmIrEmitter {
                         module.externs.insert("declare double @drand48()");
                         let reg = fb.fresh_temp();
                         fb.line(format!("{reg} = call double @drand48()"));
-                        Ok(Some(FnValue { reg, ty: LlvmType::F64 }))
+                        Ok(Some(FnValue {
+                            reg,
+                            ty: LlvmType::F64,
+                        }))
                     }
                     "rand" | "random" => {
                         module.externs.insert("declare i32 @rand()");
@@ -3209,7 +3907,10 @@ impl LlvmIrEmitter {
                         let reg = fb.fresh_temp();
                         fb.line(format!("{raw} = call i32 @rand()"));
                         fb.line(format!("{reg} = sext i32 {raw} to i64"));
-                        Ok(Some(FnValue { reg, ty: LlvmType::I64 }))
+                        Ok(Some(FnValue {
+                            reg,
+                            ty: LlvmType::I64,
+                        }))
                     }
                     // Seeded from the clock: `srand48(time(0))`.
                     _ => {
@@ -3225,7 +3926,10 @@ impl LlvmIrEmitter {
                         } else {
                             fb.line(format!("call void @srand48(i64 {now})"));
                         }
-                        Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Void }))
+                        Ok(Some(FnValue {
+                            reg: String::new(),
+                            ty: LlvmType::Void,
+                        }))
                     }
                 }
             }
@@ -3238,7 +3942,9 @@ impl LlvmIrEmitter {
                 let av = self.emit_expr(a, fb, registry, module)?;
                 let bv = self.emit_expr(b, fb, registry, module)?;
                 if av.ty != bv.ty {
-                    return Err(CompileError::emit(format!("`{name}` compares two values of one type")));
+                    return Err(CompileError::emit(format!(
+                        "`{name}` compares two values of one type"
+                    )));
                 }
                 let (gt, lt) = (fb.fresh_temp(), fb.fresh_temp());
                 let (gtn, ltn) = (fb.fresh_temp(), fb.fresh_temp());
@@ -3253,7 +3959,10 @@ impl LlvmIrEmitter {
                 fb.line(format!("{ltn} = zext i1 {lt} to i64"));
                 let reg = fb.fresh_temp();
                 fb.line(format!("{reg} = sub i64 {gtn}, {ltn}"));
-                Ok(Some(FnValue { reg, ty: LlvmType::I64 }))
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I64,
+                }))
             }
             // `min`/`max` on two numbers.
             "min" | "max" | "g0int_min" | "g0int_max" | "g1int_min" | "g1int_max" => {
@@ -3268,13 +3977,20 @@ impl LlvmIrEmitter {
                 let c = fb.fresh_temp();
                 fb.line(format!("{c} = icmp {pick} i64 {}, {}", av.reg, bv.reg));
                 let reg = fb.fresh_temp();
-                fb.line(format!("{reg} = select i1 {c}, i64 {}, i64 {}", av.reg, bv.reg));
-                Ok(Some(FnValue { reg, ty: LlvmType::I64 }))
+                fb.line(format!(
+                    "{reg} = select i1 {c}, i64 {}, i64 {}",
+                    av.reg, bv.reg
+                ));
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I64,
+                }))
             }
             // `succ`/`pred` — one more, one less.  ATS uses them
             // wherever a *static* index must move by exactly one, so
             // they appear far more often than `+ 1` does.
-            "succ" | "pred" | "isucc" | "ipred" | "succ1" | "pred1" | "g1int_succ" | "g1int_pred" => {
+            "succ" | "pred" | "isucc" | "ipred" | "succ1" | "pred1" | "g1int_succ"
+            | "g1int_pred" => {
                 let [x] = args else {
                     return Err(CompileError::emit(format!("`{name}` takes one number")));
                 };
@@ -3283,28 +3999,37 @@ impl LlvmIrEmitter {
                 let op = if name.contains("succ") { "add" } else { "sub" };
                 let reg = fb.fresh_temp();
                 fb.line(format!("{reg} = {op} i64 {}, 1", v.reg));
-                Ok(Some(FnValue { reg, ty: LlvmType::I64 }))
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I64,
+                }))
             }
             // The character classifications.  Emitted as comparisons
             // rather than calls to libc's: `isdigit` and friends are
             // locale-dependent there, and ATS's are not.
-            "isdigit" | "isalpha" | "isalnum" | "isspace" | "isupper" | "islower"
-            | "ispunct" | "isxdigit" | "char_isdigit" | "char_isalpha" | "char_isspace" => {
+            "isdigit" | "isalpha" | "isalnum" | "isspace" | "isupper" | "islower" | "ispunct"
+            | "isxdigit" | "char_isdigit" | "char_isalpha" | "char_isspace" => {
                 let [c] = args else {
                     return Err(CompileError::emit(format!("`{name}` takes one character")));
                 };
                 let v = self.emit_expr(c, fb, registry, module)?;
                 let c = self.emit_numeric_cast(v, LlvmType::I64, fb)?;
                 let reg = self.emit_char_class(name.trim_start_matches("char_"), &c.reg, fb);
-                Ok(Some(FnValue { reg, ty: LlvmType::I1 }))
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I1,
+                }))
             }
             "toupper" | "tolower" | "char_toupper" | "char_tolower" => {
                 let [c] = args else {
                     return Err(CompileError::emit(format!("`{name}` takes one character")));
                 };
                 let v = self.emit_expr(c, fb, registry, module)?;
-                let (lo, hi, delta) =
-                    if name.ends_with("upper") { ('a', 'z', -32) } else { ('A', 'Z', 32) };
+                let (lo, hi, delta) = if name.ends_with("upper") {
+                    ('a', 'z', -32)
+                } else {
+                    ('A', 'Z', 32)
+                };
                 let ge = fb.fresh_temp();
                 fb.line(format!("{ge} = icmp sge i8 {}, {}", v.reg, lo as u8));
                 let le = fb.fresh_temp();
@@ -3314,8 +4039,14 @@ impl LlvmIrEmitter {
                 let shifted = fb.fresh_temp();
                 fb.line(format!("{shifted} = add i8 {}, {delta}", v.reg));
                 let reg = fb.fresh_temp();
-                fb.line(format!("{reg} = select i1 {both}, i8 {shifted}, i8 {}", v.reg));
-                Ok(Some(FnValue { reg, ty: LlvmType::I8 }))
+                fb.line(format!(
+                    "{reg} = select i1 {both}, i8 {shifted}, i8 {}",
+                    v.reg
+                ));
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I8,
+                }))
             }
             // `arrayptr_make_intrange(lo, hi)` — the cells `lo..hi-1`.
             "arrayptr_make_intrange" | "arrayref_make_intrange" => {
@@ -3325,7 +4056,10 @@ impl LlvmIrEmitter {
                 fb.line(format!("{n} = sub i64 {}, {}", hi.reg, lo.reg));
                 let ptr = self.emit_alloc_dynamic(&n, fb, module);
                 self.emit_fill_intrange(&ptr, &lo.reg, &n, fb);
-                Ok(Some(FnValue { reg: ptr, ty: LlvmType::Array(registry.intern_array(LlvmType::I64)) }))
+                Ok(Some(FnValue {
+                    reg: ptr,
+                    ty: LlvmType::Array(registry.intern_array(LlvmType::I64)),
+                }))
             }
             // The arena owns every cell and outlives every program, so
             // freeing is a promise already kept.
@@ -3333,7 +4067,10 @@ impl LlvmIrEmitter {
                 for a in args {
                     self.emit_expr(a, fb, registry, module)?;
                 }
-                Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Void }))
+                Ok(Some(FnValue {
+                    reg: String::new(),
+                    ty: LlvmType::Void,
+                }))
             }
             // `fprint_tupval2<a,b>(out, @(x, y))` — print a tuple.  The
             // arity is in the name because ATS has no variadic template,
@@ -3341,10 +4078,14 @@ impl LlvmIrEmitter {
             // all: the format is read off the tuple's own components.
             name if name.starts_with("fprint_tupval") => {
                 let Some((first, rest)) = args.split_first() else {
-                    return Err(CompileError::emit(format!("`{name}` takes a stream and a tuple")));
+                    return Err(CompileError::emit(format!(
+                        "`{name}` takes a stream and a tuple"
+                    )));
                 };
                 let [tuple] = rest else {
-                    return Err(CompileError::emit(format!("`{name}` takes a stream and a tuple")));
+                    return Err(CompileError::emit(format!(
+                        "`{name}` takes a stream and a tuple"
+                    )));
                 };
                 let stream = self.emit_stream_argument(name, first, fb, registry, module)?;
                 let v = self.emit_expr(tuple, fb, registry, module)?;
@@ -3358,7 +4099,10 @@ impl LlvmIrEmitter {
                 let mut operands = Vec::new();
                 self.format_one(&stream, v, &mut fmt, &mut operands, fb, registry, module)?;
                 self.emit_printf(stream, &fmt, &operands, fb, module);
-                Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Void }))
+                Ok(Some(FnValue {
+                    reg: String::new(),
+                    ty: LlvmType::Void,
+                }))
             }
             // `$raise E` — throw.  With no handler anywhere in the
             // subset, the whole of what a raise can do is say which
@@ -3369,14 +4113,23 @@ impl LlvmIrEmitter {
                     Some(Expr::StrLit(s)) => s.clone(),
                     _ => "exception".to_string(),
                 };
-                self.emit_printf(Stream::Stderr, &format!("exit(ATS): uncaught {name}\n"), &[], fb, module);
+                self.emit_printf(
+                    Stream::Stderr,
+                    &format!("exit(ATS): uncaught {name}\n"),
+                    &[],
+                    fb,
+                    module,
+                );
                 fb.line("call void @exit(i32 1)");
                 // `unreachable` terminates the block, exactly as `exit`
                 // does.  No label follows: a raise is the end of its
                 // block, and an empty block after it would have no
                 // terminator of its own.
                 fb.line("unreachable");
-                Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Never }))
+                Ok(Some(FnValue {
+                    reg: String::new(),
+                    ty: LlvmType::Never,
+                }))
             }
             // `$delay(e)` — suspend `e`.  The parser has already wrapped
             // the body in a nullary lambda, because suspending is what a
@@ -3384,36 +4137,55 @@ impl LlvmIrEmitter {
             // cannot express, the cell that remembers the answer.
             "$delay" => {
                 let [thunk] = args else {
-                    return Err(CompileError::emit("`$delay` suspends exactly one expression"));
+                    return Err(CompileError::emit(
+                        "`$delay` suspends exactly one expression",
+                    ));
                 };
                 let f = self.emit_expr(thunk, fb, registry, module)?;
                 let LlvmType::Closure(index) = f.ty else {
-                    return Err(CompileError::emit("internal: `$delay` was not given a thunk"));
+                    return Err(CompileError::emit(
+                        "internal: `$delay` was not given a thunk",
+                    ));
                 };
                 let sig = registry.closure_sig(index);
                 if !sig.params.is_empty() {
-                    return Err(CompileError::emit("internal: a delayed thunk takes no arguments"));
+                    return Err(CompileError::emit(
+                        "internal: a delayed thunk takes no arguments",
+                    ));
                 }
                 let cell = self.emit_alloc(WORD * 2, fb, module);
                 fb.line(format!("store ptr {}, ptr {cell}", f.reg));
                 let answer = self.emit_slot_address(&cell, 1, fb);
                 fb.line(format!("store ptr null, ptr {answer}"));
-                Ok(Some(FnValue { reg: cell, ty: LlvmType::Lazy(registry.intern_lazy(sig.ret)) }))
+                Ok(Some(FnValue {
+                    reg: cell,
+                    ty: LlvmType::Lazy(registry.intern_lazy(sig.ret)),
+                }))
             }
             // Handing out the pointer inside an `arrayptr`, and taking it
             // back, are proof steps: the value does not move.
-            "arrayptr_takeout_viewptr" | "arrayptr_takeout" | "arrayptr2ptr"
-            | "arrayptr_refize" | "ptr2arrayptr" | "ptrcast" | "arrayptr_addback"
-            | "list_vt2t" | "list_t2vt" | "unsafe_cast" | "ignoret" | "g0ofg1_list"
-            | "list2list_vt" | "list_vt2list" => {
+            "arrayptr_takeout_viewptr"
+            | "arrayptr_takeout"
+            | "arrayptr2ptr"
+            | "arrayptr_refize"
+            | "ptr2arrayptr"
+            | "ptrcast"
+            | "arrayptr_addback"
+            | "list_vt2t"
+            | "list_t2vt"
+            | "unsafe_cast"
+            | "ignoret"
+            | "g0ofg1_list"
+            | "list2list_vt"
+            | "list_vt2list" => {
                 let v = self.emit_expr(&args[0], fb, registry, module)?;
                 Ok(Some(v))
             }
             // The integer conversions ATS uses to move between its signed
             // and unsigned *static* sorts.  One machine word throughout.
-            "g1i2u" | "g0i2u" | "g1int2uint" | "g0int2uint" | "g1u2i" | "g0u2i"
-            | "g1uint2int" | "g0uint2int" | "i2sz" | "sz2i" | "g1i2sz" | "g0i2sz"
-            | "sz2u" | "u2sz" | "g1sz2i" | "g0sz2i" => {
+            "g1i2u" | "g0i2u" | "g1int2uint" | "g0int2uint" | "g1u2i" | "g0u2i" | "g1uint2int"
+            | "g0uint2int" | "i2sz" | "sz2i" | "g1i2sz" | "g0i2sz" | "sz2u" | "u2sz" | "g1sz2i"
+            | "g0sz2i" => {
                 let v = self.emit_expr(&args[0], fb, registry, module)?;
                 Ok(Some(v))
             }
@@ -3421,7 +4193,9 @@ impl LlvmIrEmitter {
             // to write a literal in code that is generic over the numeric
             // type, which is exactly what a template body cannot do.
             "gnumber_int" | "gnumber_int_int" => {
-                let [n] = args else { return Err(CompileError::emit("`gnumber_int` takes one int")) };
+                let [n] = args else {
+                    return Err(CompileError::emit("`gnumber_int` takes one int"));
+                };
                 let v = self.emit_expr(n, fb, registry, module)?;
                 self.require(v.ty, LlvmType::I64, "`gnumber_int`")?;
                 let want = match ty_args.first() {
@@ -3432,9 +4206,11 @@ impl LlvmIrEmitter {
             }
             // The generic arithmetic an `overload` reaches for: one side
             // is an int, the other whatever the caller is generic over.
-            "gmul_int_val" | "gadd_int_val" | "gsub_int_val" | "gdiv_int_val"
-            | "gmul_val_int" | "gadd_val_int" | "gsub_val_int" | "gdiv_val_int" => {
-                let [l, r] = args else { return Err(CompileError::emit(format!("`{name}` takes two arguments"))) };
+            "gmul_int_val" | "gadd_int_val" | "gsub_int_val" | "gdiv_int_val" | "gmul_val_int"
+            | "gadd_val_int" | "gsub_val_int" | "gdiv_val_int" => {
+                let [l, r] = args else {
+                    return Err(CompileError::emit(format!("`{name}` takes two arguments")));
+                };
                 let lv = self.emit_expr(l, fb, registry, module)?;
                 let rv = self.emit_expr(r, fb, registry, module)?;
                 let op = match &name[1..4] {
@@ -3445,9 +4221,11 @@ impl LlvmIrEmitter {
                 };
                 Ok(Some(self.emit_promoted(op, lv, rv, fb)?))
             }
-            "ggt_val_int" | "glt_val_int" | "gge_val_int" | "gle_val_int"
-            | "geq_val_int" | "gneq_val_int" => {
-                let [l, r] = args else { return Err(CompileError::emit(format!("`{name}` takes two arguments"))) };
+            "ggt_val_int" | "glt_val_int" | "gge_val_int" | "gle_val_int" | "geq_val_int"
+            | "gneq_val_int" => {
+                let [l, r] = args else {
+                    return Err(CompileError::emit(format!("`{name}` takes two arguments")));
+                };
                 let lv = self.emit_expr(l, fb, registry, module)?;
                 let rv = self.emit_expr(r, fb, registry, module)?;
                 let op = match &name[1..3] {
@@ -3464,10 +4242,12 @@ impl LlvmIrEmitter {
             // checker knows nothing about, and `g1int`, which it tracks.
             // The distinction is entirely static, so moving between them
             // changes no machine value and emits no instruction.
-            "g1ofg0" | "g0ofg1" | "g1int2int" | "g0int2int" | "int2int"
-            | "g1ofg0_int" | "g0ofg1_int" => {
+            "g1ofg0" | "g0ofg1" | "g1int2int" | "g0int2int" | "int2int" | "g1ofg0_int"
+            | "g0ofg1_int" => {
                 let [arg] = args else {
-                    return Err(CompileError::emit(format!("`{name}` takes exactly one argument")));
+                    return Err(CompileError::emit(format!(
+                        "`{name}` takes exactly one argument"
+                    )));
                 };
                 Ok(Some(self.emit_expr(arg, fb, registry, module)?))
             }
@@ -3488,7 +4268,10 @@ impl LlvmIrEmitter {
                 fb.line(format!("{narrowed} = trunc i64 {} to i32", v.reg));
                 fb.line(format!("call void @exit(i32 {narrowed})"));
                 fb.line("unreachable");
-                Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Never }))
+                Ok(Some(FnValue {
+                    reg: String::new(),
+                    ty: LlvmType::Never,
+                }))
             }
             // --- files ------------------------------------------------
             "fileref_getc" | "fileref_get_char" => {
@@ -3503,11 +4286,16 @@ impl LlvmIrEmitter {
                 // EOF is -1, so the widening must keep the sign.
                 let reg = fb.fresh_temp();
                 fb.line(format!("{reg} = sext i32 {raw} to i64"));
-                Ok(Some(FnValue { reg, ty: LlvmType::I64 }))
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I64,
+                }))
             }
             "fileref_putc" | "fileref_put_char" => {
                 let [f, c] = args else {
-                    return Err(CompileError::emit("`fileref_putc` takes a stream and a character"));
+                    return Err(CompileError::emit(
+                        "`fileref_putc` takes a stream and a character",
+                    ));
                 };
                 let fv = self.emit_expr(f, fb, registry, module)?;
                 self.require(fv.ty, LlvmType::FileRef, "`fileref_putc`")?;
@@ -3517,20 +4305,39 @@ impl LlvmIrEmitter {
                 let narrowed = fb.fresh_temp();
                 fb.line(format!("{narrowed} = trunc i64 {} to i32", cv.reg));
                 let reg = fb.fresh_temp();
-                fb.line(format!("{reg} = call i32 @fputc(i32 {narrowed}, ptr {})", fv.reg));
-                Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Void }))
+                fb.line(format!(
+                    "{reg} = call i32 @fputc(i32 {narrowed}, ptr {})",
+                    fv.reg
+                ));
+                Ok(Some(FnValue {
+                    reg: String::new(),
+                    ty: LlvmType::Void,
+                }))
             }
             "fileref_open_exn" | "fileref_open" => {
                 let [path, mode] = args else {
-                    return Err(CompileError::emit("`fileref_open_exn` takes a path and a mode"));
+                    return Err(CompileError::emit(
+                        "`fileref_open_exn` takes a path and a mode",
+                    ));
                 };
                 let pv = self.emit_expr(path, fb, registry, module)?;
-                self.require(pv.ty, LlvmType::I8Ptr, "the path given to `fileref_open_exn`")?;
+                self.require(
+                    pv.ty,
+                    LlvmType::I8Ptr,
+                    "the path given to `fileref_open_exn`",
+                )?;
                 let mv = self.emit_expr(mode, fb, registry, module)?;
-                self.require(mv.ty, LlvmType::I8Ptr, "the mode given to `fileref_open_exn`")?;
+                self.require(
+                    mv.ty,
+                    LlvmType::I8Ptr,
+                    "the mode given to `fileref_open_exn`",
+                )?;
                 module.externs.insert("declare ptr @fopen(ptr, ptr)");
                 let reg = fb.fresh_temp();
-                fb.line(format!("{reg} = call ptr @fopen(ptr {}, ptr {})", pv.reg, mv.reg));
+                fb.line(format!(
+                    "{reg} = call ptr @fopen(ptr {}, ptr {})",
+                    pv.reg, mv.reg
+                ));
                 // The `_exn` spelling promises to raise rather than return
                 // a null stream, so the check belongs here.
                 let id = fb.fresh_block_id();
@@ -3539,23 +4346,36 @@ impl LlvmIrEmitter {
                 fb.line(format!("{failed} = icmp eq ptr {reg}, null"));
                 fb.line(format!("br i1 {failed}, label %{bad}, label %{ok}"));
                 fb.label(&bad);
-                self.emit_printf(Stream::Stderr, "exit(ATS): cannot open the file\n", &[], fb, module);
+                self.emit_printf(
+                    Stream::Stderr,
+                    "exit(ATS): cannot open the file\n",
+                    &[],
+                    fb,
+                    module,
+                );
                 fb.line("call void @exit(i32 1)");
                 fb.line("unreachable");
                 fb.label(&ok);
-                Ok(Some(FnValue { reg, ty: LlvmType::FileRef }))
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::FileRef,
+                }))
             }
             // `fileref_load<t>(f, x)` reads one value *into* `x`, so `x`
             // must be a `var` — a cell with an address — rather than a
             // `val`, which is a value with none.
             "fileref_load" | "fileref_load_int" => {
                 let [f, target] = args else {
-                    return Err(CompileError::emit("`fileref_load` takes a stream and a destination"));
+                    return Err(CompileError::emit(
+                        "`fileref_load` takes a stream and a destination",
+                    ));
                 };
                 let fv = self.emit_expr(f, fb, registry, module)?;
                 self.require(fv.ty, LlvmType::FileRef, "`fileref_load`")?;
                 let Expr::Var(name) = target else {
-                    return Err(CompileError::emit("`fileref_load` must be given a `var` to read into"));
+                    return Err(CompileError::emit(
+                        "`fileref_load` must be given a `var` to read into",
+                    ));
                 };
                 let Some(cell) = fb.cells.get(name).cloned() else {
                     return Err(CompileError::emit(format!(
@@ -3563,7 +4383,9 @@ impl LlvmIrEmitter {
                     )));
                 };
                 if cell.ty != LlvmType::I64 {
-                    return Err(CompileError::emit("`fileref_load` can only read an int so far"));
+                    return Err(CompileError::emit(
+                        "`fileref_load` can only read an int so far",
+                    ));
                 }
                 module.externs.insert("declare i32 @fscanf(ptr, ptr, ...)");
                 let fmt = module.add_format("%ld");
@@ -3576,15 +4398,23 @@ impl LlvmIrEmitter {
                 // the read succeeded.
                 let reg = fb.fresh_temp();
                 fb.line(format!("{reg} = icmp eq i32 {count}, 1"));
-                Ok(Some(FnValue { reg, ty: LlvmType::I1 }))
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I1,
+                }))
             }
             "string_is_null" => {
-                let [x] = args else { return Err(CompileError::emit("`string_is_null` takes one string")) };
+                let [x] = args else {
+                    return Err(CompileError::emit("`string_is_null` takes one string"));
+                };
                 let v = self.emit_expr(x, fb, registry, module)?;
                 self.require(v.ty, LlvmType::I8Ptr, "`string_is_null`")?;
                 let reg = fb.fresh_temp();
                 fb.line(format!("{reg} = icmp eq ptr {}, null", v.reg));
-                Ok(Some(FnValue { reg, ty: LlvmType::I1 }))
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I1,
+                }))
             }
             // Read one line into the arena, without its newline.  A null
             // result means the stream had nothing left.
@@ -3594,7 +4424,11 @@ impl LlvmIrEmitter {
             // caller holding memory nothing in the subset can free.  The
             // arena has no such problem.
             "fileref_get_line_string" | "fileref_get_line" => {
-                let [f] = args else { return Err(CompileError::emit("`fileref_get_line_string` takes one stream")) };
+                let [f] = args else {
+                    return Err(CompileError::emit(
+                        "`fileref_get_line_string` takes one stream",
+                    ));
+                };
                 let fv = self.emit_expr(f, fb, registry, module)?;
                 self.require(fv.ty, LlvmType::FileRef, "`fileref_get_line_string`")?;
                 module.externs.insert("declare i32 @fgetc(ptr)");
@@ -3618,7 +4452,10 @@ impl LlvmIrEmitter {
 
                 fb.label(&test);
                 let off = fb.fresh_temp();
-                fb.line(format!("{off} = phi i64 [ {start}, %{entry} ], [ {next_off}, %{store} ]", next_off = format!("%t.next.{id}")));
+                fb.line(format!(
+                    "{off} = phi i64 [ {start}, %{entry} ], [ {next_off}, %{store} ]",
+                    next_off = format!("%t.next.{id}")
+                ));
                 let ch = fb.fresh_temp();
                 fb.line(format!("{ch} = call i32 @fgetc(ptr {})", fv.reg));
                 let is_eof = fb.fresh_temp();
@@ -3650,21 +4487,32 @@ impl LlvmIrEmitter {
 
                 fb.label(&finish);
                 let ended = fb.fresh_temp();
-                fb.line(format!("{ended} = phi i64 [ {off}, %{body} ], [ {off}, %{done} ], [ {off}, %{empty} ]"));
+                fb.line(format!(
+                    "{ended} = phi i64 [ {off}, %{body} ], [ {off}, %{done} ], [ {off}, %{empty} ]"
+                ));
                 let was_empty = fb.fresh_temp();
                 fb.line(format!("{was_empty} = phi i1 [ false, %{body} ], [ false, %{done} ], [ true, %{empty} ]"));
                 // Terminate the string and hand the arena back its space.
                 let term = fb.fresh_temp();
-                fb.line(format!("{term} = getelementptr i8, ptr @.heap, i64 {ended}"));
+                fb.line(format!(
+                    "{term} = getelementptr i8, ptr @.heap, i64 {ended}"
+                ));
                 fb.line(format!("store i8 0, ptr {term}"));
                 let after = fb.fresh_temp();
                 fb.line(format!("{after} = add i64 {ended}, 1"));
                 fb.line(format!("store i64 {after}, ptr @.heap.off"));
                 let text = fb.fresh_temp();
-                fb.line(format!("{text} = getelementptr i8, ptr @.heap, i64 {start}"));
+                fb.line(format!(
+                    "{text} = getelementptr i8, ptr @.heap, i64 {start}"
+                ));
                 let reg = fb.fresh_temp();
-                fb.line(format!("{reg} = select i1 {was_empty}, ptr null, ptr {text}"));
-                Ok(Some(FnValue { reg, ty: LlvmType::I8Ptr }))
+                fb.line(format!(
+                    "{reg} = select i1 {was_empty}, ptr null, ptr {text}"
+                ));
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I8Ptr,
+                }))
             }
             "fileref_close" => {
                 let [f] = args else {
@@ -3675,29 +4523,64 @@ impl LlvmIrEmitter {
                 module.externs.insert("declare i32 @fclose(ptr)");
                 let reg = fb.fresh_temp();
                 fb.line(format!("{reg} = call i32 @fclose(ptr {})", fv.reg));
-                Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Void }))
+                Ok(Some(FnValue {
+                    reg: String::new(),
+                    ty: LlvmType::Void,
+                }))
             }
             // --- the print shims, and characters ----------------------
             "print_char" | "prerr_char" => {
-                let [c] = args else { return Err(CompileError::emit("`print_char` takes one character")) };
+                let [c] = args else {
+                    return Err(CompileError::emit("`print_char` takes one character"));
+                };
                 let v = self.emit_expr(c, fb, registry, module)?;
                 self.require(v.ty, LlvmType::I8, "`print_char`")?;
-                let stream = if name.starts_with("prerr") { Stream::Stderr } else { Stream::Stdout };
+                let stream = if name.starts_with("prerr") {
+                    Stream::Stderr
+                } else {
+                    Stream::Stdout
+                };
                 let widened = fb.fresh_temp();
                 fb.line(format!("{widened} = sext i8 {} to i32", v.reg));
                 self.emit_printf(stream, "%c", &[format!("i32 {widened}")], fb, module);
-                Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Void }))
+                Ok(Some(FnValue {
+                    reg: String::new(),
+                    ty: LlvmType::Void,
+                }))
             }
             "print_int" | "print_string" | "print_bool" | "prerr_int" | "prerr_string" => {
-                let [x] = args else { return Err(CompileError::emit(format!("`{name}` takes one argument"))) };
-                let stream = if name.starts_with("prerr") { Stream::Stderr } else { Stream::Stdout };
-                self.emit_format(&stream, std::slice::from_ref(x), false, fb, registry, module)?;
-                Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Void }))
+                let [x] = args else {
+                    return Err(CompileError::emit(format!("`{name}` takes one argument")));
+                };
+                let stream = if name.starts_with("prerr") {
+                    Stream::Stderr
+                } else {
+                    Stream::Stdout
+                };
+                self.emit_format(
+                    &stream,
+                    std::slice::from_ref(x),
+                    false,
+                    fb,
+                    registry,
+                    module,
+                )?;
+                Ok(Some(FnValue {
+                    reg: String::new(),
+                    ty: LlvmType::Void,
+                }))
             }
             "print_newline" | "prerr_newline" => {
-                let stream = if name.starts_with("prerr") { Stream::Stderr } else { Stream::Stdout };
+                let stream = if name.starts_with("prerr") {
+                    Stream::Stderr
+                } else {
+                    Stream::Stdout
+                };
                 self.emit_printf(stream, "\n", &[], fb, module);
-                Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Void }))
+                Ok(Some(FnValue {
+                    reg: String::new(),
+                    ty: LlvmType::Void,
+                }))
             }
             // The same, to a stream the caller names.
             "fprint_newline" => {
@@ -3706,45 +4589,88 @@ impl LlvmIrEmitter {
                 };
                 let stream = self.emit_stream_argument(name, out, fb, registry, module)?;
                 self.emit_printf(stream, "\n", &[], fb, module);
-                Ok(Some(FnValue { reg: String::new(), ty: LlvmType::Void }))
+                Ok(Some(FnValue {
+                    reg: String::new(),
+                    ty: LlvmType::Void,
+                }))
             }
             "g0int2float_double" | "int2float" | "i2d" => {
-                let [n] = args else { return Err(CompileError::emit("`int2double` takes one int")) };
+                let [n] = args else {
+                    return Err(CompileError::emit("`int2double` takes one int"));
+                };
                 let v = self.emit_expr(n, fb, registry, module)?;
                 self.require(v.ty, LlvmType::I64, "`int2double`")?;
                 let reg = fb.fresh_temp();
                 fb.line(format!("{reg} = sitofp i64 {} to double", v.reg));
-                Ok(Some(FnValue { reg, ty: LlvmType::F64 }))
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::F64,
+                }))
             }
             "d2i" => {
-                let [x] = args else { return Err(CompileError::emit("`double2int` takes one double")) };
+                let [x] = args else {
+                    return Err(CompileError::emit("`double2int` takes one double"));
+                };
                 let v = self.emit_expr(x, fb, registry, module)?;
                 self.require(v.ty, LlvmType::F64, "`double2int`")?;
                 let reg = fb.fresh_temp();
                 fb.line(format!("{reg} = fptosi double {} to i64", v.reg));
-                Ok(Some(FnValue { reg, ty: LlvmType::I64 }))
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I64,
+                }))
             }
             "char2int" | "char2int0" | "c2i" => {
-                let [c] = args else { return Err(CompileError::emit("`char2int` takes one character")) };
+                let [c] = args else {
+                    return Err(CompileError::emit("`char2int` takes one character"));
+                };
                 let v = self.emit_expr(c, fb, registry, module)?;
                 self.require(v.ty, LlvmType::I8, "`char2int`")?;
                 let reg = fb.fresh_temp();
                 fb.line(format!("{reg} = sext i8 {} to i64", v.reg));
-                Ok(Some(FnValue { reg, ty: LlvmType::I64 }))
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I64,
+                }))
             }
             "int2char" | "int2char0" | "i2c" => {
-                let [n] = args else { return Err(CompileError::emit("`int2char` takes one int")) };
+                let [n] = args else {
+                    return Err(CompileError::emit("`int2char` takes one int"));
+                };
                 let v = self.emit_expr(n, fb, registry, module)?;
                 self.require(v.ty, LlvmType::I64, "`int2char`")?;
                 let reg = fb.fresh_temp();
                 fb.line(format!("{reg} = trunc i64 {} to i8", v.reg));
-                Ok(Some(FnValue { reg, ty: LlvmType::I8 }))
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I8,
+                }))
             }
             "g0string2int" | "g0string2int_int" | "g1string2int" | "string2int" | "atoi" => {
-                Ok(Some(self.emit_libc_shim(name, "atoi", "declare i64 @atoi(ptr)", LlvmType::I8Ptr, LlvmType::I64, args, fb, registry, module)?))
+                Ok(Some(self.emit_libc_shim(
+                    name,
+                    "atoi",
+                    "declare i64 @atoi(ptr)",
+                    LlvmType::I8Ptr,
+                    LlvmType::I64,
+                    args,
+                    fb,
+                    registry,
+                    module,
+                )?))
             }
             "string_length" | "string0_length" | "string1_length" | "strlen" => {
-                Ok(Some(self.emit_libc_shim(name, "strlen", "declare i64 @strlen(ptr)", LlvmType::I8Ptr, LlvmType::I64, args, fb, registry, module)?))
+                Ok(Some(self.emit_libc_shim(
+                    name,
+                    "strlen",
+                    "declare i64 @strlen(ptr)",
+                    LlvmType::I8Ptr,
+                    LlvmType::I64,
+                    args,
+                    fb,
+                    registry,
+                    module,
+                )?))
             }
             // `string_append (s, t)` — a *third* string.  ATS strings are
             // NUL-terminated bytes somebody else owns, so joining two
@@ -3772,7 +4698,10 @@ impl LlvmIrEmitter {
                 let with_nul = fb.fresh_temp();
                 fb.line(format!("{with_nul} = add i64 {nb}, 1"));
                 self.emit_memcpy(&tail, &b, &with_nul, fb, module);
-                Ok(Some(FnValue { reg: out, ty: LlvmType::I8Ptr }))
+                Ok(Some(FnValue {
+                    reg: out,
+                    ty: LlvmType::I8Ptr,
+                }))
             }
             // `string_make_substring (s, start, len)` — `len` bytes from
             // `start`.  The copy is terminated here rather than carried
@@ -3793,19 +4722,33 @@ impl LlvmIrEmitter {
                 fb.line(format!("{room} = add i64 {}, 1", count.reg));
                 let out = self.emit_alloc_bytes(&room, fb, module);
                 let src = fb.fresh_temp();
-                fb.line(format!("{src} = getelementptr i8, ptr {s}, i64 {}", from.reg));
+                fb.line(format!(
+                    "{src} = getelementptr i8, ptr {s}, i64 {}",
+                    from.reg
+                ));
                 self.emit_memcpy(&out, &src, &count.reg, fb, module);
                 let end = fb.fresh_temp();
-                fb.line(format!("{end} = getelementptr i8, ptr {out}, i64 {}", count.reg));
+                fb.line(format!(
+                    "{end} = getelementptr i8, ptr {out}, i64 {}",
+                    count.reg
+                ));
                 fb.line(format!("store i8 0, ptr {end}"));
-                Ok(Some(FnValue { reg: out, ty: LlvmType::I8Ptr }))
+                Ok(Some(FnValue {
+                    reg: out,
+                    ty: LlvmType::I8Ptr,
+                }))
             }
             _ => Ok(None),
         }
     }
 
     /// Widen a number to the numeric type asked for.
-    fn emit_numeric_cast(&self, v: FnValue, want: LlvmType, fb: &mut FnBuilder) -> Result<FnValue, CompileError> {
+    fn emit_numeric_cast(
+        &self,
+        v: FnValue,
+        want: LlvmType,
+        fb: &mut FnBuilder,
+    ) -> Result<FnValue, CompileError> {
         if v.ty == want {
             return Ok(v);
         }
@@ -3815,23 +4758,35 @@ impl LlvmIrEmitter {
                 // should read as the constant it is, not as a conversion
                 // the reader has to perform in their head.
                 if let Ok(n) = v.reg.parse::<i64>() {
-                    return Ok(FnValue { reg: format!("{:.1}", n as f64), ty: LlvmType::F64 });
+                    return Ok(FnValue {
+                        reg: format!("{:.1}", n as f64),
+                        ty: LlvmType::F64,
+                    });
                 }
                 let reg = fb.fresh_temp();
                 fb.line(format!("{reg} = sitofp i64 {} to double", v.reg));
-                Ok(FnValue { reg, ty: LlvmType::F64 })
+                Ok(FnValue {
+                    reg,
+                    ty: LlvmType::F64,
+                })
             }
             // A character *is* a small integer in ATS: `c - '0'` is
             // arithmetic, not a conversion the programmer writes.
             (LlvmType::I8, LlvmType::I64) => {
                 let reg = fb.fresh_temp();
                 fb.line(format!("{reg} = sext i8 {} to i64", v.reg));
-                Ok(FnValue { reg, ty: LlvmType::I64 })
+                Ok(FnValue {
+                    reg,
+                    ty: LlvmType::I64,
+                })
             }
             (LlvmType::I64, LlvmType::I8) => {
                 let reg = fb.fresh_temp();
                 fb.line(format!("{reg} = trunc i64 {} to i8", v.reg));
-                Ok(FnValue { reg, ty: LlvmType::I8 })
+                Ok(FnValue {
+                    reg,
+                    ty: LlvmType::I8,
+                })
             }
             (LlvmType::I8, LlvmType::F64) => {
                 let widened = self.emit_numeric_cast(v, LlvmType::I64, fb)?;
@@ -3852,8 +4807,18 @@ impl LlvmIrEmitter {
     /// where the program asked for it — through an `overload`, or by
     /// naming the shim outright.  Ordinary arithmetic still refuses to mix
     /// the two, which is what ATS itself does.
-    fn emit_promoted(&self, op: BinOp, lv: FnValue, rv: FnValue, fb: &mut FnBuilder) -> Result<FnValue, CompileError> {
-        let want = if lv.ty == LlvmType::F64 || rv.ty == LlvmType::F64 { LlvmType::F64 } else { LlvmType::I64 };
+    fn emit_promoted(
+        &self,
+        op: BinOp,
+        lv: FnValue,
+        rv: FnValue,
+        fb: &mut FnBuilder,
+    ) -> Result<FnValue, CompileError> {
+        let want = if lv.ty == LlvmType::F64 || rv.ty == LlvmType::F64 {
+            LlvmType::F64
+        } else {
+            LlvmType::I64
+        };
         let lv = self.emit_numeric_cast(lv, want, fb)?;
         let rv = self.emit_numeric_cast(rv, want, fb)?;
         self.emit_binop_values(op, lv, rv, fb)
@@ -3861,9 +4826,22 @@ impl LlvmIrEmitter {
 
     /// One-argument shims that are a call to a libc function.
     #[allow(clippy::too_many_arguments)]
-    fn emit_libc_shim(&self, ats_name: &str, c_name: &str, decl: &'static str, want: LlvmType, ret: LlvmType, args: &[Expr], fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_libc_shim(
+        &self,
+        ats_name: &str,
+        c_name: &str,
+        decl: &'static str,
+        want: LlvmType,
+        ret: LlvmType,
+        args: &[Expr],
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         let [arg] = args else {
-            return Err(CompileError::emit(format!("`{ats_name}` takes exactly one argument")));
+            return Err(CompileError::emit(format!(
+                "`{ats_name}` takes exactly one argument"
+            )));
         };
         let v = self.emit_expr(arg, fb, registry, module)?;
         if v.ty != want {
@@ -3875,7 +4853,12 @@ impl LlvmIrEmitter {
         }
         module.externs.insert(decl);
         let reg = fb.fresh_temp();
-        fb.line(format!("{reg} = call {} @{c_name}({} {})", llvm_ty_str(ret), llvm_ty_str(want), v.reg));
+        fb.line(format!(
+            "{reg} = call {} @{c_name}({} {})",
+            llvm_ty_str(ret),
+            llvm_ty_str(want),
+            v.reg
+        ));
         Ok(FnValue { reg, ty: ret })
     }
 
@@ -3890,7 +4873,14 @@ impl LlvmIrEmitter {
 
     /// As `emit_alloc`, but for a size only known at run time.
     /// An argument that must be a string, emitted and checked.
-    fn emit_string_arg(&self, e: &Expr, of: &str, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<String, CompileError> {
+    fn emit_string_arg(
+        &self,
+        e: &Expr,
+        of: &str,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<String, CompileError> {
         let v = self.emit_expr(e, fb, registry, module)?;
         self.require(v.ty, LlvmType::I8Ptr, of)?;
         Ok(v.reg)
@@ -3905,13 +4895,27 @@ impl LlvmIrEmitter {
     }
 
     /// `count` bytes from `src` to `dst`.
-    fn emit_memcpy(&self, dst: &str, src: &str, count: &str, fb: &mut FnBuilder, module: &mut ModuleBuilder) {
+    fn emit_memcpy(
+        &self,
+        dst: &str,
+        src: &str,
+        count: &str,
+        fb: &mut FnBuilder,
+        module: &mut ModuleBuilder,
+    ) {
         module.externs.insert("declare ptr @memcpy(ptr, ptr, i64)");
         let done = fb.fresh_temp();
-        fb.line(format!("{done} = call ptr @memcpy(ptr {dst}, ptr {src}, i64 {count})"));
+        fb.line(format!(
+            "{done} = call ptr @memcpy(ptr {dst}, ptr {src}, i64 {count})"
+        ));
     }
 
-    fn emit_alloc_bytes(&self, bytes: &str, fb: &mut FnBuilder, module: &mut ModuleBuilder) -> String {
+    fn emit_alloc_bytes(
+        &self,
+        bytes: &str,
+        fb: &mut FnBuilder,
+        module: &mut ModuleBuilder,
+    ) -> String {
         module.needs_heap = true;
         module.externs.insert("declare ptr @malloc(i64)");
         module.externs.insert("declare void @free(ptr)");
@@ -3921,7 +4925,15 @@ impl LlvmIrEmitter {
     }
 
     /// Build a datatype value: one allocation, the tag, then the fields.
-    fn emit_ctor(&self, name: &str, info: &CtorInfo, args: &[Expr], fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_ctor(
+        &self,
+        name: &str,
+        info: &CtorInfo,
+        args: &[Expr],
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         if args.len() != info.fields.len() {
             return Err(CompileError::emit(format!(
                 "constructor `{name}` takes {} field(s), got {}",
@@ -3941,7 +4953,10 @@ impl LlvmIrEmitter {
             // first; all that is owed here is a well-defined slot rather
             // than whatever the arena last held.
             if matches!(arg, Expr::Wildcard) {
-                values.push(FnValue { reg: zero_literal(*want).to_string(), ty: *want });
+                values.push(FnValue {
+                    reg: zero_literal(*want).to_string(),
+                    ty: *want,
+                });
                 continue;
             }
             // The field's declared type is what a nested constructor in
@@ -3966,14 +4981,23 @@ impl LlvmIrEmitter {
     /// routine can build one too: it has the fields as values rather
     /// than as expressions, and there is nothing else different about
     /// the record it needs.
-    fn emit_ctor_from_values(&self, info: &CtorInfo, values: &[FnValue], fb: &mut FnBuilder, module: &mut ModuleBuilder) -> FnValue {
+    fn emit_ctor_from_values(
+        &self,
+        info: &CtorInfo,
+        values: &[FnValue],
+        fb: &mut FnBuilder,
+        module: &mut ModuleBuilder,
+    ) -> FnValue {
         let ptr = self.emit_alloc(WORD * (1 + info.width), fb, module);
         fb.line(format!("store i64 {}, ptr {ptr}", info.tag));
         for (i, v) in values.iter().enumerate() {
             let addr = self.emit_field_address(&ptr, i, fb);
             fb.line(format!("store {} {}, ptr {addr}", llvm_ty_str(v.ty), v.reg));
         }
-        FnValue { reg: ptr, ty: LlvmType::Data(info.datatype) }
+        FnValue {
+            reg: ptr,
+            ty: LlvmType::Data(info.datatype),
+        }
     }
 
     /// The address of field `i` of a datatype value: past the tag, then
@@ -3989,7 +5013,10 @@ impl LlvmIrEmitter {
             return base.to_string();
         }
         let addr = fb.fresh_temp();
-        fb.line(format!("{addr} = getelementptr i8, ptr {base}, i64 {}", WORD * i));
+        fb.line(format!(
+            "{addr} = getelementptr i8, ptr {base}, i64 {}",
+            WORD * i
+        ));
         addr
     }
 
@@ -3999,7 +5026,15 @@ impl LlvmIrEmitter {
     /// shape the source already has.  A decision tree would test each tag
     /// once instead of once per arm; this compiler leaves that to LLVM,
     /// which turns the chain of equality tests back into a switch.
-    fn emit_case(&self, scrutinee: &Expr, arms: &[(Pattern, Expr)], expected: Option<LlvmType>, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_case(
+        &self,
+        scrutinee: &Expr,
+        arms: &[(Pattern, Expr)],
+        expected: Option<LlvmType>,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         if arms.is_empty() {
             return Err(CompileError::emit("a `case` needs at least one arm"));
         }
@@ -4027,7 +5062,8 @@ impl LlvmIrEmitter {
             self.emit_pattern_match_at(pattern, &value, &next_label, in_place, fb, registry)?;
             fb.line(format!("br label %{body_label}"));
             fb.label(&body_label);
-            let settled = expected.or_else(|| results.first().map(|(v, _): &(FnValue, String)| v.ty));
+            let settled =
+                expected.or_else(|| results.first().map(|(v, _): &(FnValue, String)| v.ty));
             let r = self.emit_expr_expecting(body, settled, fb, registry, module)?;
             let pred = fb.cur_block.clone();
             if r.ty != LlvmType::Never {
@@ -4045,7 +5081,13 @@ impl LlvmIrEmitter {
             if i + 1 == arms.len() {
                 // Every arm refused the value.  ATS would have proved this
                 // impossible; without that proof, say so and stop.
-                self.emit_printf(Stream::Stderr, "exit(ATS): no matching case\n", &[], fb, module);
+                self.emit_printf(
+                    Stream::Stderr,
+                    "exit(ATS): no matching case\n",
+                    &[],
+                    fb,
+                    module,
+                );
                 fb.line("call void @exit(i32 2)");
                 fb.line("unreachable");
             }
@@ -4054,7 +5096,10 @@ impl LlvmIrEmitter {
         fb.label(&merge);
         let Some(((first, _), rest)) = results.split_first() else {
             fb.line("unreachable");
-            return Ok(FnValue { reg: String::new(), ty: LlvmType::Never });
+            return Ok(FnValue {
+                reg: String::new(),
+                ty: LlvmType::Never,
+            });
         };
         for (other, _) in rest {
             if other.ty != first.ty {
@@ -4067,11 +5112,21 @@ impl LlvmIrEmitter {
         }
         let ty = first.ty;
         if ty == LlvmType::Void {
-            return Ok(FnValue { reg: String::new(), ty });
+            return Ok(FnValue {
+                reg: String::new(),
+                ty,
+            });
         }
-        let incoming: Vec<String> = results.iter().map(|(v, p)| format!("[ {}, %{p} ]", v.reg)).collect();
+        let incoming: Vec<String> = results
+            .iter()
+            .map(|(v, p)| format!("[ {}, %{p} ]", v.reg))
+            .collect();
         let reg = fb.fresh_temp();
-        fb.line(format!("{reg} = phi {} {}", llvm_ty_str(ty), incoming.join(", ")));
+        fb.line(format!(
+            "{reg} = phi {} {}",
+            llvm_ty_str(ty),
+            incoming.join(", ")
+        ));
         Ok(FnValue { reg, ty })
     }
 
@@ -4087,7 +5142,14 @@ impl LlvmIrEmitter {
     ///
     /// On return, control is in a block where the whole pattern has
     /// matched.
-    fn emit_pattern_match(&self, pattern: &Pattern, value: &FnValue, on_fail: &str, fb: &mut FnBuilder, registry: &Registry) -> Result<(), CompileError> {
+    fn emit_pattern_match(
+        &self,
+        pattern: &Pattern,
+        value: &FnValue,
+        on_fail: &str,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+    ) -> Result<(), CompileError> {
         self.emit_pattern_match_at(pattern, value, on_fail, false, fb, registry)
     }
 
@@ -4099,7 +5161,15 @@ impl LlvmIrEmitter {
     /// address instead, and then `xs := ys` writes into the value that
     /// was matched — which is how ATS builds a list by filling in its
     /// own tail.
-    fn emit_pattern_match_at(&self, pattern: &Pattern, value: &FnValue, on_fail: &str, in_place: bool, fb: &mut FnBuilder, registry: &Registry) -> Result<(), CompileError> {
+    fn emit_pattern_match_at(
+        &self,
+        pattern: &Pattern,
+        value: &FnValue,
+        on_fail: &str,
+        in_place: bool,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+    ) -> Result<(), CompileError> {
         match pattern {
             Pattern::InPlace(inner) => {
                 self.emit_pattern_match_at(inner, value, on_fail, true, fb, registry)
@@ -4152,7 +5222,14 @@ impl LlvmIrEmitter {
                     let addr = self.emit_slot_address(&value.reg, i, fb);
                     let reg = fb.fresh_temp();
                     fb.line(format!("{reg} = load {}, ptr {addr}", llvm_ty_str(ty)));
-                    self.emit_pattern_match_at(sub, &FnValue { reg, ty }, on_fail, in_place, fb, registry)?;
+                    self.emit_pattern_match_at(
+                        sub,
+                        &FnValue { reg, ty },
+                        on_fail,
+                        in_place,
+                        fb,
+                        registry,
+                    )?;
                 }
                 Ok(())
             }
@@ -4168,7 +5245,11 @@ impl LlvmIrEmitter {
                 };
                 // In a pattern the scrutinee already fixes the datatype,
                 // so there is never any ambiguity to resolve.
-                let Some(info) = registry.ctors[name].iter().find(|c| c.datatype == index).cloned() else {
+                let Some(info) = registry.ctors[name]
+                    .iter()
+                    .find(|c| c.datatype == index)
+                    .cloned()
+                else {
                     return Err(CompileError::emit(format!(
                         "`{name}` does not build a `{}`, which is what is being matched",
                         registry.datatypes[index]
@@ -4207,7 +5288,14 @@ impl LlvmIrEmitter {
                     }
                     let reg = fb.fresh_temp();
                     fb.line(format!("{reg} = load {}, ptr {addr}", llvm_ty_str(ty)));
-                    self.emit_pattern_match_at(sub, &FnValue { reg, ty }, on_fail, in_place, fb, registry)?;
+                    self.emit_pattern_match_at(
+                        sub,
+                        &FnValue { reg, ty },
+                        on_fail,
+                        in_place,
+                        fb,
+                        registry,
+                    )?;
                 }
                 Ok(())
             }
@@ -4245,7 +5333,16 @@ impl LlvmIrEmitter {
     /// *lifting* handled named nested functions by adding parameters; a
     /// lambda cannot do that, because it may outlive the scope it was
     /// written in and its callers do not know what it captured.
-    fn emit_lambda(&self, params: &[Param], ret: Option<&Ty>, body: &Expr, expected: Option<LlvmType>, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_lambda(
+        &self,
+        params: &[Param],
+        ret: Option<&Ty>,
+        body: &Expr,
+        expected: Option<LlvmType>,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         // `lam x => x > 0` says nothing about `x`.  Where the lambda is
         // *going* does, and nothing else can: the body cannot be read
         // for it without a type inference this compiler has no room for.
@@ -4279,7 +5376,11 @@ impl LlvmIrEmitter {
                 // held when the closure was made.
                 let cell = fb.cells[&name].clone();
                 let reg = fb.fresh_temp();
-                fb.line(format!("{reg} = load {}, ptr {}", llvm_ty_str(cell.ty), cell.ptr));
+                fb.line(format!(
+                    "{reg} = load {}, ptr {}",
+                    llvm_ty_str(cell.ty),
+                    cell.ptr
+                ));
                 captures.push((name, FnValue { reg, ty: cell.ty }));
             }
         }
@@ -4289,7 +5390,13 @@ impl LlvmIrEmitter {
         let fname = format!("lam.{id}");
         let mut inner = FnBuilder::new();
         for (p, ty) in params.iter().zip(&param_tys) {
-            inner.env.insert(p.name.clone(), FnValue { reg: format!("%{}", sanitize(&p.name)), ty: *ty });
+            inner.env.insert(
+                p.name.clone(),
+                FnValue {
+                    reg: format!("%{}", sanitize(&p.name)),
+                    ty: *ty,
+                },
+            );
         }
         for (i, (name, v)) in captures.iter().enumerate() {
             let addr = self.emit_slot_address("%env", i + 1, &mut inner);
@@ -4328,7 +5435,9 @@ impl LlvmIrEmitter {
         // provably never changes — a call through it is one LLVM knows
         // how to turn back into a direct call, and then to inline.
         let ptr = if captures.is_empty() {
-            module.globals.push(format!("@clos.{id} = private unnamed_addr constant ptr @{fname}"));
+            module.globals.push(format!(
+                "@clos.{id} = private unnamed_addr constant ptr @{fname}"
+            ));
             format!("@clos.{id}")
         } else {
             let ptr = self.emit_alloc(WORD * (1 + captures.len()), fb, module);
@@ -4339,13 +5448,26 @@ impl LlvmIrEmitter {
             }
             ptr
         };
-        let index = registry.intern_closure(FnSig { params: param_tys, ret: ret_ty });
-        Ok(FnValue { reg: ptr, ty: LlvmType::Closure(index) })
+        let index = registry.intern_closure(FnSig {
+            params: param_tys,
+            ret: ret_ty,
+        });
+        Ok(FnValue {
+            reg: ptr,
+            ty: LlvmType::Closure(index),
+        })
     }
 
     /// Call a closure: load the code out of the record and jump through
     /// it, handing the record itself back as the environment.
-    fn emit_closure_call(&self, callee: FnValue, args: &[Expr], fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_closure_call(
+        &self,
+        callee: FnValue,
+        args: &[Expr],
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         let LlvmType::Closure(index) = callee.ty else {
             return Err(CompileError::emit(format!(
                 "cannot call a value of type {}",
@@ -4379,7 +5501,10 @@ impl LlvmIrEmitter {
             .collect();
         if sig.ret == LlvmType::Void {
             fb.line(format!("call void {code}({})", operands.join(", ")));
-            return Ok(FnValue { reg: String::new(), ty: LlvmType::Void });
+            return Ok(FnValue {
+                reg: String::new(),
+                ty: LlvmType::Void,
+            });
         }
         let reg = fb.fresh_temp();
         fb.line(format!(
@@ -4396,7 +5521,14 @@ impl LlvmIrEmitter {
     /// Only `argv` is indexable so far.  It is an array of pointers, so
     /// the address of element `i` is one `getelementptr` and the element
     /// itself is one load; the result is a `string`.
-    fn emit_index(&self, base: &Expr, index: &Expr, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_index(
+        &self,
+        base: &Expr,
+        index: &Expr,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         let b = self.emit_expr(base, fb, registry, module)?;
         if matches!(b.ty, LlvmType::Array(_)) {
             return self.emit_array_index(&b, index, fb, registry, module);
@@ -4412,10 +5544,16 @@ impl LlvmIrEmitter {
             return Err(CompileError::emit("an index must be an int"));
         }
         let addr = fb.fresh_temp();
-        fb.line(format!("{addr} = getelementptr ptr, ptr {}, i64 {}", b.reg, i.reg));
+        fb.line(format!(
+            "{addr} = getelementptr ptr, ptr {}, i64 {}",
+            b.reg, i.reg
+        ));
         let reg = fb.fresh_temp();
         fb.line(format!("{reg} = load ptr, ptr {addr}"));
-        Ok(FnValue { reg, ty: LlvmType::I8Ptr })
+        Ok(FnValue {
+            reg,
+            ty: LlvmType::I8Ptr,
+        })
     }
 
     /// `c >= lo && c <= hi`, possibly several ranges joined by `or`.
@@ -4451,7 +5589,11 @@ impl LlvmIrEmitter {
     }
 
     /// The hole a library routine needs, or a diagnostic naming it.
-    fn require_hole(&self, name: &str, registry: &Registry) -> Result<ats2_domain::ast::ImplementDef, CompileError> {
+    fn require_hole(
+        &self,
+        name: &str,
+        registry: &Registry,
+    ) -> Result<ats2_domain::ast::ImplementDef, CompileError> {
         registry.holes.get(name).cloned().ok_or_else(|| {
             CompileError::emit(format!(
                 "this needs `implement {name} (...)` to say what to do with each element"
@@ -4508,7 +5650,12 @@ impl LlvmIrEmitter {
     /// The static form takes a constant because most allocations know
     /// their size; an array's length is a static index, and static
     /// indices are erased, so this one has to compute it.
-    fn emit_alloc_dynamic(&self, count: &str, fb: &mut FnBuilder, module: &mut ModuleBuilder) -> String {
+    fn emit_alloc_dynamic(
+        &self,
+        count: &str,
+        fb: &mut FnBuilder,
+        module: &mut ModuleBuilder,
+    ) -> String {
         let bytes = fb.fresh_temp();
         fb.line(format!("{bytes} = mul i64 {count}, {WORD}"));
         self.emit_alloc_bytes(&bytes, fb, module)
@@ -4517,8 +5664,11 @@ impl LlvmIrEmitter {
     /// Write one value into every cell of a fresh array.
     fn emit_fill(&self, ptr: &str, count: &str, value: &FnValue, fb: &mut FnBuilder) {
         let id = fb.fresh_block_id();
-        let (head, body, done) =
-            (format!("fill.head.{id}"), format!("fill.body.{id}"), format!("fill.done.{id}"));
+        let (head, body, done) = (
+            format!("fill.head.{id}"),
+            format!("fill.body.{id}"),
+            format!("fill.done.{id}"),
+        );
         let cell = fb.alloca(&format!("fill.i.{id}"), LlvmType::I64);
         fb.line(format!("store i64 0, ptr {cell}"));
         fb.line(format!("br label %{head}"));
@@ -4533,7 +5683,11 @@ impl LlvmIrEmitter {
         fb.line(format!("{off} = mul i64 {i}, {WORD}"));
         let addr = fb.fresh_temp();
         fb.line(format!("{addr} = getelementptr i8, ptr {ptr}, i64 {off}"));
-        fb.line(format!("store {} {}, ptr {addr}", llvm_ty_str(value.ty), value.reg));
+        fb.line(format!(
+            "store {} {}, ptr {addr}",
+            llvm_ty_str(value.ty),
+            value.reg
+        ));
         let next = fb.fresh_temp();
         fb.line(format!("{next} = add i64 {i}, 1"));
         fb.line(format!("store i64 {next}, ptr {cell}"));
@@ -4544,8 +5698,11 @@ impl LlvmIrEmitter {
     /// Fill an array with `lo, lo+1, ...`.
     fn emit_fill_intrange(&self, ptr: &str, lo: &str, count: &str, fb: &mut FnBuilder) {
         let id = fb.fresh_block_id();
-        let (head, body, done) =
-            (format!("range.head.{id}"), format!("range.body.{id}"), format!("range.done.{id}"));
+        let (head, body, done) = (
+            format!("range.head.{id}"),
+            format!("range.body.{id}"),
+            format!("range.done.{id}"),
+        );
         let cell = fb.alloca(&format!("range.i.{id}"), LlvmType::I64);
         fb.line(format!("store i64 0, ptr {cell}"));
         fb.line(format!("br label %{head}"));
@@ -4575,7 +5732,14 @@ impl LlvmIrEmitter {
     /// A tuple is a run of word-sized slots, so the address is the slot
     /// and the type is the slot's, which is why this cannot be folded
     /// into `emit_index`: sibling slots need not agree.
-    fn emit_proj(&self, base: &Expr, slot: usize, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_proj(
+        &self,
+        base: &Expr,
+        slot: usize,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         let b = self.emit_expr(base, fb, registry, module)?;
         let LlvmType::Tuple(index) = b.ty else {
             // `(pf | v).1` — a proof pair.  The proof half was erased
@@ -4610,7 +5774,13 @@ impl LlvmIrEmitter {
     /// pointer and the array it names are the same machine word, so
     /// dereferencing one is free; a `ref` cell holds its value in its
     /// single slot, so reading one is a load.
-    fn emit_deref(&self, inner: &Expr, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_deref(
+        &self,
+        inner: &Expr,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         let v = self.emit_expr(inner, fb, registry, module)?;
         match v.ty {
             // `!s` on a stream *forces* it.  Reading through a pointer is
@@ -4642,7 +5812,11 @@ impl LlvmIrEmitter {
     /// is the mangled one monomorphisation invented and only the type is
     /// stable.  `None` when no such instance exists — nothing in the
     /// program built that list, so there is nothing to build one with.
-    fn list_constructors(&self, elem: LlvmType, registry: &Registry) -> Option<(CtorInfo, CtorInfo)> {
+    fn list_constructors(
+        &self,
+        elem: LlvmType,
+        registry: &Registry,
+    ) -> Option<(CtorInfo, CtorInfo)> {
         let cons = registry
             .ctors
             .get("list0_cons")?
@@ -4680,7 +5854,15 @@ impl LlvmIrEmitter {
     /// phis: the loop body may itself branch — printing an element can
     /// be a walk over another list — and a phi would then name the wrong
     /// predecessor.
-    fn emit_list_print(&self, stream: &Stream, list: &FnValue, datatype: usize, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<(), CompileError> {
+    fn emit_list_print(
+        &self,
+        stream: &Stream,
+        list: &FnValue,
+        datatype: usize,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<(), CompileError> {
         let element = self
             .list_element(datatype, registry)
             .ok_or_else(|| CompileError::emit("internal: not a list"))?;
@@ -4729,12 +5911,18 @@ impl LlvmIrEmitter {
         fb.line(format!("{cur2} = load ptr, ptr {cursor}"));
         let addr = self.emit_field_address(&cur2, 0, fb);
         let value = fb.fresh_temp();
-        fb.line(format!("{value} = load {}, ptr {addr}", llvm_ty_str(element)));
+        fb.line(format!(
+            "{value} = load {}, ptr {addr}",
+            llvm_ty_str(element)
+        ));
         let mut fmt = String::new();
         let mut operands = Vec::new();
         self.format_one(
             stream,
-            FnValue { reg: value, ty: element },
+            FnValue {
+                reg: value,
+                ty: element,
+            },
             &mut fmt,
             &mut operands,
             fb,
@@ -4758,8 +5946,15 @@ impl LlvmIrEmitter {
 
     /// The slot and type of a record's field, if this value is a record
     /// that has one by that name.
-    fn record_slot(&self, v: &FnValue, name: &str, registry: &Registry) -> Option<(usize, LlvmType)> {
-        let LlvmType::Record(index) = v.ty else { return None };
+    fn record_slot(
+        &self,
+        v: &FnValue,
+        name: &str,
+        registry: &Registry,
+    ) -> Option<(usize, LlvmType)> {
+        let LlvmType::Record(index) = v.ty else {
+            return None;
+        };
         registry
             .record_fields(index)
             .into_iter()
@@ -4776,7 +5971,12 @@ impl LlvmIrEmitter {
     /// discovering it was a call's argument would evaluate it twice.
     /// A receiver is a name or a chain of fields off one in every case
     /// the language actually writes, and those need no code to type.
-    fn type_without_emitting(&self, expr: &Expr, fb: &FnBuilder, registry: &Registry) -> Option<LlvmType> {
+    fn type_without_emitting(
+        &self,
+        expr: &Expr,
+        fb: &FnBuilder,
+        registry: &Registry,
+    ) -> Option<LlvmType> {
         match expr {
             Expr::Var(n) => fb
                 .env
@@ -4786,7 +5986,9 @@ impl LlvmIrEmitter {
                 .or_else(|| registry.globals.get(n).copied()),
             Expr::Field(base, name) => {
                 let base = self.type_without_emitting(base, fb, registry)?;
-                let LlvmType::Record(index) = base else { return None };
+                let LlvmType::Record(index) = base else {
+                    return None;
+                };
                 registry
                     .record_fields(index)
                     .into_iter()
@@ -4798,7 +6000,13 @@ impl LlvmIrEmitter {
     }
 
     /// Whether `base.name` names a record field rather than a call.
-    fn is_a_record_field(&self, base: &Expr, name: &str, fb: &FnBuilder, registry: &Registry) -> bool {
+    fn is_a_record_field(
+        &self,
+        base: &Expr,
+        name: &str,
+        fb: &FnBuilder,
+        registry: &Registry,
+    ) -> bool {
         match self.type_without_emitting(base, fb, registry) {
             Some(LlvmType::Record(index)) => {
                 registry.record_fields(index).iter().any(|(n, _)| n == name)
@@ -4816,7 +6024,13 @@ impl LlvmIrEmitter {
     /// refers to whatever it was built from, which for the sieve is the
     /// difference between a bounded and an unbounded amount of live
     /// memory.
-    fn emit_force(&self, cell: FnValue, index: usize, fb: &mut FnBuilder, registry: &Registry) -> Result<FnValue, CompileError> {
+    fn emit_force(
+        &self,
+        cell: FnValue,
+        index: usize,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+    ) -> Result<FnValue, CompileError> {
         let forced = registry.lazy_forced(index);
         let id = fb.fresh_block_id();
         let (run, done) = (format!("stream.force.{id}"), format!("stream.forced.{id}"));
@@ -4830,9 +6044,15 @@ impl LlvmIrEmitter {
         let code = fb.fresh_temp();
         fb.line(format!("{code} = load ptr, ptr {thunk}"));
         let value = fb.fresh_temp();
-        fb.line(format!("{value} = call {} {code}(ptr {thunk})", llvm_ty_str(forced)));
+        fb.line(format!(
+            "{value} = call {} {code}(ptr {thunk})",
+            llvm_ty_str(forced)
+        ));
         let answer = self.emit_slot_address(&cell.reg, 1, fb);
-        fb.line(format!("store {} {value}, ptr {answer}", llvm_ty_str(forced)));
+        fb.line(format!(
+            "store {} {value}, ptr {answer}",
+            llvm_ty_str(forced)
+        ));
         fb.line(format!("store ptr null, ptr {}", cell.reg));
         fb.line(format!("br label %{done}"));
 
@@ -4844,7 +6064,14 @@ impl LlvmIrEmitter {
     }
 
     /// `A.[i]` — one cell of an array.
-    fn emit_array_index(&self, base: &FnValue, index: &Expr, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_array_index(
+        &self,
+        base: &FnValue,
+        index: &Expr,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         let LlvmType::Array(elem) = base.ty else {
             return Err(CompileError::emit("internal: not an array"));
         };
@@ -4859,13 +6086,23 @@ impl LlvmIrEmitter {
     ///
     /// Every cell is one word wide, which is what lets the arena hand
     /// out arrays of any element type from one bump pointer.
-    fn emit_cell_address(&self, base: &FnValue, index: &Expr, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<String, CompileError> {
+    fn emit_cell_address(
+        &self,
+        base: &FnValue,
+        index: &Expr,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<String, CompileError> {
         let i = self.emit_expr(index, fb, registry, module)?;
         self.require(i.ty, LlvmType::I64, "an array index")?;
         let byte = fb.fresh_temp();
         fb.line(format!("{byte} = mul i64 {}, {WORD}", i.reg));
         let addr = fb.fresh_temp();
-        fb.line(format!("{addr} = getelementptr i8, ptr {}, i64 {byte}", base.reg));
+        fb.line(format!(
+            "{addr} = getelementptr i8, ptr {}, i64 {byte}",
+            base.reg
+        ));
         Ok(addr)
     }
 
@@ -4874,7 +6111,14 @@ impl LlvmIrEmitter {
     /// The place is evaluated for its *address*, so the value written is
     /// visible through every other name for the same aggregate.  That is
     /// what makes a tuple passed to a function mutable by it.
-    fn emit_store(&self, place: &Expr, value: &Expr, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_store(
+        &self,
+        place: &Expr,
+        value: &Expr,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         // `A.[i] := e` — a cell of an array.
         if let Expr::Index(base, index) = place {
             let b = self.emit_expr(base, fb, registry, module)?;
@@ -4895,7 +6139,10 @@ impl LlvmIrEmitter {
                 )));
             }
             fb.line(format!("store {} {}, ptr {addr}", llvm_ty_str(want), v.reg));
-            return Ok(FnValue { reg: String::new(), ty: LlvmType::Void });
+            return Ok(FnValue {
+                reg: String::new(),
+                ty: LlvmType::Void,
+            });
         }
         // `!r := e` — the single cell a reference names.
         if let Expr::Deref(inner) = place {
@@ -4913,10 +6160,15 @@ impl LlvmIrEmitter {
             let v = self.emit_expr_expecting(value, Some(want), fb, registry, module)?;
             let addr = self.emit_slot_address(&b.reg, 0, fb);
             fb.line(format!("store {} {}, ptr {addr}", llvm_ty_str(v.ty), v.reg));
-            return Ok(FnValue { reg: String::new(), ty: LlvmType::Void });
+            return Ok(FnValue {
+                reg: String::new(),
+                ty: LlvmType::Void,
+            });
         }
         let Expr::Proj(base, slot) = place else {
-            return Err(CompileError::emit("this is not something that can be assigned to"));
+            return Err(CompileError::emit(
+                "this is not something that can be assigned to",
+            ));
         };
         let b = self.emit_expr(base, fb, registry, module)?;
         let LlvmType::Tuple(index) = b.ty else {
@@ -4942,11 +6194,21 @@ impl LlvmIrEmitter {
         }
         let addr = self.emit_slot_address(&b.reg, *slot, fb);
         fb.line(format!("store {} {}, ptr {addr}", llvm_ty_str(want), v.reg));
-        Ok(FnValue { reg: String::new(), ty: LlvmType::Void })
+        Ok(FnValue {
+            reg: String::new(),
+            ty: LlvmType::Void,
+        })
     }
 
     /// `x := e` — a store into the cell `x` names.
-    fn emit_assign(&self, name: &str, value: &Expr, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_assign(
+        &self,
+        name: &str,
+        value: &Expr,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         if !fb.cells.contains_key(name) {
             if registry.globals.contains_key(name) {
                 return Err(CompileError::emit(format!(
@@ -4954,7 +6216,9 @@ impl LlvmIrEmitter {
                 )));
             }
             return Err(if fb.env.contains_key(name) {
-                CompileError::emit(format!("`{name}` is bound by `val` and cannot be assigned to; declare it with `var`"))
+                CompileError::emit(format!(
+                    "`{name}` is bound by `val` and cannot be assigned to; declare it with `var`"
+                ))
             } else {
                 CompileError::emit(format!("cannot assign to `{name}`: no such variable"))
             });
@@ -4968,8 +6232,16 @@ impl LlvmIrEmitter {
                 llvm_ty_str(cell.ty)
             )));
         }
-        fb.line(format!("store {} {}, ptr {}", llvm_ty_str(v.ty), v.reg, cell.ptr));
-        Ok(FnValue { reg: String::new(), ty: LlvmType::Void })
+        fb.line(format!(
+            "store {} {}, ptr {}",
+            llvm_ty_str(v.ty),
+            v.reg,
+            cell.ptr
+        ));
+        Ok(FnValue {
+            reg: String::new(),
+            ty: LlvmType::Void,
+        })
     }
 
     /// `while (cond) body`.
@@ -4977,9 +6249,20 @@ impl LlvmIrEmitter {
     /// The condition gets a block of its own.  That is not a stylistic
     /// choice: the instructions computing it must be re-executed on every
     /// turn, and instructions emitted into the entry block would run once.
-    fn emit_while(&self, cond: &Expr, body: &Expr, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_while(
+        &self,
+        cond: &Expr,
+        body: &Expr,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         let id = fb.fresh_block_id();
-        let (chead, cbody, cend) = (format!("while.cond.{id}"), format!("while.body.{id}"), format!("while.end.{id}"));
+        let (chead, cbody, cend) = (
+            format!("while.cond.{id}"),
+            format!("while.body.{id}"),
+            format!("while.end.{id}"),
+        );
 
         fb.line(format!("br label %{chead}"));
         fb.label(&chead);
@@ -4997,7 +6280,10 @@ impl LlvmIrEmitter {
         fb.line(format!("br label %{chead}"));
 
         fb.label(&cend);
-        Ok(FnValue { reg: String::new(), ty: LlvmType::Void })
+        Ok(FnValue {
+            reg: String::new(),
+            ty: LlvmType::Void,
+        })
     }
 
     /// `for (init; cond; step) body`.
@@ -5006,7 +6292,16 @@ impl LlvmIrEmitter {
     /// Both lower to the same machine code, but keeping them apart means
     /// the loop's three parts are still legible in the IR — and it is
     /// where a `continue` would land if the subset ever grows one.
-    fn emit_for(&self, init: &Expr, cond: &Expr, step: &Expr, body: &Expr, fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_for(
+        &self,
+        init: &Expr,
+        cond: &Expr,
+        step: &Expr,
+        body: &Expr,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         let id = fb.fresh_block_id();
         let (chead, cbody, cstep, cend) = (
             format!("for.cond.{id}"),
@@ -5037,14 +6332,23 @@ impl LlvmIrEmitter {
         fb.line(format!("br label %{chead}"));
 
         fb.label(&cend);
-        Ok(FnValue { reg: String::new(), ty: LlvmType::Void })
+        Ok(FnValue {
+            reg: String::new(),
+            ty: LlvmType::Void,
+        })
     }
 
     /// `assertloc(cond)` — ATS's located assertion.  It is not a function
     /// call but a *branch*: on failure it reports where it stood and
     /// leaves through `exit(1)`, so the success path costs one test and a
     /// perfectly predicted jump.
-    fn emit_assert(&self, args: &[Expr], fb: &mut FnBuilder, registry: &Registry, module: &mut ModuleBuilder) -> Result<FnValue, CompileError> {
+    fn emit_assert(
+        &self,
+        args: &[Expr],
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
         let [cond] = args else {
             return Err(CompileError::emit("`assertloc` takes exactly one argument"));
         };
@@ -5056,11 +6360,20 @@ impl LlvmIrEmitter {
         let (fail, ok) = (format!("assert.fail.{id}"), format!("assert.ok.{id}"));
         fb.line(format!("br i1 {}, label %{ok}, label %{fail}", c.reg));
         fb.label(&fail);
-        self.emit_printf(Stream::Stderr, "exit(ATS): assertion failed\n", &[], fb, module);
+        self.emit_printf(
+            Stream::Stderr,
+            "exit(ATS): assertion failed\n",
+            &[],
+            fb,
+            module,
+        );
         fb.line("call void @exit(i32 1)");
         fb.line("unreachable");
         fb.label(&ok);
-        Ok(FnValue { reg: String::new(), ty: LlvmType::Void })
+        Ok(FnValue {
+            reg: String::new(),
+            ty: LlvmType::Void,
+        })
     }
 }
 
@@ -5098,7 +6411,8 @@ mod tests {
 
     #[test]
     fn emits_recursive_calls_to_functions_defined_anywhere() {
-        let ir = emit("fun fact(n: int): int = if n = 0 then 1 else n * fact(n - 1)").expect("emit");
+        let ir =
+            emit("fun fact(n: int): int = if n = 0 then 1 else n * fact(n - 1)").expect("emit");
         assert!(ir.contains("define i64 @fact(i64 %n)"), "got:\n{ir}");
         assert!(ir.contains("call i64 @fact(i64 %t."), "got:\n{ir}");
         assert!(ir.contains("icmp eq i64 %n, 0"), "got:\n{ir}");
@@ -5119,10 +6433,8 @@ mod tests {
     fn a_top_level_var_is_a_dereferenceable_reference() {
         // `var x: int = 0` outside any body is storage whose address
         // outlives every call: `!x` must read it back.
-        let ir = emit(
-            "var _count_: int = 0\nfun get(): int = !_count_\nimplement main0 () = ()",
-        )
-        .expect("emit");
+        let ir = emit("var _count_: int = 0\nfun get(): int = !_count_\nimplement main0 () = ()")
+            .expect("emit");
         assert!(ir.contains("define i64 @get()"), "got:\n{ir}");
     }
 
@@ -5142,10 +6454,8 @@ mod tests {
     fn a_global_ref_gets_its_type_from_the_value_it_wraps() {
         // `val r = ref(0)` — the type is the one-slot tuple of the
         // wrapped value's type, read off the call itself.
-        let ir = emit(
-            "val r = ref(0)\nfun get(): int = !r\nimplement main0 () = ()",
-        )
-        .expect("emit");
+        let ir =
+            emit("val r = ref(0)\nfun get(): int = !r\nimplement main0 () = ()").expect("emit");
         assert!(ir.contains("define i64 @get()"), "got:\n{ir}");
     }
 
@@ -5177,21 +6487,36 @@ mod tests {
     #[test]
     fn emits_if_as_branches_and_a_phi() {
         let ir = emit("fun f(x: int): int = if x = 0 then 1 else 2").expect("emit");
-        assert!(ir.contains("br i1 %t.0, label %if.t.0, label %if.e.0"), "got:\n{ir}");
+        assert!(
+            ir.contains("br i1 %t.0, label %if.t.0, label %if.e.0"),
+            "got:\n{ir}"
+        );
         assert!(ir.contains("if.t.0:"), "got:\n{ir}");
         assert!(ir.contains("if.e.0:"), "got:\n{ir}");
         assert!(ir.contains("if.m.0:"), "got:\n{ir}");
-        assert!(ir.contains("phi i64 [ 1, %if.t.0 ], [ 2, %if.e.0 ]"), "got:\n{ir}");
+        assert!(
+            ir.contains("phi i64 [ 1, %if.t.0 ], [ 2, %if.e.0 ]"),
+            "got:\n{ir}"
+        );
     }
 
     #[test]
     fn emits_short_circuit_andalso_and_orelse() {
         let ir = emit("fun f(a: bool, b: bool): bool = a andalso b").expect("emit");
-        assert!(ir.contains("br i1 %a, label %and.t.0, label %and.f.0"), "got:\n{ir}");
-        assert!(ir.contains("phi i1 [ %b, %and.t.0 ], [ false, %and.f.0 ]"), "got:\n{ir}");
+        assert!(
+            ir.contains("br i1 %a, label %and.t.0, label %and.f.0"),
+            "got:\n{ir}"
+        );
+        assert!(
+            ir.contains("phi i1 [ %b, %and.t.0 ], [ false, %and.f.0 ]"),
+            "got:\n{ir}"
+        );
 
         let ir = emit("fun f(a: bool, b: bool): bool = a orelse b").expect("emit");
-        assert!(ir.contains("phi i1 [ true, %or.t.0 ], [ %b, %or.f.0 ]"), "got:\n{ir}");
+        assert!(
+            ir.contains("phi i1 [ true, %or.t.0 ], [ %b, %or.f.0 ]"),
+            "got:\n{ir}"
+        );
     }
 
     #[test]
@@ -5223,7 +6548,9 @@ mod tests {
 
     #[test]
     fn discard_bindings_evaluate_but_are_ignored() {
-        let ir = emit("implement main0() = { val () = f(1); println!(\"ok\") }\nfun f(x: int): int = x").expect("emit");
+        let ir =
+            emit("implement main0() = { val () = f(1); println!(\"ok\") }\nfun f(x: int): int = x")
+                .expect("emit");
         assert!(ir.contains("call i64 @f(i64 1)"), "got:\n{ir}");
         assert!(ir.contains("ret i32 0"), "got:\n{ir}");
     }
@@ -5233,7 +6560,10 @@ mod tests {
     #[test]
     fn emits_string_constants_and_returns_their_addresses() {
         let ir = emit("fun f(): string = \"hi\"").expect("emit");
-        assert!(ir.contains("@.str.0 = private unnamed_addr constant [3 x i8] c\"hi\\00\""), "got:\n{ir}");
+        assert!(
+            ir.contains("@.str.0 = private unnamed_addr constant [3 x i8] c\"hi\\00\""),
+            "got:\n{ir}"
+        );
         // With opaque pointers, the global's address is the value itself.
         assert!(ir.contains("ret ptr @.str.0"), "got:\n{ir}");
     }
@@ -5285,26 +6615,33 @@ mod tests {
 
     #[test]
     fn println_builds_a_printf_call_from_the_literal() {
-        let ir = emit("implement main0() = println!(\"fact(5) = \", fact(5))\nfun fact(n: int): int = 1").expect("emit");
-        assert!(ir.contains("@.fmt.0 = private unnamed_addr constant [15 x i8] c\"fact(5) = %ld\\0A\\00\""), "got:\n{ir}");
+        let ir = emit(
+            "implement main0() = println!(\"fact(5) = \", fact(5))\nfun fact(n: int): int = 1",
+        )
+        .expect("emit");
+        assert!(
+            ir.contains(
+                "@.fmt.0 = private unnamed_addr constant [15 x i8] c\"fact(5) = %ld\\0A\\00\""
+            ),
+            "got:\n{ir}"
+        );
         assert!(ir.contains("call i32 (ptr, ...) @printf"), "got:\n{ir}");
         assert!(ir.contains("call i64 @fact(i64 5)"), "got:\n{ir}");
     }
 
     #[test]
     fn println_mixes_strings_and_values_in_the_format() {
-        let ir = emit(
-            "implement main0() = let val s = \"z\" in println!(\"x=\", 1, \" y=\", s) end",
-        ).expect("emit");
+        let ir =
+            emit("implement main0() = let val s = \"z\" in println!(\"x=\", 1, \" y=\", s) end")
+                .expect("emit");
         // The runtime format is  x=%ld y=%s<newline>
         assert!(ir.contains("x=%ld y=%s"), "got:\n{ir}");
     }
 
     #[test]
     fn literal_percent_is_doubled_in_printf_formats_but_not_in_strings() {
-        let ir = emit(
-            "implement main0() = println!(\"100% done\")\nfun s(): string = \"100%\"",
-        ).expect("emit");
+        let ir = emit("implement main0() = println!(\"100% done\")\nfun s(): string = \"100%\"")
+            .expect("emit");
         // format: 100%% done + newline ; string: 100% unchanged
         assert!(ir.contains("100%% done"), "got:\n{ir}");
         assert!(ir.contains("c\"100%\\00\""), "got:\n{ir}");
@@ -5330,7 +6667,8 @@ mod tests {
 
     #[test]
     fn a_tuple_is_a_record_of_its_components() {
-        let ir = emit("fun pair(): (int, int) = (1, 2) implement main0() = println!(1)").expect("emit");
+        let ir =
+            emit("fun pair(): (int, int) = (1, 2) implement main0() = println!(1)").expect("emit");
         assert!(ir.contains("define ptr @pair()"), "got:\n{ir}");
         assert!(ir.contains("store i64 1, ptr"), "got:\n{ir}");
         assert!(ir.contains("store i64 2, ptr"), "got:\n{ir}");
@@ -5338,7 +6676,8 @@ mod tests {
 
     #[test]
     fn a_flat_tuple_is_written_the_same_way() {
-        let ir = emit("fun pair(): @(int, bool) = @(1, true) implement main0() = println!(1)").expect("emit");
+        let ir = emit("fun pair(): @(int, bool) = @(1, true) implement main0() = println!(1)")
+            .expect("emit");
         assert!(ir.contains("define ptr @pair()"), "got:\n{ir}");
     }
 
@@ -5355,7 +6694,10 @@ mod tests {
     #[test]
     fn a_tuple_of_the_wrong_width_is_an_error() {
         let err = emit_err("fun f(p: (int, int)): int = case p of | (a, b, c) => a");
-        assert!(err.message().contains("2") || err.message().contains("width"), "{err}");
+        assert!(
+            err.message().contains("2") || err.message().contains("width"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -5382,7 +6724,10 @@ mod tests {
         )
         .expect("emit");
         let tests = ir.matches("icmp eq i64").count();
-        assert!(tests >= 2, "expected an outer and an inner tag test, got {tests}:\n{ir}");
+        assert!(
+            tests >= 2,
+            "expected an outer and an inner tag test, got {tests}:\n{ir}"
+        );
     }
 
     #[test]
@@ -5395,7 +6740,10 @@ mod tests {
         )
         .expect("emit");
         // tag + two fields = three words, even for the nullary case.
-        assert!(ir.contains("call ptr @.ats_alloc(i64 24)"), "Nil must reserve the full width:\n{ir}");
+        assert!(
+            ir.contains("call ptr @.ats_alloc(i64 24)"),
+            "Nil must reserve the full width:\n{ir}"
+        );
     }
 
     #[test]
@@ -5462,10 +6810,15 @@ mod tests {
         // is how the corpus writes it.  Widening loses the check that
         // the two operands agree; it gains the arithmetic ATS programs
         // actually contain.
-        let ir = emit("fun f(x: double, n: int): double = x * n implement main0() = println!(f(1.5, 2))")
-            .expect("emit");
+        let ir = emit(
+            "fun f(x: double, n: int): double = x * n implement main0() = println!(f(1.5, 2))",
+        )
+        .expect("emit");
         assert!(ir.contains("sitofp i64"), "the int must widen:\n{ir}");
-        assert!(ir.contains("fmul double"), "the product must be a float one:\n{ir}");
+        assert!(
+            ir.contains("fmul double"),
+            "the product must be a float one:\n{ir}"
+        );
     }
 
     // --- macdef, overload, and the generic numeric shims -------------
@@ -5514,7 +6867,8 @@ mod tests {
 
     #[test]
     fn an_overload_is_not_consulted_when_the_types_already_fit() {
-        let ir = emit("overload * with gmul_int_val fun f (a: int, b: int): int = a * b").expect("emit");
+        let ir =
+            emit("overload * with gmul_int_val fun f (a: int, b: int): int = a * b").expect("emit");
         assert!(ir.contains("mul i64"), "got:\n{ir}");
         assert!(!ir.contains("sitofp"), "no promotion should happen:\n{ir}");
     }
@@ -5534,17 +6888,19 @@ mod tests {
         // Numbers widen (see `mixing_an_int_and_a_double_widens_the_int`);
         // things that are not numbers still do not.
         let err = emit_err("fun f (s: string, x: double): double = s * x");
-        assert!(err.message().contains("ptr") || err.message().contains("operand"), "{err}");
+        assert!(
+            err.message().contains("ptr") || err.message().contains("operand"),
+            "{err}"
+        );
     }
 
     // --- the prelude's functions ------------------------------------
 
     #[test]
     fn list0_is_nil_comes_from_the_prelude() {
-        let ir = emit(
-            "fun f(xs: list0(int)): bool = list0_is_nil(xs) implement main0() = println!(1)",
-        )
-        .expect("emit");
+        let ir =
+            emit("fun f(xs: list0(int)): bool = list0_is_nil(xs) implement main0() = println!(1)")
+                .expect("emit");
         assert!(ir.contains("@list0_is_nil$int"), "got:\n{ir}");
     }
 
@@ -5570,7 +6926,11 @@ mod tests {
              implement main0() = println!(string_isnot_empty(\"x\"))",
         )
         .expect("emit");
-        assert_eq!(ir.matches("define i1 @string_isnot_empty").count(), 1, "got:\n{ir}");
+        assert_eq!(
+            ir.matches("define i1 @string_isnot_empty").count(),
+            1,
+            "got:\n{ir}"
+        );
     }
 
     #[test]
@@ -5580,8 +6940,14 @@ mod tests {
              println!(string_is_null(s)) end",
         )
         .expect("emit");
-        assert!(ir.contains("@fgetc"), "the line is read a character at a time:\n{ir}");
-        assert!(ir.contains("icmp eq ptr"), "the null result must be testable:\n{ir}");
+        assert!(
+            ir.contains("@fgetc"),
+            "the line is read a character at a time:\n{ir}"
+        );
+        assert!(
+            ir.contains("icmp eq ptr"),
+            "the null result must be testable:\n{ir}"
+        );
     }
 
     #[test]
@@ -5601,7 +6967,10 @@ mod tests {
     fn a_top_level_val_becomes_a_global() {
         let ir = emit("val limit = 10 implement main0() = println!(limit)").expect("emit");
         assert!(ir.contains("@limit = internal global i64"), "got:\n{ir}");
-        assert!(ir.contains("load i64, ptr @limit"), "reading it is a load:\n{ir}");
+        assert!(
+            ir.contains("load i64, ptr @limit"),
+            "reading it is a load:\n{ir}"
+        );
     }
 
     #[test]
@@ -5611,7 +6980,10 @@ mod tests {
         let main = &ir[ir.find("define i32 @main").expect("a main")..];
         let store = main.find("store i64").expect("an initialising store");
         let print = main.find("@printf").expect("the printf");
-        assert!(store < print, "the global must be set before it is read:\n{ir}");
+        assert!(
+            store < print,
+            "the global must be set before it is read:\n{ir}"
+        );
     }
 
     #[test]
@@ -5625,13 +6997,17 @@ mod tests {
     fn top_level_vals_are_initialised_in_order() {
         let ir = emit("val a = 2 val b = a + 1 implement main0() = println!(b)").expect("emit");
         let main = &ir[ir.find("define i32 @main").expect("a main")..];
-        assert!(main.find("@a").expect("a") < main.find("@b").expect("b"), "got:\n{ir}");
+        assert!(
+            main.find("@a").expect("a") < main.find("@b").expect("b"),
+            "got:\n{ir}"
+        );
     }
 
     #[test]
     fn a_top_level_val_may_hold_a_closure() {
-        let ir = emit("val square = lam (x: int): int => x * x implement main0() = println!(square(5))")
-            .expect("emit");
+        let ir =
+            emit("val square = lam (x: int): int => x * x implement main0() = println!(square(5))")
+                .expect("emit");
         assert!(ir.contains("@square = internal global ptr"), "got:\n{ir}");
         assert!(ir.contains("call i64 %"), "calling it is indirect:\n{ir}");
     }
@@ -5654,7 +7030,10 @@ mod tests {
         // The body is lifted to a function of its own, taking the
         // environment as a first parameter.
         assert!(ir.contains("define i64 @lam."), "no lifted body in:\n{ir}");
-        assert!(ir.contains("(ptr %env"), "the environment must be passed:\n{ir}");
+        assert!(
+            ir.contains("(ptr %env"),
+            "the environment must be passed:\n{ir}"
+        );
     }
 
     #[test]
@@ -5669,7 +7048,10 @@ mod tests {
              implement main0() = println!(1)",
         )
         .expect("emit");
-        assert!(!ir.contains("FACT"), "a proposition reached the emitter:\n{ir}");
+        assert!(
+            !ir.contains("FACT"),
+            "a proposition reached the emitter:\n{ir}"
+        );
     }
 
     #[test]
@@ -5699,10 +7081,16 @@ mod tests {
              implement main0() = println!(mk()(2))",
         )
         .expect("emit");
-        assert!(ir.contains("constant ptr @lam.0"), "no constant record in:\n{ir}");
+        assert!(
+            ir.contains("constant ptr @lam.0"),
+            "no constant record in:\n{ir}"
+        );
         let mk = &ir[ir.find("define ptr @mk").expect("a mk")..];
         let mk = &mk[..mk.find("\n}").expect("an end")];
-        assert!(!mk.contains(".ats_alloc"), "capture-free lambda still allocates:\n{mk}");
+        assert!(
+            !mk.contains(".ats_alloc"),
+            "capture-free lambda still allocates:\n{mk}"
+        );
     }
 
     #[test]
@@ -5714,7 +7102,10 @@ mod tests {
         .expect("emit");
         // `m` belongs to `adder`, so it is copied into the record and
         // read back out inside the lambda.
-        assert!(ir.contains("store i64 %m, ptr"), "the capture must be stored:\n{ir}");
+        assert!(
+            ir.contains("store i64 %m, ptr"),
+            "the capture must be stored:\n{ir}"
+        );
         assert!(ir.contains("load i64, ptr"), "and loaded inside:\n{ir}");
     }
 
@@ -5725,8 +7116,14 @@ mod tests {
              implement main0() = println!(adder(1)(2))",
         )
         .expect("emit");
-        assert!(ir.contains("load ptr, ptr"), "the code pointer must be loaded:\n{ir}");
-        assert!(ir.contains("call i64 %"), "the call must be indirect:\n{ir}");
+        assert!(
+            ir.contains("load ptr, ptr"),
+            "the code pointer must be loaded:\n{ir}"
+        );
+        assert!(
+            ir.contains("call i64 %"),
+            "the call must be indirect:\n{ir}"
+        );
     }
 
     #[test]
@@ -5776,7 +7173,10 @@ mod tests {
     #[test]
     fn calling_a_non_function_is_still_an_error() {
         let err = emit_err("implement main0() = let val x: int = 1 in println!(x(1)) end");
-        assert!(err.message().contains("call") || err.message().contains("function"), "{err}");
+        assert!(
+            err.message().contains("call") || err.message().contains("function"),
+            "{err}"
+        );
     }
 
     // --- characters --------------------------------------------------
@@ -5835,7 +7235,8 @@ mod tests {
         // character as a small integer, and `c - '0'` is the idiom every
         // digit-parsing loop in the corpus is built on, so arithmetic
         // widens rather than refusing.
-        let ir = emit("fun f(c: char): int = c + 1 implement main0() = println!(f('a'))").expect("emit");
+        let ir =
+            emit("fun f(c: char): int = c + 1 implement main0() = println!(f('a'))").expect("emit");
         assert!(ir.contains("sext i8"), "expected the char to widen:\n{ir}");
     }
 
@@ -5845,7 +7246,10 @@ mod tests {
         // distinct, so a `char` cannot stand in for an `int` where a
         // signature asks for one.
         let err = emit_err("fun g(n: int): int = n fun f(c: char): int = g(c)");
-        assert!(err.message().contains("char") || err.message().contains("i8"), "{err}");
+        assert!(
+            err.message().contains("char") || err.message().contains("i8"),
+            "{err}"
+        );
     }
 
     // --- the prelude's list -----------------------------------------
@@ -6011,16 +7415,24 @@ mod tests {
              implement main0() = let val a = i() val b = s() in println!(1) end"
         ))
         .expect("emit");
-        assert!(ir.contains("; datatype opt$int"), "no int instance in:\n{ir}");
-        assert!(ir.contains("; datatype opt$string"), "no string instance in:\n{ir}");
+        assert!(
+            ir.contains("; datatype opt$int"),
+            "no int instance in:\n{ir}"
+        );
+        assert!(
+            ir.contains("; datatype opt$string"),
+            "no string instance in:\n{ir}"
+        );
     }
 
     #[test]
     fn a_bare_constructor_is_resolved_from_the_expected_type() {
         // `None()` says nothing about which `opt` it builds; the
         // function's declared return type does.
-        let ir = emit(&format!("{OPT} fun none_int(): opt(int) = None() implement main0() = println!(1)"))
-            .expect("emit");
+        let ir = emit(&format!(
+            "{OPT} fun none_int(): opt(int) = None() implement main0() = println!(1)"
+        ))
+        .expect("emit");
         assert!(ir.contains("define ptr @none_int()"), "got:\n{ir}");
     }
 
@@ -6030,7 +7442,10 @@ mod tests {
             "{OPT} implement main0() = let val x: opt(int) = None() in println!(1) end"
         ))
         .expect("emit");
-        assert!(ir.contains("store i64 0, ptr"), "the tag must be stored:\n{ir}");
+        assert!(
+            ir.contains("store i64 0, ptr"),
+            "the tag must be stored:\n{ir}"
+        );
     }
 
     #[test]
@@ -6057,7 +7472,10 @@ mod tests {
         ))
         .expect("emit");
         assert!(ir.contains("define i64 @unwrap(ptr %o)"), "got:\n{ir}");
-        assert!(ir.contains("load i64, ptr"), "the field must load as an int:\n{ir}");
+        assert!(
+            ir.contains("load i64, ptr"),
+            "the field must load as an int:\n{ir}"
+        );
     }
 
     #[test]
@@ -6087,13 +7505,22 @@ mod tests {
             "{IDENT} implement main0() = println!(ident<int>(1), ident<string>(\"s\"))"
         ))
         .expect("emit");
-        assert!(ir.contains("define i64 @ident$int(i64 %x)"), "no int instance in:\n{ir}");
-        assert!(ir.contains("define ptr @ident$string(ptr %x)"), "no string instance in:\n{ir}");
+        assert!(
+            ir.contains("define i64 @ident$int(i64 %x)"),
+            "no int instance in:\n{ir}"
+        );
+        assert!(
+            ir.contains("define ptr @ident$string(ptr %x)"),
+            "no string instance in:\n{ir}"
+        );
     }
 
     #[test]
     fn a_call_names_the_instance_it_wants() {
-        let ir = emit(&format!("{IDENT} implement main0() = println!(ident<int>(1))")).expect("emit");
+        let ir = emit(&format!(
+            "{IDENT} implement main0() = println!(ident<int>(1))"
+        ))
+        .expect("emit");
         assert!(ir.contains("call i64 @ident$int(i64 1)"), "got:\n{ir}");
     }
 
@@ -6148,7 +7575,8 @@ mod tests {
 
     #[test]
     fn a_template_with_no_implementation_is_an_error() {
-        let err = emit_err("extern fun{a:t@ype} f (x: a): a implement main0() = println!(f<int>(1))");
+        let err =
+            emit_err("extern fun{a:t@ype} f (x: a): a implement main0() = println!(f<int>(1))");
         assert!(err.message().contains("f"), "{err}");
     }
 
@@ -6179,7 +7607,8 @@ mod tests {
 
     #[test]
     fn an_implement_may_still_annotate_its_parameters() {
-        let ir = emit("extern fun twice (x: int): int implement twice (x: int): int = x + x").expect("emit");
+        let ir = emit("extern fun twice (x: int): int implement twice (x: int): int = x + x")
+            .expect("emit");
         assert!(ir.contains("define i64 @twice(i64 %x)"), "got:\n{ir}");
     }
 
@@ -6207,7 +7636,8 @@ mod tests {
     fn the_standard_streams_are_loaded_from_libc_globals() {
         // `stdin`/`stdout`/`stderr` are C *variables* holding streams, so
         // reaching one costs a load.
-        let ir = emit("implement main0() = let val f = stdin_ref in fileref_close(f) end").expect("emit");
+        let ir = emit("implement main0() = let val f = stdin_ref in fileref_close(f) end")
+            .expect("emit");
         assert!(ir.contains("@stdin = external global ptr"), "got:\n{ir}");
         assert!(ir.contains("load ptr, ptr @stdin"), "got:\n{ir}");
     }
@@ -6243,7 +7673,10 @@ mod tests {
         )
         .expect("emit");
         assert!(ir.contains("call ptr @fopen(ptr"), "got:\n{ir}");
-        assert!(ir.contains("icmp eq ptr"), "a failed open must be detected:\n{ir}");
+        assert!(
+            ir.contains("icmp eq ptr"),
+            "a failed open must be detected:\n{ir}"
+        );
     }
 
     #[test]
@@ -6258,13 +7691,19 @@ mod tests {
     #[test]
     fn fprint_writes_to_the_stream_it_is_given() {
         let ir = emit("fun f(out: FILEref): void = fprintln!(out, \"x = \", 1)").expect("emit");
-        assert!(ir.contains("call i32 (ptr, ptr, ...) @fprintf(ptr %out"), "got:\n{ir}");
+        assert!(
+            ir.contains("call i32 (ptr, ptr, ...) @fprintf(ptr %out"),
+            "got:\n{ir}"
+        );
     }
 
     #[test]
     fn printing_a_fileref_is_an_error() {
         let err = emit_err("fun f(out: FILEref): void = println!(out)");
-        assert!(err.message().contains("FILEref") || err.message().contains("file"), "{err}");
+        assert!(
+            err.message().contains("FILEref") || err.message().contains("file"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -6275,8 +7714,14 @@ mod tests {
             "implement main0() = let var n: int val ok = fileref_load<int>(stdin_ref, n) in println!(n) end",
         )
         .expect("emit");
-        assert!(ir.contains("call i32 (ptr, ptr, ...) @fscanf(ptr"), "got:\n{ir}");
-        assert!(ir.contains("ptr %n.cell"), "the cell's address must be passed:\n{ir}");
+        assert!(
+            ir.contains("call i32 (ptr, ptr, ...) @fscanf(ptr"),
+            "got:\n{ir}"
+        );
+        assert!(
+            ir.contains("ptr %n.cell"),
+            "the cell's address must be passed:\n{ir}"
+        );
     }
 
     #[test]
@@ -6286,7 +7731,10 @@ mod tests {
             "implement main0() = let var n: int val ok = fileref_load<int>(stdin_ref, n) in println!(ok) end",
         )
         .expect("emit");
-        assert!(ir.contains("icmp eq i32"), "the count must be compared:\n{ir}");
+        assert!(
+            ir.contains("icmp eq i32"),
+            "the count must be compared:\n{ir}"
+        );
     }
 
     #[test]
@@ -6304,7 +7752,10 @@ mod tests {
 
     #[test]
     fn a_nullary_constructor_is_a_tagged_allocation() {
-        let ir = emit(&format!("{COLOR} implement main0() = let val c = Red() in println!(1) end")).expect("emit");
+        let ir = emit(&format!(
+            "{COLOR} implement main0() = let val c = Red() in println!(1) end"
+        ))
+        .expect("emit");
         // Each constructor of a datatype gets a distinct tag, stored in
         // the first word of the value.
         assert!(ir.contains("store i64 0, ptr"), "no tag stored in:\n{ir}");
@@ -6312,14 +7763,26 @@ mod tests {
 
     #[test]
     fn constructors_are_numbered_in_declaration_order() {
-        let ir = emit(&format!("{COLOR} implement main0() = let val c = Blue() in println!(1) end")).expect("emit");
-        assert!(ir.contains("store i64 2, ptr"), "Blue should carry tag 2:\n{ir}");
+        let ir = emit(&format!(
+            "{COLOR} implement main0() = let val c = Blue() in println!(1) end"
+        ))
+        .expect("emit");
+        assert!(
+            ir.contains("store i64 2, ptr"),
+            "Blue should carry tag 2:\n{ir}"
+        );
     }
 
     #[test]
     fn a_constructor_with_fields_stores_them_after_the_tag() {
-        let ir = emit(&format!("{LIST} implement main0() = let val xs = Cons(7, Nil()) in println!(1) end")).expect("emit");
-        assert!(ir.contains("store i64 7, ptr"), "the field must be stored:\n{ir}");
+        let ir = emit(&format!(
+            "{LIST} implement main0() = let val xs = Cons(7, Nil()) in println!(1) end"
+        ))
+        .expect("emit");
+        assert!(
+            ir.contains("store i64 7, ptr"),
+            "the field must be stored:\n{ir}"
+        );
     }
 
     #[test]
@@ -6340,7 +7803,10 @@ mod tests {
              implement main0() = println!(head(Cons(9, Nil())))"
         ))
         .expect("emit");
-        assert!(ir.contains("getelementptr"), "fields are reached by address:\n{ir}");
+        assert!(
+            ir.contains("getelementptr"),
+            "fields are reached by address:\n{ir}"
+        );
     }
 
     #[test]
@@ -6355,7 +7821,9 @@ mod tests {
 
     #[test]
     fn an_unknown_constructor_is_an_error() {
-        let err = emit_err(&format!("{COLOR} fun f(c: color): int = case c of | Purple() => 0"));
+        let err = emit_err(&format!(
+            "{COLOR} fun f(c: color): int = case c of | Purple() => 0"
+        ));
         assert!(err.message().contains("Purple"), "{err}");
     }
 
@@ -6364,12 +7832,17 @@ mod tests {
         let err = emit_err(&format!(
             "{COLOR} {LIST} fun f(c: color): int = case c of | Nil() => 0 | _ => 1"
         ));
-        assert!(err.message().contains("intlist") || err.message().contains("color"), "{err}");
+        assert!(
+            err.message().contains("intlist") || err.message().contains("color"),
+            "{err}"
+        );
     }
 
     #[test]
     fn a_constructor_checks_its_argument_count() {
-        let err = emit_err(&format!("{LIST} implement main0() = let val xs = Cons(1) in println!(1) end"));
+        let err = emit_err(&format!(
+            "{LIST} implement main0() = let val xs = Cons(1) in println!(1) end"
+        ));
         assert!(err.message().contains("Cons"), "{err}");
     }
 
@@ -6386,8 +7859,14 @@ mod tests {
         // The common case allocates a few hundred bytes and should not
         // touch the allocator at all: a bump pointer into a static
         // buffer is both faster and impossible to leak.
-        let ir = emit(&format!("{COLOR} implement main0() = let val c = Red() in println!(1) end")).expect("emit");
-        assert!(ir.contains("@.heap = internal global"), "expected a static arena:\n{ir}");
+        let ir = emit(&format!(
+            "{COLOR} implement main0() = let val c = Red() in println!(1) end"
+        ))
+        .expect("emit");
+        assert!(
+            ir.contains("@.heap = internal global"),
+            "expected a static arena:\n{ir}"
+        );
     }
 
     #[test]
@@ -6397,9 +7876,18 @@ mod tests {
         // walks a long way.  So the arena grows rather than giving up —
         // and hands every chunk back before `main` returns, which is
         // what keeps "nothing leaks" true rather than merely intended.
-        let ir = emit(&format!("{COLOR} implement main0() = let val c = Red() in println!(1) end")).expect("emit");
-        assert!(ir.contains("call ptr @malloc"), "the arena cannot grow:\n{ir}");
-        assert!(ir.contains("call void @free"), "the growth is never returned:\n{ir}");
+        let ir = emit(&format!(
+            "{COLOR} implement main0() = let val c = Red() in println!(1) end"
+        ))
+        .expect("emit");
+        assert!(
+            ir.contains("call ptr @malloc"),
+            "the arena cannot grow:\n{ir}"
+        );
+        assert!(
+            ir.contains("call void @free"),
+            "the growth is never returned:\n{ir}"
+        );
     }
 
     // --- `exit`, and the type of an expression that never returns ---
@@ -6410,7 +7898,10 @@ mod tests {
         // The status narrows from the subset's i64 to the i32 C wants.
         assert!(ir.contains("trunc i64 1 to i32"), "got:\n{ir}");
         assert!(ir.contains("call void @exit(i32 %"), "got:\n{ir}");
-        assert!(ir.contains("unreachable"), "control must not fall through:\n{ir}");
+        assert!(
+            ir.contains("unreachable"),
+            "control must not fall through:\n{ir}"
+        );
     }
 
     #[test]
@@ -6427,7 +7918,11 @@ mod tests {
         // merge block, so naming it in the phi would be invalid IR.
         let ir = emit("fun f(n: int): int = if n > 0 then n else exit(1)").expect("emit");
         let phi = ir.lines().find(|l| l.contains("phi")).unwrap_or("");
-        assert_eq!(phi.matches('[').count(), 1, "expected one incoming edge, got: {phi}");
+        assert_eq!(
+            phi.matches('[').count(),
+            1,
+            "expected one incoming edge, got: {phi}"
+        );
     }
 
     #[test]
@@ -6457,9 +7952,18 @@ mod tests {
         // `main` is the "with exit code" entry: its `int` result is the
         // status the process exits with, narrowed to C's `int`.
         let ir = emit("implement main(argc, argv): int = 0").expect("emit");
-        assert!(ir.contains("define i32 @main(i32 %argc.raw, ptr %argv)"), "got:\n{ir}");
-        assert!(ir.contains("trunc i64 0 to i32"), "the code must narrow to C's int:\n{ir}");
-        assert!(!ir.contains("ret i32 0\n}"), "the exit code must not be hardcoded:\n{ir}");
+        assert!(
+            ir.contains("define i32 @main(i32 %argc.raw, ptr %argv)"),
+            "got:\n{ir}"
+        );
+        assert!(
+            ir.contains("trunc i64 0 to i32"),
+            "the code must narrow to C's int:\n{ir}"
+        );
+        assert!(
+            !ir.contains("ret i32 0\n}"),
+            "the exit code must not be hardcoded:\n{ir}"
+        );
     }
 
     #[test]
@@ -6508,14 +8012,19 @@ mod tests {
 
     #[test]
     fn g0string2int_becomes_a_call_to_atoi() {
-        let ir = emit("implement main0(argc, argv) = println!(g0string2int(argv[1]))").expect("emit");
+        let ir =
+            emit("implement main0(argc, argv) = println!(g0string2int(argv[1]))").expect("emit");
         assert!(ir.contains("call i64 @atoi(ptr"), "got:\n{ir}");
-        assert!(ir.contains("declare i64 @atoi(ptr)"), "atoi must be declared:\n{ir}");
+        assert!(
+            ir.contains("declare i64 @atoi(ptr)"),
+            "atoi must be declared:\n{ir}"
+        );
     }
 
     #[test]
     fn the_int_suffixed_spelling_is_the_same_shim() {
-        let ir = emit("implement main0(argc, argv) = println!(g0string2int_int(argv[1]))").expect("emit");
+        let ir = emit("implement main0(argc, argv) = println!(g0string2int_int(argv[1]))")
+            .expect("emit");
         assert!(ir.contains("call i64 @atoi(ptr"), "got:\n{ir}");
     }
 
@@ -6524,10 +8033,12 @@ mod tests {
         // ATS strings are NUL-terminated bytes somebody else owns, so
         // joining two means asking the arena for room and copying both
         // in.  There is nowhere else for the result to live.
-        let ir = emit(r#"implement main0() = println!(string_append("ab", "cd"))"#)
-            .expect("emit");
+        let ir = emit(r#"implement main0() = println!(string_append("ab", "cd"))"#).expect("emit");
         assert!(ir.contains("@memcpy"), "nothing was copied:\n{ir}");
-        assert!(ir.contains("@.ats_alloc"), "the result has nowhere to live:\n{ir}");
+        assert!(
+            ir.contains("@.ats_alloc"),
+            "the result has nowhere to live:\n{ir}"
+        );
     }
 
     #[test]
@@ -6551,8 +8062,12 @@ mod tests {
         // `g1ofg0` moves a value between ATS's two integer *sorts*.  The
         // sorts differ only in what the type checker knows about them, so
         // at the level of machine values the conversion is a no-op.
-        let ir = emit("implement main0() = let val n = g1ofg0(41) in println!(n + 1) end").expect("emit");
-        assert!(!ir.contains("call i64 @g1ofg0"), "the shim must vanish, not be called:\n{ir}");
+        let ir = emit("implement main0() = let val n = g1ofg0(41) in println!(n + 1) end")
+            .expect("emit");
+        assert!(
+            !ir.contains("call i64 @g1ofg0"),
+            "the shim must vanish, not be called:\n{ir}"
+        );
         assert!(ir.contains("add i64 41, 1"), "got:\n{ir}");
     }
 
@@ -6569,14 +8084,20 @@ mod tests {
     #[test]
     fn main_with_arguments_takes_the_c_entry_signature() {
         let ir = emit("implement main0(argc, argv) = println!(argc)").expect("emit");
-        assert!(ir.contains("define i32 @main(i32 %argc.raw, ptr %argv)"), "got:\n{ir}");
+        assert!(
+            ir.contains("define i32 @main(i32 %argc.raw, ptr %argv)"),
+            "got:\n{ir}"
+        );
     }
 
     #[test]
     fn argc_widens_to_the_subsets_integer_width() {
         // C hands over an `i32`; every `int` here is an `i64`.
         let ir = emit("implement main0(argc, argv) = println!(argc)").expect("emit");
-        assert!(ir.contains("%argc = sext i32 %argc.raw to i64"), "got:\n{ir}");
+        assert!(
+            ir.contains("%argc = sext i32 %argc.raw to i64"),
+            "got:\n{ir}"
+        );
     }
 
     #[test]
@@ -6588,7 +8109,10 @@ mod tests {
     #[test]
     fn indexing_argv_loads_a_string() {
         let ir = emit("implement main0(argc, argv) = println!(argv[1])").expect("emit");
-        assert!(ir.contains("getelementptr ptr, ptr %argv"), "no address computation in:\n{ir}");
+        assert!(
+            ir.contains("getelementptr ptr, ptr %argv"),
+            "no address computation in:\n{ir}"
+        );
         assert!(ir.contains("load ptr, ptr"), "no load in:\n{ir}");
     }
 
@@ -6606,7 +8130,10 @@ mod tests {
         // so it costs exactly one alloca and one store.
         let ir = emit("implement main0() = let var x: int = 7 in println!(x) end").expect("emit");
         assert!(ir.contains("= alloca i64"), "no alloca in:\n{ir}");
-        assert!(ir.contains("store i64 7, ptr %x.cell"), "no initializing store in:\n{ir}");
+        assert!(
+            ir.contains("store i64 7, ptr %x.cell"),
+            "no initializing store in:\n{ir}"
+        );
     }
 
     #[test]
@@ -6630,7 +8157,10 @@ mod tests {
             "implement{x}\nmyforeach (xs: list0(x)): int = 0\nimplement main0() = println!(1)",
         )
         .expect("emit");
-        assert!(!ir.contains("@myforeach"), "an uninstantiated template was emitted:\n{ir}");
+        assert!(
+            !ir.contains("@myforeach"),
+            "an uninstantiated template was emitted:\n{ir}"
+        );
     }
 
     #[test]
@@ -6639,7 +8169,10 @@ mod tests {
         // raise is to say what happened and stop.
         let ir = emit("implement main0() = $raise StreamSubscriptExn").expect("emit");
         assert!(ir.contains("StreamSubscriptExn"), "the name is lost:\n{ir}");
-        assert!(ir.contains("call void @exit"), "the program carries on:\n{ir}");
+        assert!(
+            ir.contains("call void @exit"),
+            "the program carries on:\n{ir}"
+        );
     }
 
     #[test]
@@ -6706,7 +8239,10 @@ mod tests {
              implement main0() = show<int> (1)",
         )
         .expect("emit");
-        assert!(ir.contains("define void @show"), "the instance was not built:\n{ir}");
+        assert!(
+            ir.contains("define void @show"),
+            "the instance was not built:\n{ir}"
+        );
     }
 
     #[test]
@@ -6745,12 +8281,14 @@ mod tests {
         // compiler.  Declaring it must therefore not stop the compiler
         // answering it, or the program links against a symbol nobody
         // ever defined.
-        let ir = emit(
-            "extern fun srand48_with_time (): void\nimplement main0() = srand48_with_time()",
-        )
-        .expect("emit");
+        let ir =
+            emit("extern fun srand48_with_time (): void\nimplement main0() = srand48_with_time()")
+                .expect("emit");
         assert!(ir.contains("@srand48("), "the shim did not answer:\n{ir}");
-        assert!(!ir.contains("call void @srand48_with_time"), "called a symbol nobody defines:\n{ir}");
+        assert!(
+            !ir.contains("call void @srand48_with_time"),
+            "called a symbol nobody defines:\n{ir}"
+        );
     }
 
     #[test]
@@ -6762,7 +8300,10 @@ mod tests {
             "extern fun my_c_helper (x: int): int\nimplement main0() = println!(my_c_helper(1))",
         )
         .expect("emit");
-        assert!(ir.contains("declare i64 @my_c_helper(i64)"), "no C declaration:\n{ir}");
+        assert!(
+            ir.contains("declare i64 @my_c_helper(i64)"),
+            "no C declaration:\n{ir}"
+        );
     }
 
     #[test]
@@ -6776,7 +8317,10 @@ mod tests {
              implement main0() = let val p = malloc_gc(8) in println!(take(!p, 8)) end",
         )
         .expect("emit");
-        assert!(ir.contains("define i64 @take(ptr %buf, i64 %n)"), "got:\n{ir}");
+        assert!(
+            ir.contains("define i64 @take(ptr %buf, i64 %n)"),
+            "got:\n{ir}"
+        );
     }
 
     #[test]
@@ -6807,7 +8351,10 @@ mod tests {
              implement main0() = let var b: box = Box(1, _) val () = fill(b) in println!(1) end",
         )
         .expect("emit");
-        assert!(ir.contains("define void @fill(ptr %b)"), "not by reference:\n{ir}");
+        assert!(
+            ir.contains("define void @fill(ptr %b)"),
+            "not by reference:\n{ir}"
+        );
     }
 
     #[test]
@@ -6821,7 +8368,10 @@ mod tests {
              implement main0() = let val b: box = Box(1, _) in println!(1) end",
         )
         .expect("emit");
-        assert!(ir.contains("store ptr null, ptr %t."), "the hole is not defined:\n{ir}");
+        assert!(
+            ir.contains("store ptr null, ptr %t."),
+            "the hole is not defined:\n{ir}"
+        );
     }
 
     #[test]
@@ -6835,8 +8385,14 @@ mod tests {
              implement main0() = let var x: int = 0 val () = setit(x) in println!(x) end",
         )
         .expect("emit");
-        assert!(ir.contains("define void @setit(ptr %r)"), "not by reference:\n{ir}");
-        assert!(ir.contains("call void @setit(ptr %x.cell)"), "the cell was not passed:\n{ir}");
+        assert!(
+            ir.contains("define void @setit(ptr %r)"),
+            "not by reference:\n{ir}"
+        );
+        assert!(
+            ir.contains("call void @setit(ptr %x.cell)"),
+            "the cell was not passed:\n{ir}"
+        );
     }
 
     #[test]
@@ -6846,14 +8402,15 @@ mod tests {
         // adding a level of indirection, so nothing is added.
         let ir = emit("fun peek (r: &int): int = r + 1\nimplement main0() = println!(peek(1))")
             .expect("emit");
-        assert!(ir.contains("define i64 @peek(i64 %r)"), "needless indirection:\n{ir}");
+        assert!(
+            ir.contains("define i64 @peek(i64 %r)"),
+            "needless indirection:\n{ir}"
+        );
     }
 
     #[test]
     fn a_by_reference_argument_must_be_something_with_an_address() {
-        let err = emit_err(
-            "fun setit (r: &int): void = r := 7\nimplement main0() = setit(1)",
-        );
+        let err = emit_err("fun setit (r: &int): void = r := 7\nimplement main0() = setit(1)");
         assert!(err.message().contains("var"), "{err}");
     }
 
@@ -6868,8 +8425,14 @@ mod tests {
              implement main0() = let val b = Box(1) val-@Box(n) = b in (n := 2; println!(n)) end",
         )
         .expect("emit");
-        assert!(!ir.contains("%n.cell = alloca"), "the field was copied:\n{ir}");
-        assert!(ir.contains("store i64 2, ptr %t."), "no write into the value:\n{ir}");
+        assert!(
+            !ir.contains("%n.cell = alloca"),
+            "the field was copied:\n{ir}"
+        );
+        assert!(
+            ir.contains("store i64 2, ptr %t."),
+            "no write into the value:\n{ir}"
+        );
     }
 
     // --- records --------------------------------------------------
@@ -6911,7 +8474,10 @@ mod tests {
             "implement main0() = let val p: '{ x= int, y= int } = '{ x= 1, y= 2 } in println!(1) end",
         )
         .expect("emit");
-        assert!(ir.contains("call ptr @.ats_alloc(i64 16)"), "wrong width:\n{ir}");
+        assert!(
+            ir.contains("call ptr @.ats_alloc(i64 16)"),
+            "wrong width:\n{ir}"
+        );
     }
 
     #[test]
@@ -6934,9 +8500,8 @@ mod tests {
 
     #[test]
     fn a_field_a_record_does_not_have_is_an_error() {
-        let err = emit_err(
-            "implement main0() = let val p: '{ x= int } = '{ x= 1 } in println!(p.z) end",
-        );
+        let err =
+            emit_err("implement main0() = let val p: '{ x= int } = '{ x= 1 } in println!(p.z) end");
         assert!(err.message().contains("z"), "{err}");
     }
 
@@ -6966,7 +8531,10 @@ mod tests {
             "{ONES}val first: stream(int) = ones()\nimplement main0() = ()"
         ))
         .expect("emit");
-        assert!(ir.contains("@first = internal global ptr null"), "got:\n{ir}");
+        assert!(
+            ir.contains("@first = internal global ptr null"),
+            "got:\n{ir}"
+        );
     }
 
     #[test]
@@ -6975,7 +8543,10 @@ mod tests {
         // The answer slot starts null, which is also what says the
         // stream has not been forced.
         let ir = emit(&format!("{ONES}implement main0() = ()")).expect("emit");
-        assert!(ir.contains("store ptr null, ptr"), "no empty answer slot in:\n{ir}");
+        assert!(
+            ir.contains("store ptr null, ptr"),
+            "no empty answer slot in:\n{ir}"
+        );
     }
 
     #[test]
@@ -7007,10 +8578,8 @@ mod tests {
 
     #[test]
     fn fprint_tupval_prints_a_tuple_in_ats_notation() {
-        let ir = emit(
-            "implement main0() = fprint_tupval2<int,char> (stdout_ref, @(0, 'a'))",
-        )
-        .expect("emit");
+        let ir = emit("implement main0() = fprint_tupval2<int,char> (stdout_ref, @(0, 'a'))")
+            .expect("emit");
         assert!(ir.contains("(%ld, %c)"), "wrong format in:\n{ir}");
     }
 
@@ -7036,22 +8605,26 @@ mod tests {
              implement main0() = each<int> (3)",
         )
         .expect("emit");
-        assert!(ir.contains("define void @each"), "the instance is missing:\n{ir}");
+        assert!(
+            ir.contains("define void @each"),
+            "the instance is missing:\n{ir}"
+        );
     }
 
     #[test]
     fn an_uninitialized_var_of_a_datatype_starts_from_null() {
-        let ir = emit(
-            "implement main0() = let var xs: list0(int) in xs := list0_nil() end",
-        )
-        .expect("emit");
+        let ir = emit("implement main0() = let var xs: list0(int) in xs := list0_nil() end")
+            .expect("emit");
         assert!(ir.contains("store ptr null, ptr %xs.cell"), "got:\n{ir}");
     }
 
     #[test]
     fn assignment_stores_into_the_cell() {
         let ir = emit("implement main0() = let var x: int = 1 in x := 9 end").expect("emit");
-        assert!(ir.contains("store i64 9, ptr %x.cell"), "no store in:\n{ir}");
+        assert!(
+            ir.contains("store i64 9, ptr %x.cell"),
+            "no store in:\n{ir}"
+        );
     }
 
     #[test]
@@ -7074,17 +8647,18 @@ mod tests {
 
     #[test]
     fn a_while_loop_emits_a_header_body_and_exit() {
-        let ir = emit(
-            "implement main0() = let var i: int = 0 in while (i < 3) i :=+ 1 end",
-        )
-        .expect("emit");
+        let ir = emit("implement main0() = let var i: int = 0 in while (i < 3) i :=+ 1 end")
+            .expect("emit");
         // The condition must live in its own block so it is re-evaluated
         // on every turn — a loop whose test sits in the entry block runs
         // at most once.
         assert!(ir.contains("while.cond."), "no condition block in:\n{ir}");
         assert!(ir.contains("while.body."), "no body block in:\n{ir}");
         assert!(ir.contains("while.end."), "no exit block in:\n{ir}");
-        assert!(ir.contains("br label %while.cond."), "the body must jump back:\n{ir}");
+        assert!(
+            ir.contains("br label %while.cond."),
+            "the body must jump back:\n{ir}"
+        );
     }
 
     #[test]
@@ -7125,8 +8699,14 @@ mod tests {
         // A function type is a closure type, so a parameter may hold one
         // and be applied like any other function.
         let ir = emit("fun apply(f: (int, int) -> int, x: int): int = f(x, x)").expect("emit");
-        assert!(ir.contains("define i64 @apply(ptr %f, i64 %x)"), "got:\n{ir}");
-        assert!(ir.contains("call i64 %"), "the call must be indirect:\n{ir}");
+        assert!(
+            ir.contains("define i64 @apply(ptr %f, i64 %x)"),
+            "got:\n{ir}"
+        );
+        assert!(
+            ir.contains("call i64 %"),
+            "the call must be indirect:\n{ir}"
+        );
     }
 
     #[test]
@@ -7159,7 +8739,10 @@ mod tests {
         assert!(ir.contains("; datatype intlist"), "got:\n{ir}");
         assert!(!ir.contains("define"), "got:\n{ir}");
         // With nothing allocating, the arena is not emitted either.
-        assert!(!ir.contains("@.heap"), "an unused arena should not appear:\n{ir}");
+        assert!(
+            !ir.contains("@.heap"),
+            "an unused arena should not appear:\n{ir}"
+        );
     }
 
     // --- end-to-end demo program ----------------------------------

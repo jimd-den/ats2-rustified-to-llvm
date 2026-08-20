@@ -55,33 +55,57 @@ pub struct CompileError {
 impl CompileError {
     /// A lexing failure at the given span.
     pub fn lex(span: Span, message: impl Into<String>) -> Self {
-        Self { kind: ErrorKind::Lex, span: Some(span), message: message.into() }
+        Self {
+            kind: ErrorKind::Lex,
+            span: Some(span),
+            message: message.into(),
+        }
     }
 
     /// A parsing failure at the given span.
     pub fn parse(span: Span, message: impl Into<String>) -> Self {
-        Self { kind: ErrorKind::Parse, span: Some(span), message: message.into() }
+        Self {
+            kind: ErrorKind::Parse,
+            span: Some(span),
+            message: message.into(),
+        }
     }
 
     /// A lowering failure.  Emission errors usually have no useful span
     /// (the problem is a shape of the whole AST), so they carry none.
     pub fn emit(message: impl Into<String>) -> Self {
-        Self { kind: ErrorKind::Emit, span: None, message: message.into() }
+        Self {
+            kind: ErrorKind::Emit,
+            span: None,
+            message: message.into(),
+        }
     }
 
     /// A constraint the program does not satisfy.
     pub fn check(message: impl Into<String>) -> Self {
-        Self { kind: ErrorKind::Check, span: None, message: message.into() }
+        Self {
+            kind: ErrorKind::Check,
+            span: None,
+            message: message.into(),
+        }
     }
 
     /// A resource the program did not account for.
     pub fn linear(message: impl Into<String>) -> Self {
-        Self { kind: ErrorKind::Linear, span: None, message: message.into() }
+        Self {
+            kind: ErrorKind::Linear,
+            span: None,
+            message: message.into(),
+        }
     }
 
     /// A failure reported by an external target.
     pub fn target(message: impl Into<String>) -> Self {
-        Self { kind: ErrorKind::Target, span: None, message: message.into() }
+        Self {
+            kind: ErrorKind::Target,
+            span: None,
+            message: message.into(),
+        }
     }
 
     /// The stage this error belongs to.
@@ -114,7 +138,11 @@ impl std::fmt::Display for CompileError {
             ErrorKind::Target => "target error",
         };
         match self.span {
-            Some(s) => write!(f, "{stage} at {}:{}: {}", s.start.line, s.start.column, self.message),
+            Some(s) => write!(
+                f,
+                "{stage} at {}:{}: {}",
+                s.start.line, s.start.column, self.message
+            ),
             None => write!(f, "{stage}: {}", self.message),
         }
     }

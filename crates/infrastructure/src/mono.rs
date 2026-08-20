@@ -34,7 +34,9 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use ats2_domain::ast::{Ctor, DatatypeDef, Def, Expr, FunDef, ImplementDef, LetBind, Param, Program, Ty};
+use ats2_domain::ast::{
+    Ctor, DatatypeDef, Def, Expr, FunDef, ImplementDef, LetBind, Param, Program, Ty,
+};
 use ats2_domain::errors::CompileError;
 
 /// Rewrite a program so that no template survives.
@@ -103,12 +105,15 @@ impl Monomorphiser {
                     // which is the implementation's own parameter — that
                     // is the generic case written the long way round, not
                     // an instance.
-                    let generic = im.instance.iter().all(
-                        |t| matches!(t, Ty::Name(n) if im.ty_params.contains(n)),
-                    );
-                    if !generic && !im.instance.is_empty() && im.instance.len() == t.ty_params.len() {
+                    let generic = im
+                        .instance
+                        .iter()
+                        .all(|t| matches!(t, Ty::Name(n) if im.ty_params.contains(n)));
+                    if !generic && !im.instance.is_empty() && im.instance.len() == t.ty_params.len()
+                    {
                         let key = instance_key(&im.instance);
-                        t.instances.insert(key, (im.params.clone(), im.body.clone()));
+                        t.instances
+                            .insert(key, (im.params.clone(), im.body.clone()));
                     } else {
                         t.body = Some(im.body.clone());
                     }
@@ -189,23 +194,44 @@ impl Monomorphiser {
                     let params = ctx.rewrite_params(&f.params, &HashMap::new());
                     let ret = ctx.rewrite_ty(&f.ret, &HashMap::new());
                     let body = ctx.rewrite(&f.body, &HashMap::new())?;
-                    defs.push(Def::Fun(FunDef { params, ret, body, ..f.clone() }));
+                    defs.push(Def::Fun(FunDef {
+                        params,
+                        ret,
+                        body,
+                        ..f.clone()
+                    }));
                 }
                 Def::Extern(d) => {
                     let params = ctx.rewrite_params(&d.params, &HashMap::new());
                     let ret = ctx.rewrite_ty(&d.ret, &HashMap::new());
-                    defs.push(Def::Extern(ats2_domain::ast::FunDecl { proof: false, universals: Vec::new(), existentials: Vec::new(), params, ret, ..d.clone() }));
+                    defs.push(Def::Extern(ats2_domain::ast::FunDecl {
+                        proof: false,
+                        universals: Vec::new(),
+                        existentials: Vec::new(),
+                        params,
+                        ret,
+                        ..d.clone()
+                    }));
                 }
                 Def::Implement(im) => {
                     let params = ctx.rewrite_params(&im.params, &HashMap::new());
                     let ret = im.ret.as_ref().map(|t| ctx.rewrite_ty(t, &HashMap::new()));
                     let body = ctx.rewrite(&im.body, &HashMap::new())?;
-                    defs.push(Def::Implement(ImplementDef { params, ret, body, ..im.clone() }));
+                    defs.push(Def::Implement(ImplementDef {
+                        params,
+                        ret,
+                        body,
+                        ..im.clone()
+                    }));
                 }
                 Def::Val(v) => {
                     let value = ctx.rewrite(&v.value, &HashMap::new())?;
                     let ty = v.ty.as_ref().map(|t| ctx.rewrite_ty(t, &HashMap::new()));
-                    defs.push(Def::Val(ats2_domain::ast::ValDef { ty, value, ..v.clone() }));
+                    defs.push(Def::Val(ats2_domain::ast::ValDef {
+                        ty,
+                        value,
+                        ..v.clone()
+                    }));
                 }
                 other => defs.push(other.clone()),
             }
@@ -287,15 +313,23 @@ impl MonoCtx {
             // A parameterized datatype named with no arguments at all
             // cannot be instantiated; leave it for the emitter to reject
             // with a type error that names it.
-            Ty::App(name, args) => Ty::App(name.clone(), args.iter().map(|a| self.rewrite_ty(a, subst)).collect()),
-            Ty::Tuple(items) => Ty::Tuple(items.iter().map(|i| self.rewrite_ty(i, subst)).collect()),
+            Ty::App(name, args) => Ty::App(
+                name.clone(),
+                args.iter().map(|a| self.rewrite_ty(a, subst)).collect(),
+            ),
+            Ty::Tuple(items) => {
+                Ty::Tuple(items.iter().map(|i| self.rewrite_ty(i, subst)).collect())
+            }
             Ty::Fun(ps, r) => Ty::Fun(
                 ps.iter().map(|p| self.rewrite_ty(p, subst)).collect(),
                 Box::new(self.rewrite_ty(r, subst)),
             ),
             Ty::Index(base, idx) => Ty::Index(Box::new(self.rewrite_ty(base, subst)), idx.clone()),
             Ty::Record(fields) => Ty::Record(
-                fields.iter().map(|(n, t)| (n.clone(), self.rewrite_ty(t, subst))).collect(),
+                fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), self.rewrite_ty(t, subst)))
+                    .collect(),
             ),
             Ty::Name(_) => ty,
         }
@@ -304,7 +338,11 @@ impl MonoCtx {
     fn rewrite_params(&mut self, params: &[Param], subst: &Subst) -> Vec<Param> {
         params
             .iter()
-            .map(|p| Param { borrowed: false, name: p.name.clone(), ty: self.rewrite_ty(&p.ty, subst) })
+            .map(|p| Param {
+                borrowed: false,
+                name: p.name.clone(),
+                ty: self.rewrite_ty(&p.ty, subst),
+            })
             .collect()
     }
 
@@ -325,16 +363,30 @@ impl MonoCtx {
     /// is what the choice depends on.
     fn instantiate_datatype(&mut self, name: &str, args: &[Ty]) -> Def {
         let d = self.datatypes[name].clone();
-        let subst: Subst = d.ty_params.iter().cloned().zip(args.iter().cloned()).collect();
+        let subst: Subst = d
+            .ty_params
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect();
         let ctors = d
             .ctors
             .iter()
             .map(|c| Ctor {
                 name: c.name.clone(),
-                fields: c.fields.iter().map(|f| self.rewrite_ty(f, &subst)).collect(),
+                fields: c
+                    .fields
+                    .iter()
+                    .map(|f| self.rewrite_ty(f, &subst))
+                    .collect(),
             })
             .collect();
-        Def::Datatype(DatatypeDef { linear: false, name: mangle(name, args), ty_params: vec![], ctors })
+        Def::Datatype(DatatypeDef {
+            linear: false,
+            name: mangle(name, args),
+            ty_params: vec![],
+            ctors,
+        })
     }
 
     /// Build one instance of a template.
@@ -361,7 +413,12 @@ impl MonoCtx {
                 args.len()
             )));
         }
-        let subst: Subst = t.ty_params.iter().cloned().zip(args.iter().cloned()).collect();
+        let subst: Subst = t
+            .ty_params
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect();
         // The declaration named the parameters' types; an instance
         // implementation names the parameters, and may be the only thing
         // that does.
@@ -390,6 +447,7 @@ impl MonoCtx {
             params,
             ret,
             body,
+            proof: false,
         }))
     }
 
@@ -421,7 +479,14 @@ impl MonoCtx {
     /// instantiation with the name of the instance it needs.
     fn rewrite(&mut self, expr: &Expr, subst: &Subst) -> Result<Expr, CompileError> {
         Ok(match expr {
-            Expr::Unit | Expr::Uninit | Expr::Wildcard | Expr::IntLit(_) | Expr::CharLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StrLit(_) => expr.clone(),
+            Expr::Unit
+            | Expr::Uninit
+            | Expr::Wildcard
+            | Expr::IntLit(_)
+            | Expr::CharLit(_)
+            | Expr::FloatLit(_)
+            | Expr::BoolLit(_)
+            | Expr::StrLit(_) => expr.clone(),
             Expr::StaticInst(inner, at) => {
                 Expr::StaticInst(Box::new(self.rewrite(inner, subst)?), at.clone())
             }
@@ -429,9 +494,10 @@ impl MonoCtx {
                 Box::new(self.rewrite(p, subst)?),
                 Box::new(self.rewrite(v, subst)?),
             ),
-            Expr::Ascribe(inner, ty) => {
-                Expr::Ascribe(Box::new(self.rewrite(inner, subst)?), self.rewrite_ty(ty, subst))
-            }
+            Expr::Ascribe(inner, ty) => Expr::Ascribe(
+                Box::new(self.rewrite(inner, subst)?),
+                self.rewrite_ty(ty, subst),
+            ),
             Expr::Var(name) => {
                 // A template mentioned with no instantiation cannot be
                 // resolved: say so, rather than emitting a call to a
@@ -456,8 +522,15 @@ impl MonoCtx {
                 }
             }
             Expr::UnaryNeg(e) => Expr::UnaryNeg(Box::new(self.rewrite(e, subst)?)),
-            Expr::BinOp(op, l, r) => Expr::BinOp(*op, Box::new(self.rewrite(l, subst)?), Box::new(self.rewrite(r, subst)?)),
-            Expr::Index(b, i) => Expr::Index(Box::new(self.rewrite(b, subst)?), Box::new(self.rewrite(i, subst)?)),
+            Expr::BinOp(op, l, r) => Expr::BinOp(
+                *op,
+                Box::new(self.rewrite(l, subst)?),
+                Box::new(self.rewrite(r, subst)?),
+            ),
+            Expr::Index(b, i) => Expr::Index(
+                Box::new(self.rewrite(b, subst)?),
+                Box::new(self.rewrite(i, subst)?),
+            ),
             Expr::Proj(b, i) => Expr::Proj(Box::new(self.rewrite(b, subst)?), *i),
             Expr::Field(b, n) => Expr::Field(Box::new(self.rewrite(b, subst)?), n.clone()),
             Expr::RecordLit(fields) => Expr::RecordLit(
@@ -467,9 +540,15 @@ impl MonoCtx {
                     .collect::<Result<Vec<_>, CompileError>>()?,
             ),
             Expr::Deref(b) => Expr::Deref(Box::new(self.rewrite(b, subst)?)),
-            Expr::Store(p, v) => Expr::Store(Box::new(self.rewrite(p, subst)?), Box::new(self.rewrite(v, subst)?)),
+            Expr::Store(p, v) => Expr::Store(
+                Box::new(self.rewrite(p, subst)?),
+                Box::new(self.rewrite(v, subst)?),
+            ),
             Expr::Assign(n, v) => Expr::Assign(n.clone(), Box::new(self.rewrite(v, subst)?)),
-            Expr::While(c, b) => Expr::While(Box::new(self.rewrite(c, subst)?), Box::new(self.rewrite(b, subst)?)),
+            Expr::While(c, b) => Expr::While(
+                Box::new(self.rewrite(c, subst)?),
+                Box::new(self.rewrite(b, subst)?),
+            ),
             Expr::For(i, c, st, b) => Expr::For(
                 Box::new(self.rewrite(i, subst)?),
                 Box::new(self.rewrite(c, subst)?),
@@ -478,14 +557,21 @@ impl MonoCtx {
             ),
             Expr::Call(callee, args) => Expr::Call(
                 Box::new(self.rewrite(callee, subst)?),
-                args.iter().map(|a| self.rewrite(a, subst)).collect::<Result<_, _>>()?,
+                args.iter()
+                    .map(|a| self.rewrite(a, subst))
+                    .collect::<Result<_, _>>()?,
             ),
             Expr::MacroCall(name, args) => Expr::MacroCall(
                 name.clone(),
-                args.iter().map(|a| self.rewrite(a, subst)).collect::<Result<_, _>>()?,
+                args.iter()
+                    .map(|a| self.rewrite(a, subst))
+                    .collect::<Result<_, _>>()?,
             ),
             Expr::TupleLit(items) => Expr::TupleLit(
-                items.iter().map(|a| self.rewrite(a, subst)).collect::<Result<_, _>>()?,
+                items
+                    .iter()
+                    .map(|a| self.rewrite(a, subst))
+                    .collect::<Result<_, _>>()?,
             ),
             Expr::IfThenElse(c, t, e) => Expr::IfThenElse(
                 Box::new(self.rewrite(c, subst)?),
@@ -534,9 +620,10 @@ impl MonoCtx {
 /// Replace a template's type parameters wherever they appear in a type.
 fn substitute(ty: &Ty, subst: &Subst) -> Ty {
     match ty {
-        Ty::Proof(p, v) => {
-            Ty::Proof(Box::new(substitute(p, subst)), Box::new(substitute(v, subst)))
-        }
+        Ty::Proof(p, v) => Ty::Proof(
+            Box::new(substitute(p, subst)),
+            Box::new(substitute(v, subst)),
+        ),
         Ty::Name(n) => subst.get(n).cloned().unwrap_or_else(|| ty.clone()),
         Ty::App(n, args) => {
             let args = args.iter().map(|a| substitute(a, subst)).collect();
@@ -553,9 +640,12 @@ fn substitute(ty: &Ty, subst: &Subst) -> Ty {
         ),
         Ty::Tuple(items) => Ty::Tuple(items.iter().map(|i| substitute(i, subst)).collect()),
         Ty::Index(base, idx) => Ty::Index(Box::new(substitute(base, subst)), idx.clone()),
-        Ty::Record(fields) => {
-            Ty::Record(fields.iter().map(|(n, t)| (n.clone(), substitute(t, subst))).collect())
-        }
+        Ty::Record(fields) => Ty::Record(
+            fields
+                .iter()
+                .map(|(n, t)| (n.clone(), substitute(t, subst)))
+                .collect(),
+        ),
     }
 }
 
@@ -597,8 +687,10 @@ fn type_key(ty: &Ty) -> String {
         // part of the key: two records that differ only in them are two
         // types and must mangle to two names.
         Ty::Record(fields) => {
-            let inner: Vec<String> =
-                fields.iter().map(|(n, t)| format!("{n}_{}", type_key(t))).collect();
+            let inner: Vec<String> = fields
+                .iter()
+                .map(|(n, t)| format!("{n}_{}", type_key(t)))
+                .collect();
             format!("rec_{}", inner.join("_"))
         }
         Ty::Fun(ps, r) => {

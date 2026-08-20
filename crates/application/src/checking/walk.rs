@@ -35,8 +35,8 @@ use ats2_domain::statics::{Quant, SExp, Sort};
 use super::index_env::IndexEnv;
 use super::prop::{negate, relation};
 use super::signatures::{
-    claim_of, declared_for, entry_point_indices, is_singleton_indexed, strip_index, Arg, CallFacts,
-    CtorTable, SigTable, Signature, SELF,
+    Arg, CallFacts, CtorTable, SELF, SigTable, Signature, claim_of, declared_for,
+    entry_point_indices, is_singleton_indexed, strip_index,
 };
 use super::unify::Match;
 
@@ -81,8 +81,7 @@ pub fn obligations(program: &Program, ambient: &Program) -> Vec<Obligation> {
             Def::Implement(im) => {
                 // An implementation answers to the declaration it fills
                 // in, which is where the quantifiers were written.
-                let (universals, params, existentials, ret) =
-                    declared_for(sigs.get(&im.name), im);
+                let (universals, params, existentials, ret) = declared_for(sigs.get(&im.name), im);
                 walk.body(
                     &im.name,
                     &universals,
@@ -91,6 +90,8 @@ pub fn obligations(program: &Program, ambient: &Program) -> Vec<Obligation> {
                     &existentials,
                     &im.body,
                     IndexEnv::new(),
+                    // An `implement` fills in a function, never a proof.
+                    false,
                 );
             }
             Def::Val(val) => {
@@ -128,7 +129,8 @@ struct Walk<'a> {
 
 impl<'a> Walk<'a> {
     fn demand(&mut self, goal: SExp, origin: Origin, env: &IndexEnv) {
-        self.out.push(Obligation::new(env.hyps().to_vec(), goal, origin));
+        self.out
+            .push(Obligation::new(env.hyps().to_vec(), goal, origin));
     }
 
     /// Check one `fun`, starting from `enclosing` — the scope it was
@@ -149,6 +151,7 @@ impl<'a> Walk<'a> {
             &f.existentials,
             &f.body,
             enclosing,
+            f.proof,
         );
         self.metric = outer;
     }
@@ -168,6 +171,8 @@ impl<'a> Walk<'a> {
         existentials: &[Quant],
         body: &Expr,
         mut env: IndexEnv,
+        // Whether the body is a *derivation* rather than a computation.
+        proof: bool,
     ) {
         for q in universals {
             for (var, sort) in &q.vars {
@@ -195,7 +200,9 @@ impl<'a> Walk<'a> {
                     proposition: ret.proof().and_then(proposition_indices),
                     witnesses: witnesses_of(existentials),
                     hypotheses: existentials.iter().flat_map(Quant::hypotheses).collect(),
-                    origin: Origin::Return { function: name.to_string() },
+                    origin: Origin::Return {
+                        function: name.to_string(),
+                    },
                 };
                 self.check_against(body, &promise, &mut env);
             }
@@ -203,10 +210,50 @@ impl<'a> Walk<'a> {
             // to check — but the body still has to be walked, because
             // everything *inside* it makes claims of its own.
             None => {
-                self.expr(body, &mut env);
+                // Unless the body is a proof.  A proposition makes no
+                // claim about a *value* — a proof is not one — so
+                // `claim_of` has nothing to say about `FACT(0, 1)` and
+                // the walk would pass over the one thing a `prfun`
+                // asserts.  What it asserts is that the derivation
+                // establishes *these* indices, so that is what is
+                // demanded: term by term, the proof term's own indices
+                // against the ones the proposition was written with.
+                //
+                // Without this a `prfun` is a `praxi` that took longer
+                // to write, and every derivation is believed because it
+                // was offered.
+                if proof {
+                    self.derives(&ret, body, name, &mut env);
+                } else {
+                    self.expr(body, &mut env);
+                }
             }
         }
         self.function = outer;
+    }
+
+    /// A derivation, held against the proposition it claims to prove.
+    ///
+    /// The proof term is read for the indices it actually establishes
+    /// and each is demanded equal to the one the proposition was written
+    /// with.  A term whose indices are unknown demands nothing: the walk
+    /// reports the program's mistakes, not its own ignorance.
+    fn derives(&mut self, ret: &Ty, body: &Expr, name: &str, env: &mut IndexEnv) {
+        let promised = proposition_indices(ret).unwrap_or_default();
+        let supplied = self.proof_indices(body, env);
+        if promised.is_empty() || supplied.len() != promised.len() {
+            return;
+        }
+        let origin = Origin::Return {
+            function: name.to_string(),
+        };
+        for (p, a) in promised.iter().zip(&supplied) {
+            self.demand(
+                SExp::App("==".into(), vec![p.clone(), a.clone()]),
+                origin.clone(),
+                env,
+            );
+        }
     }
 
     /// Give a parameter the indices its type wrote, or a name of its own
@@ -267,8 +314,12 @@ impl<'a> Walk<'a> {
     ///
     /// Everything else has an index, and there the promise is settled.
     fn check_against(&mut self, e: &Expr, promise: &Promise, env: &mut IndexEnv) {
-        let (claim, witnesses, hypotheses, origin) =
-            (&promise.claim, &promise.witnesses, &promise.hypotheses, &promise.origin);
+        let (claim, witnesses, hypotheses, origin) = (
+            &promise.claim,
+            &promise.witnesses,
+            &promise.hypotheses,
+            &promise.origin,
+        );
         match e {
             // `(pf | v)` — the proof half is what determines the
             // existential the signature promised.  `[r:int] (P(n,r) |
@@ -350,7 +401,10 @@ impl<'a> Walk<'a> {
         }
         self.last_call = None;
         self.expr(e, env);
-        self.last_call.take().map(|f| f.result_indices).unwrap_or_default()
+        self.last_call
+            .take()
+            .map(|f| f.result_indices)
+            .unwrap_or_default()
     }
 
     /// One value against one claim.
@@ -388,7 +442,11 @@ impl<'a> Walk<'a> {
         for h in hypotheses {
             self.demand(h.substitute(&subst), origin.clone(), env);
         }
-        self.demand(about(&claim.substitute(&subst), &produced), origin.clone(), env);
+        self.demand(
+            about(&claim.substitute(&subst), &produced),
+            origin.clone(),
+            env,
+        );
     }
 
     /// The static term an expression's value has, recording on the way
@@ -436,7 +494,9 @@ impl<'a> Walk<'a> {
                             proposition: None,
                             witnesses: Vec::new(),
                             hypotheses: Vec::new(),
-                            origin: Origin::Return { function: self.function.clone() },
+                            origin: Origin::Return {
+                                function: self.function.clone(),
+                            },
                         };
                         self.check_against(body, &promise, &mut inner);
                     }
@@ -546,13 +606,20 @@ impl<'a> Walk<'a> {
                 if let Some(claim) = claim_of(ty) {
                     env.assume(about(&claim, &me));
                 }
-                self.last_call =
-                    Some(CallFacts { result_ty: Some(ty.clone()), ..CallFacts::default() });
+                self.last_call = Some(CallFacts {
+                    result_ty: Some(ty.clone()),
+                    ..CallFacts::default()
+                });
                 return Some(me);
             }
         }
         if is_assertion(&name) {
-            if let [Arg { value: Some(claim), .. }] = &supplied[..] {
+            if let [
+                Arg {
+                    value: Some(claim), ..
+                },
+            ] = &supplied[..]
+            {
                 env.assume(claim.clone());
             }
             return None;
@@ -561,13 +628,23 @@ impl<'a> Walk<'a> {
         // A template's arguments choose which code is built, not which
         // claim is made.  Only a callee that abstracts over no types can
         // have meant an index by them.
-        let statics = if declared.ty_params.is_empty() { statics } else { Vec::new() };
+        let statics = if declared.ty_params.is_empty() {
+            statics
+        } else {
+            Vec::new()
+        };
         // ...and where they *do* choose the code, they also choose what
         // it produces, which is the whole content of naming an instance.
         let sig = declared.at_instance(&ty_args);
         let facts = sig.at_call(&statics, &supplied, &env.fresh_supply());
         for goal in facts.demands.clone() {
-            self.demand(goal, Origin::Call { callee: name.clone() }, env);
+            self.demand(
+                goal,
+                Origin::Call {
+                    callee: name.clone(),
+                },
+                env,
+            );
         }
         if name == self.function {
             self.check_metric(&facts.metric, env);
@@ -646,7 +723,9 @@ impl<'a> Walk<'a> {
         if self.metric.is_empty() || at_call.len() != self.metric.len() {
             return;
         }
-        let origin = Origin::Metric { function: self.function.clone() };
+        let origin = Origin::Metric {
+            function: self.function.clone(),
+        };
         let entry = self.metric.clone();
         for component in &entry {
             self.demand(
@@ -685,9 +764,17 @@ impl<'a> Walk<'a> {
             }
         };
         let index = self.expr(at, env)?;
-        let (Some(size), Expr::Var(name)) = (size, subject) else { return None };
-        let origin = Origin::Bound { subject: name.clone() };
-        self.demand(SExp::App(">=".into(), vec![index.clone(), SExp::IntLit(0)]), origin.clone(), env);
+        let (Some(size), Expr::Var(name)) = (size, subject) else {
+            return None;
+        };
+        let origin = Origin::Bound {
+            subject: name.clone(),
+        };
+        self.demand(
+            SExp::App(">=".into(), vec![index.clone(), SExp::IntLit(0)]),
+            origin.clone(),
+            env,
+        );
         self.demand(SExp::App("<".into(), vec![index, size]), origin, env);
         None
     }
@@ -788,7 +875,10 @@ impl<'a> Walk<'a> {
                 env.bind(name, witness.clone());
                 env.assume_all(sort.refinement(name));
                 // The name and the witness are the same number.
-                env.assume(SExp::App("==".into(), vec![SExp::Var(name.clone()), witness.clone()]));
+                env.assume(SExp::App(
+                    "==".into(),
+                    vec![SExp::Var(name.clone()), witness.clone()],
+                ));
             }
         }
         // A proof is indexed by every number its proposition is about,
@@ -951,7 +1041,10 @@ fn is_unsafe_cast(name: &str) -> bool {
 /// program checks at run time what the checker could not establish, and
 /// everything after the check may rely on it.
 fn is_assertion(name: &str) -> bool {
-    matches!(name, "assertexn" | "assertloc" | "assert" | "assert_errmsg" | "assert_bool")
+    matches!(
+        name,
+        "assertexn" | "assertloc" | "assert" | "assert_errmsg" | "assert_bool"
+    )
 }
 
 /// The number a `#define` names, when it names one.
@@ -1014,17 +1107,36 @@ fn collect_assigned(e: &Expr, out: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ats2_domain::ast::{BinOp, Ctor, DatatypeDef, Def, FunDef, ImplementDef, LetBind, Param, Pattern, Program};
+    use ats2_domain::ast::{
+        BinOp, Ctor, DatatypeDef, Def, FunDef, ImplementDef, LetBind, Param, Pattern, Program,
+    };
     use ats2_domain::obligation::Obligation;
     use ats2_domain::statics::{Quant, Sort};
 
-    fn v(n: &str) -> SExp { SExp::Var(n.into()) }
-    fn i(n: i64) -> SExp { SExp::IntLit(n) }
-    fn app(op: &str, a: SExp, b: SExp) -> SExp { SExp::App(op.into(), vec![a, b]) }
-    fn int_of(idx: SExp) -> Ty { Ty::Index(Box::new(Ty::Name("int".into())), vec![idx]) }
-    fn var(n: &str) -> Expr { Expr::Var(n.into()) }
-    fn call(f: &str, args: Vec<Expr>) -> Expr { Expr::Call(Box::new(var(f)), args) }
-    fn nat() -> Quant { Quant { vars: vec![("n".into(), Sort::Nat)], guard: None } }
+    fn v(n: &str) -> SExp {
+        SExp::Var(n.into())
+    }
+    fn i(n: i64) -> SExp {
+        SExp::IntLit(n)
+    }
+    fn app(op: &str, a: SExp, b: SExp) -> SExp {
+        SExp::App(op.into(), vec![a, b])
+    }
+    fn int_of(idx: SExp) -> Ty {
+        Ty::Index(Box::new(Ty::Name("int".into())), vec![idx])
+    }
+    fn var(n: &str) -> Expr {
+        Expr::Var(n.into())
+    }
+    fn call(f: &str, args: Vec<Expr>) -> Expr {
+        Expr::Call(Box::new(var(f)), args)
+    }
+    fn nat() -> Quant {
+        Quant {
+            vars: vec![("n".into(), Sort::Nat)],
+            guard: None,
+        }
+    }
 
     /// `fun f {n:nat} (x: int n): <ret> = <body>`
     fn fun(name: &str, quants: Vec<Quant>, params: Vec<Param>, ret: Ty, body: Expr) -> Def {
@@ -1037,15 +1149,28 @@ mod tests {
             params,
             ret,
             body,
+            proof: false,
         })
     }
 
-    fn p(name: &str, ty: Ty) -> Param { Param { name: name.into(), ty, borrowed: false } }
+    fn p(name: &str, ty: Ty) -> Param {
+        Param {
+            name: name.into(),
+            ty,
+            borrowed: false,
+        }
+    }
 
     /// A `nat`-demanding function, and a `main0` whose body is `body`.
     fn with_main(body: Expr) -> Program {
         Program::new(vec![
-            fun("needs_nat", vec![nat()], vec![p("x", int_of(v("n")))], Ty::Name("int".into()), Expr::IntLit(0)),
+            fun(
+                "needs_nat",
+                vec![nat()],
+                vec![p("x", int_of(v("n")))],
+                Ty::Name("int".into()),
+                Expr::IntLit(0),
+            ),
             Def::Implement(ImplementDef {
                 ty_params: vec![],
                 instance: vec![],
@@ -1058,7 +1183,10 @@ mod tests {
     }
 
     fn goals(program: &Program) -> Vec<String> {
-        obligations(program, &Program::new(vec![])).iter().map(|o| o.goal.to_string()).collect()
+        obligations(program, &Program::new(vec![]))
+            .iter()
+            .map(|o| o.goal.to_string())
+            .collect()
     }
 
     /// The hypotheses in force at the first obligation mentioning `needle`.
@@ -1072,8 +1200,15 @@ mod tests {
 
     #[test]
     fn a_call_in_main_owes_the_callees_demand() {
-        let program = with_main(call("needs_nat", vec![Expr::UnaryNeg(Box::new(Expr::IntLit(1)))]));
-        assert!(goals(&program).contains(&"~1 >= 0".to_string()), "{:?}", goals(&program));
+        let program = with_main(call(
+            "needs_nat",
+            vec![Expr::UnaryNeg(Box::new(Expr::IntLit(1)))],
+        ));
+        assert!(
+            goals(&program).contains(&"~1 >= 0".to_string()),
+            "{:?}",
+            goals(&program)
+        );
     }
 
     #[test]
@@ -1081,9 +1216,20 @@ mod tests {
         // This is what makes dependent types compose: `f`'s promise that
         // `n` is a nat is exactly what lets `f` call `g` with it.
         let program = Program::new(vec![
-            fun("needs_nat", vec![nat()], vec![p("x", int_of(v("n")))], Ty::Name("int".into()), Expr::IntLit(0)),
-            fun("caller", vec![nat()], vec![p("y", int_of(v("n")))], Ty::Name("int".into()),
-                call("needs_nat", vec![var("y")])),
+            fun(
+                "needs_nat",
+                vec![nat()],
+                vec![p("x", int_of(v("n")))],
+                Ty::Name("int".into()),
+                Expr::IntLit(0),
+            ),
+            fun(
+                "caller",
+                vec![nat()],
+                vec![p("y", int_of(v("n")))],
+                Ty::Name("int".into()),
+                call("needs_nat", vec![var("y")]),
+            ),
         ]);
         assert!(hyps_at(&program, "n >= 0").contains(&"n >= 0".to_string()));
     }
@@ -1094,13 +1240,31 @@ mod tests {
         // over `nat` takes, and it is unprovable without the guard.
         let cond = Expr::BinOp(BinOp::Gt, Box::new(var("x")), Box::new(Expr::IntLit(0)));
         let program = Program::new(vec![
-            fun("needs_nat", vec![nat()], vec![p("x", int_of(v("n")))], Ty::Name("int".into()), Expr::IntLit(0)),
-            fun("caller", vec![], vec![p("x", int_of(v("k")))], Ty::Name("int".into()),
+            fun(
+                "needs_nat",
+                vec![nat()],
+                vec![p("x", int_of(v("n")))],
+                Ty::Name("int".into()),
+                Expr::IntLit(0),
+            ),
+            fun(
+                "caller",
+                vec![],
+                vec![p("x", int_of(v("k")))],
+                Ty::Name("int".into()),
                 Expr::IfThenElse(
                     Box::new(cond),
-                    Box::new(call("needs_nat", vec![Expr::BinOp(BinOp::Sub, Box::new(var("x")), Box::new(Expr::IntLit(1)))])),
+                    Box::new(call(
+                        "needs_nat",
+                        vec![Expr::BinOp(
+                            BinOp::Sub,
+                            Box::new(var("x")),
+                            Box::new(Expr::IntLit(1)),
+                        )],
+                    )),
                     Box::new(call("needs_nat", vec![var("x")])),
-                )),
+                ),
+            ),
         ]);
         assert!(hyps_at(&program, "k - 1 >= 0").contains(&"k > 0".to_string()));
         assert!(hyps_at(&program, "k >= 0").contains(&"k <= 0".to_string()));
@@ -1109,10 +1273,21 @@ mod tests {
     #[test]
     fn a_let_binding_names_the_index_of_what_it_bound() {
         let program = with_main(Expr::Let(
-            vec![LetBind { opened: Vec::new(), proof: false, name: Some("y".into()), ty: None, value: Expr::IntLit(7), mutable: false }],
+            vec![LetBind {
+                opened: Vec::new(),
+                proof: false,
+                name: Some("y".into()),
+                ty: None,
+                value: Expr::IntLit(7),
+                mutable: false,
+            }],
             Box::new(call("needs_nat", vec![var("y")])),
         ));
-        assert!(goals(&program).contains(&"7 >= 0".to_string()), "{:?}", goals(&program));
+        assert!(
+            goals(&program).contains(&"7 >= 0".to_string()),
+            "{:?}",
+            goals(&program)
+        );
     }
 
     #[test]
@@ -1120,10 +1295,21 @@ mod tests {
         // `val x: int(3) = 4` is a lie, and the annotation is the only
         // place that can catch it.
         let program = with_main(Expr::Let(
-            vec![LetBind { opened: Vec::new(), proof: false, name: Some("y".into()), ty: Some(int_of(i(3))), value: Expr::IntLit(4), mutable: false }],
+            vec![LetBind {
+                opened: Vec::new(),
+                proof: false,
+                name: Some("y".into()),
+                ty: Some(int_of(i(3))),
+                value: Expr::IntLit(4),
+                mutable: false,
+            }],
             Box::new(Expr::Unit),
         ));
-        assert!(goals(&program).contains(&"4 == 3".to_string()), "{:?}", goals(&program));
+        assert!(
+            goals(&program).contains(&"4 == 3".to_string()),
+            "{:?}",
+            goals(&program)
+        );
     }
 
     #[test]
@@ -1132,57 +1318,126 @@ mod tests {
         // signature that promises `int(n+1)` and returns `x` is wrong,
         // and nothing about the call sites will ever say so.
         let program = Program::new(vec![fun(
-            "succ", vec![nat()], vec![p("x", int_of(v("n")))],
-            int_of(app("+", v("n"), i(1))), var("x"),
+            "succ",
+            vec![nat()],
+            vec![p("x", int_of(v("n")))],
+            int_of(app("+", v("n"), i(1))),
+            var("x"),
         )]);
-        assert!(goals(&program).contains(&"n == n + 1".to_string()), "{:?}", goals(&program));
+        assert!(
+            goals(&program).contains(&"n == n + 1".to_string()),
+            "{:?}",
+            goals(&program)
+        );
     }
 
     #[test]
     fn a_result_type_the_body_honours_is_owed_but_provable() {
         let program = Program::new(vec![fun(
-            "succ", vec![nat()], vec![p("x", int_of(v("n")))],
+            "succ",
+            vec![nat()],
+            vec![p("x", int_of(v("n")))],
             int_of(app("+", v("n"), i(1))),
             Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(Expr::IntLit(1))),
         )]);
-        assert!(goals(&program).contains(&"n + 1 == n + 1".to_string()), "{:?}", goals(&program));
+        assert!(
+            goals(&program).contains(&"n + 1 == n + 1".to_string()),
+            "{:?}",
+            goals(&program)
+        );
     }
 
     #[test]
     fn writing_to_a_cell_stops_the_checker_believing_what_it_held_before() {
         // `var x = 3; x := ~1; needs_nat(x)` must not be proved by the 3.
         let program = with_main(Expr::Let(
-            vec![LetBind { opened: Vec::new(), proof: false, name: Some("x".into()), ty: None, value: Expr::IntLit(3), mutable: true }],
+            vec![LetBind {
+                opened: Vec::new(),
+                proof: false,
+                name: Some("x".into()),
+                ty: None,
+                value: Expr::IntLit(3),
+                mutable: true,
+            }],
             Box::new(Expr::Let(
-                vec![LetBind { opened: Vec::new(), proof: false, name: None, ty: None, value: Expr::Assign("x".into(), Box::new(Expr::UnaryNeg(Box::new(Expr::IntLit(1))))), mutable: false }],
+                vec![LetBind {
+                    opened: Vec::new(),
+                    proof: false,
+                    name: None,
+                    ty: None,
+                    value: Expr::Assign(
+                        "x".into(),
+                        Box::new(Expr::UnaryNeg(Box::new(Expr::IntLit(1)))),
+                    ),
+                    mutable: false,
+                }],
                 Box::new(call("needs_nat", vec![var("x")])),
             )),
         ));
-        assert!(!goals(&program).contains(&"3 >= 0".to_string()), "stale: {:?}", goals(&program));
+        assert!(
+            !goals(&program).contains(&"3 >= 0".to_string()),
+            "stale: {:?}",
+            goals(&program)
+        );
     }
 
     #[test]
     fn a_loop_forgets_the_cells_its_body_writes() {
         // Facts established before a loop do not survive it, because the
         // body runs an unknown number of times.
-        let body = Expr::Assign("x".into(), Box::new(Expr::UnaryNeg(Box::new(Expr::IntLit(1)))));
+        let body = Expr::Assign(
+            "x".into(),
+            Box::new(Expr::UnaryNeg(Box::new(Expr::IntLit(1)))),
+        );
         let program = with_main(Expr::Let(
-            vec![LetBind { opened: Vec::new(), proof: false, name: Some("x".into()), ty: None, value: Expr::IntLit(3), mutable: true }],
+            vec![LetBind {
+                opened: Vec::new(),
+                proof: false,
+                name: Some("x".into()),
+                ty: None,
+                value: Expr::IntLit(3),
+                mutable: true,
+            }],
             Box::new(Expr::Let(
-                vec![LetBind { opened: Vec::new(), proof: false, name: None, ty: None, value: Expr::While(Box::new(Expr::BoolLit(true)), Box::new(body)), mutable: false }],
+                vec![LetBind {
+                    opened: Vec::new(),
+                    proof: false,
+                    name: None,
+                    ty: None,
+                    value: Expr::While(Box::new(Expr::BoolLit(true)), Box::new(body)),
+                    mutable: false,
+                }],
                 Box::new(call("needs_nat", vec![var("x")])),
             )),
         ));
-        assert!(!goals(&program).contains(&"3 >= 0".to_string()), "stale after loop: {:?}", goals(&program));
+        assert!(
+            !goals(&program).contains(&"3 >= 0".to_string()),
+            "stale after loop: {:?}",
+            goals(&program)
+        );
     }
 
     #[test]
     fn a_literal_pattern_tells_its_arm_what_the_scrutinee_was() {
         // `case x of | 0 => f(x)` knows `x` is zero inside the arm.
         let program = Program::new(vec![
-            fun("needs_nat", vec![nat()], vec![p("x", int_of(v("n")))], Ty::Name("int".into()), Expr::IntLit(0)),
-            fun("caller", vec![], vec![p("x", int_of(v("k")))], Ty::Name("int".into()),
-                Expr::Case(Box::new(var("x")), vec![(Pattern::Int(0), call("needs_nat", vec![var("x")]))])),
+            fun(
+                "needs_nat",
+                vec![nat()],
+                vec![p("x", int_of(v("n")))],
+                Ty::Name("int".into()),
+                Expr::IntLit(0),
+            ),
+            fun(
+                "caller",
+                vec![],
+                vec![p("x", int_of(v("k")))],
+                Ty::Name("int".into()),
+                Expr::Case(
+                    Box::new(var("x")),
+                    vec![(Pattern::Int(0), call("needs_nat", vec![var("x")]))],
+                ),
+            ),
         ]);
         assert!(hyps_at(&program, "k >= 0").contains(&"k == 0".to_string()));
     }
@@ -1190,20 +1445,44 @@ mod tests {
     #[test]
     fn a_variable_pattern_binds_the_scrutinees_index_to_the_name() {
         let program = Program::new(vec![
-            fun("needs_nat", vec![nat()], vec![p("x", int_of(v("n")))], Ty::Name("int".into()), Expr::IntLit(0)),
-            fun("caller", vec![], vec![p("x", int_of(v("k")))], Ty::Name("int".into()),
-                Expr::Case(Box::new(var("x")), vec![(Pattern::Var("y".into()), call("needs_nat", vec![var("y")]))])),
+            fun(
+                "needs_nat",
+                vec![nat()],
+                vec![p("x", int_of(v("n")))],
+                Ty::Name("int".into()),
+                Expr::IntLit(0),
+            ),
+            fun(
+                "caller",
+                vec![],
+                vec![p("x", int_of(v("k")))],
+                Ty::Name("int".into()),
+                Expr::Case(
+                    Box::new(var("x")),
+                    vec![(Pattern::Var("y".into()), call("needs_nat", vec![var("y")]))],
+                ),
+            ),
         ]);
-        assert!(goals(&program).contains(&"k >= 0".to_string()), "{:?}", goals(&program));
+        assert!(
+            goals(&program).contains(&"k >= 0".to_string()),
+            "{:?}",
+            goals(&program)
+        );
     }
 
     #[test]
     fn a_subscript_owes_both_ends_of_the_array_it_reaches_into() {
         // `xs[i]` on an `array(int, n)` is only safe for `0 <= i < n`,
         // and this is the obligation ATS exists to make.
-        let arr = Ty::Index(Box::new(Ty::App("array".into(), vec![Ty::Name("int".into())])), vec![v("n")]);
+        let arr = Ty::Index(
+            Box::new(Ty::App("array".into(), vec![Ty::Name("int".into())])),
+            vec![v("n")],
+        );
         let program = Program::new(vec![fun(
-            "get", vec![], vec![p("xs", arr), p("i", int_of(v("k")))], Ty::Name("int".into()),
+            "get",
+            vec![],
+            vec![p("xs", arr), p("i", int_of(v("k")))],
+            Ty::Name("int".into()),
             Expr::Index(Box::new(var("xs")), Box::new(var("i"))),
         )]);
         let g = goals(&program);
@@ -1224,9 +1503,14 @@ mod tests {
             params: vec![p("x", int_of(v("n")))],
             ret: int_of(app("+", v("n"), i(1))),
             body: var("x"),
+            proof: false,
         };
         let program = with_main(Expr::LetFun(vec![inner], Box::new(Expr::Unit)));
-        assert!(goals(&program).contains(&"n == n + 1".to_string()), "{:?}", goals(&program));
+        assert!(
+            goals(&program).contains(&"n == n + 1".to_string()),
+            "{:?}",
+            goals(&program)
+        );
     }
 
     #[test]
@@ -1237,17 +1521,28 @@ mod tests {
             metric: vec![],
             ty_params: vec![],
             universals: vec![],
-            existentials: vec![Quant { vars: vec![("r".into(), Sort::Nat)], guard: None }],
+            existentials: vec![Quant {
+                vars: vec![("r".into(), Sort::Nat)],
+                guard: None,
+            }],
             name: "g".into(),
             params: vec![],
             ret: int_of(v("r")),
             body: Expr::IntLit(0),
+            proof: false,
         });
         let mut defs = vec![g];
-        defs.extend(with_main(call("needs_nat", vec![call("g", vec![])])).defs().to_vec());
+        defs.extend(
+            with_main(call("needs_nat", vec![call("g", vec![])]))
+                .defs()
+                .to_vec(),
+        );
         let program = Program::new(defs);
         let o = obligations(&program, &Program::new(vec![]));
-        let call_ob = o.iter().find(|o| matches!(o.origin, Origin::Call { ref callee } if callee == "needs_nat")).expect("the call");
+        let call_ob = o
+            .iter()
+            .find(|o| matches!(o.origin, Origin::Call { ref callee } if callee == "needs_nat"))
+            .expect("the call");
         assert!(
             call_ob.hyps.iter().any(|h| h.to_string().starts_with("r%")),
             "the witness's nat-ness must be in scope: {:?}",
@@ -1257,14 +1552,15 @@ mod tests {
 
     #[test]
     fn a_datatype_declaration_does_not_derail_the_walk() {
-        let program = Program::new(vec![
-            Def::Datatype(DatatypeDef {
-                linear: false,
-                name: "opt".into(),
-                ty_params: vec!["a".into()],
-                ctors: vec![Ctor { name: "none".into(), fields: vec![] }],
-            }),
-        ]);
+        let program = Program::new(vec![Def::Datatype(DatatypeDef {
+            linear: false,
+            name: "opt".into(),
+            ty_params: vec!["a".into()],
+            ctors: vec![Ctor {
+                name: "none".into(),
+                fields: vec![],
+            }],
+        })]);
         assert!(obligations(&program, &Program::new(vec![])).is_empty());
     }
 
@@ -1279,16 +1575,25 @@ mod tests {
         let x = var("x");
         let plus1 = Expr::BinOp(BinOp::Add, Box::new(x.clone()), Box::new(Expr::IntLit(1)));
         let program = Program::new(vec![fun(
-            "succ", vec![nat()], vec![p("x", int_of(v("n")))],
+            "succ",
+            vec![nat()],
+            vec![p("x", int_of(v("n")))],
             int_of(app("+", v("n"), i(1))),
             Expr::IfThenElse(
-                Box::new(Expr::BinOp(BinOp::Gt, Box::new(x), Box::new(Expr::IntLit(0)))),
+                Box::new(Expr::BinOp(
+                    BinOp::Gt,
+                    Box::new(x),
+                    Box::new(Expr::IntLit(0)),
+                )),
                 Box::new(plus1.clone()),
                 Box::new(plus1),
             ),
         )]);
         let g = goals(&program);
-        assert!(!g.iter().any(|goal| goal.contains("join%")), "the arms were joined: {g:?}");
+        assert!(
+            !g.iter().any(|goal| goal.contains("join%")),
+            "the arms were joined: {g:?}"
+        );
         assert_eq!(g, vec!["n + 1 == n + 1".to_string(); 2], "{g:?}");
     }
 
@@ -1297,24 +1602,47 @@ mod tests {
         // A body is usually `let ... in <the answer> end`, and a checker
         // that stopped at the `let` would check almost nothing.
         let program = Program::new(vec![fun(
-            "succ", vec![nat()], vec![p("x", int_of(v("n")))],
+            "succ",
+            vec![nat()],
+            vec![p("x", int_of(v("n")))],
             int_of(app("+", v("n"), i(1))),
             Expr::Let(
-                vec![LetBind { opened: Vec::new(), proof: false, name: Some("y".into()), ty: None, value: Expr::IntLit(1), mutable: false }],
-                Box::new(Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(var("y")))),
+                vec![LetBind {
+                    opened: Vec::new(),
+                    proof: false,
+                    name: Some("y".into()),
+                    ty: None,
+                    value: Expr::IntLit(1),
+                    mutable: false,
+                }],
+                Box::new(Expr::BinOp(
+                    BinOp::Add,
+                    Box::new(var("x")),
+                    Box::new(var("y")),
+                )),
             ),
         )]);
-        assert!(goals(&program).contains(&"n + 1 == n + 1".to_string()), "{:?}", goals(&program));
+        assert!(
+            goals(&program).contains(&"n + 1 == n + 1".to_string()),
+            "{:?}",
+            goals(&program)
+        );
     }
 
     #[test]
     fn each_arm_of_a_case_answers_for_the_promise_on_its_own() {
         let program = Program::new(vec![fun(
-            "id", vec![nat()], vec![p("x", int_of(v("n")))], int_of(v("n")),
-            Expr::Case(Box::new(var("x")), vec![
-                (Pattern::Int(0), Expr::IntLit(0)),
-                (Pattern::Var("y".into()), var("y")),
-            ]),
+            "id",
+            vec![nat()],
+            vec![p("x", int_of(v("n")))],
+            int_of(v("n")),
+            Expr::Case(
+                Box::new(var("x")),
+                vec![
+                    (Pattern::Int(0), Expr::IntLit(0)),
+                    (Pattern::Var("y".into()), var("y")),
+                ],
+            ),
         )]);
         let g = goals(&program);
         assert!(g.contains(&"0 == n".to_string()), "{g:?}");
@@ -1335,7 +1663,10 @@ mod tests {
             ty_params: vec![],
             instance: vec![],
             name: "main0".into(),
-            params: vec![p("argc", Ty::Name("int".into())), p("argv", Ty::Name("argv".into()))],
+            params: vec![
+                p("argc", Ty::Name("int".into())),
+                p("argv", Ty::Name("argv".into())),
+            ],
             ret: None,
             body: Expr::IfThenElse(Box::new(guard), Box::new(read), Box::new(Expr::Unit)),
         })]);
@@ -1366,12 +1697,18 @@ mod tests {
             ty_params: vec![],
             instance: vec![],
             name: "main0".into(),
-            params: vec![p("argc", Ty::Name("int".into())), p("argv", Ty::Name("argv".into()))],
+            params: vec![
+                p("argc", Ty::Name("int".into())),
+                p("argv", Ty::Name("argv".into())),
+            ],
             ret: None,
             body: Expr::IfThenElse(Box::new(guard), Box::new(Expr::Unit), Box::new(read)),
         })]);
         let obs = obligations(&program, &Program::new(vec![]));
-        let upper = obs.iter().find(|o| o.goal.to_string().starts_with("0 <")).expect("an upper bound");
+        let upper = obs
+            .iter()
+            .find(|o| o.goal.to_string().starts_with("0 <"))
+            .expect("an upper bound");
         assert_eq!(
             crate::constraints::entails(&upper.hyps, &upper.goal),
             crate::constraints::Verdict::Proved,
@@ -1410,7 +1747,11 @@ mod tests {
         // The declared result is `int(n+1)` and the body returns `x`,
         // which is `n`: the promise is broken, and only the declaration
         // could have said so.
-        assert!(goals(&program).contains(&"n == n + 1".to_string()), "{:?}", goals(&program));
+        assert!(
+            goals(&program).contains(&"n == n + 1".to_string()),
+            "{:?}",
+            goals(&program)
+        );
     }
 
     #[test]
@@ -1437,7 +1778,11 @@ mod tests {
                 body: var("x"),
             }),
         ]);
-        assert!(goals(&program).contains(&"7 == 7".to_string()), "{:?}", goals(&program));
+        assert!(
+            goals(&program).contains(&"7 == 7".to_string()),
+            "{:?}",
+            goals(&program)
+        );
     }
 
     #[test]
@@ -1446,8 +1791,14 @@ mod tests {
         // Granting it anywhere else would be inventing a fact.
         let read = Expr::Index(Box::new(var("argv")), Box::new(Expr::IntLit(1)));
         let program = Program::new(vec![fun(
-            "not_main", vec![], vec![p("argc", Ty::Name("int".into())), p("argv", Ty::Name("argv".into()))],
-            Ty::Name("void".into()), read,
+            "not_main",
+            vec![],
+            vec![
+                p("argc", Ty::Name("int".into())),
+                p("argv", Ty::Name("argv".into())),
+            ],
+            Ty::Name("void".into()),
+            read,
         )]);
         assert!(
             !goals(&program).iter().any(|g| g.starts_with("1 <")),
@@ -1467,12 +1818,20 @@ mod tests {
             params: vec![p("x", int_of(v("n")))],
             ret: Ty::Name("int".into()),
             body,
+            proof: false,
         })])
     }
 
     /// `f(x - 1)`
     fn call_smaller() -> Expr {
-        call("f", vec![Expr::BinOp(BinOp::Sub, Box::new(var("x")), Box::new(Expr::IntLit(1)))])
+        call(
+            "f",
+            vec![Expr::BinOp(
+                BinOp::Sub,
+                Box::new(var("x")),
+                Box::new(Expr::IntLit(1)),
+            )],
+        )
     }
 
     #[test]
@@ -1490,7 +1849,11 @@ mod tests {
             .leak()
             .iter()
             .collect();
-        assert!(!metric.is_empty(), "no metric was checked: {:?}", goals(&program));
+        assert!(
+            !metric.is_empty(),
+            "no metric was checked: {:?}",
+            goals(&program)
+        );
         for o in metric {
             assert_eq!(
                 crate::constraints::entails(&o.hyps, &o.goal),
@@ -1504,13 +1867,23 @@ mod tests {
 
     #[test]
     fn a_recursive_call_that_grows_the_metric_is_caught() {
-        let grows = call("f", vec![Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(Expr::IntLit(1)))]);
+        let grows = call(
+            "f",
+            vec![Expr::BinOp(
+                BinOp::Add,
+                Box::new(var("x")),
+                Box::new(Expr::IntLit(1)),
+            )],
+        );
         let program = recursive(vec![v("n")], grows);
         let bad = obligations(&program, &Program::new(vec![]))
             .into_iter()
             .find(|o| matches!(o.origin, Origin::Metric { .. }) && o.goal.to_string().contains('<'))
             .expect("a decrease obligation");
-        assert_eq!(crate::constraints::entails(&bad.hyps, &bad.goal), crate::constraints::Verdict::Refuted);
+        assert_eq!(
+            crate::constraints::entails(&bad.hyps, &bad.goal),
+            crate::constraints::Verdict::Refuted
+        );
     }
 
     #[test]
@@ -1518,13 +1891,21 @@ mod tests {
         // `.<>.` and a bare `fun` both claim nothing, and a checker that
         // invented the claim would reject every loop written without one.
         let program = recursive(vec![], call_smaller());
-        assert!(!obligations(&program, &Program::new(vec![])).iter().any(|o| matches!(o.origin, Origin::Metric { .. })));
+        assert!(
+            !obligations(&program, &Program::new(vec![]))
+                .iter()
+                .any(|o| matches!(o.origin, Origin::Metric { .. }))
+        );
     }
 
     #[test]
     fn a_call_to_someone_else_is_not_a_recursion_and_owes_no_decrease() {
         let program = with_main(call("needs_nat", vec![Expr::IntLit(1)]));
-        assert!(!obligations(&program, &Program::new(vec![])).iter().any(|o| matches!(o.origin, Origin::Metric { .. })));
+        assert!(
+            !obligations(&program, &Program::new(vec![]))
+                .iter()
+                .any(|o| matches!(o.origin, Origin::Metric { .. }))
+        );
     }
 
     #[test]
@@ -1538,7 +1919,10 @@ mod tests {
             .filter(|o| matches!(o.origin, Origin::Metric { .. }))
             .map(|o| o.goal.to_string())
             .collect();
-        assert!(goals.iter().any(|g| g.contains(">= 0")), "no well-foundedness: {goals:?}");
+        assert!(
+            goals.iter().any(|g| g.contains(">= 0")),
+            "no well-foundedness: {goals:?}"
+        );
     }
 
     #[test]
@@ -1548,18 +1932,28 @@ mod tests {
         // recursion in the language.
         let program = Program::new(vec![Def::Fun(FunDef {
             ty_params: vec![],
-            universals: vec![Quant { vars: vec![("m".into(), Sort::Nat), ("n".into(), Sort::Nat)], guard: None }],
+            universals: vec![Quant {
+                vars: vec![("m".into(), Sort::Nat), ("n".into(), Sort::Nat)],
+                guard: None,
+            }],
             existentials: vec![],
             metric: vec![v("m"), v("n")],
             name: "f".into(),
             params: vec![p("a", int_of(v("m"))), p("b", int_of(v("n")))],
             ret: Ty::Name("int".into()),
-            body: call("f", vec![
-                var("a"),
-                Expr::BinOp(BinOp::Sub, Box::new(var("b")), Box::new(Expr::IntLit(1))),
-            ]),
+            body: call(
+                "f",
+                vec![
+                    var("a"),
+                    Expr::BinOp(BinOp::Sub, Box::new(var("b")), Box::new(Expr::IntLit(1))),
+                ],
+            ),
+            proof: false,
         })]);
-        for o in obligations(&program, &Program::new(vec![])).iter().filter(|o| matches!(o.origin, Origin::Metric { .. })) {
+        for o in obligations(&program, &Program::new(vec![]))
+            .iter()
+            .filter(|o| matches!(o.origin, Origin::Metric { .. }))
+        {
             assert_eq!(
                 crate::constraints::entails(&o.hyps, &o.goal),
                 crate::constraints::Verdict::Proved,
@@ -1585,6 +1979,7 @@ mod tests {
                 params: vec![p("x", int_of(v("n")))],
                 ret: Ty::Name("int".into()),
                 body: Expr::IntLit(0),
+                proof: false,
             }),
             Def::Implement(ImplementDef {
                 ty_params: vec![],
@@ -1599,7 +1994,11 @@ mod tests {
             }),
         ]);
         // `n` comes from the argument, not from the type argument.
-        assert!(goals(&program).contains(&"3 >= 0".to_string()), "{:?}", goals(&program));
+        assert!(
+            goals(&program).contains(&"3 >= 0".to_string()),
+            "{:?}",
+            goals(&program)
+        );
     }
 
     #[test]
@@ -1616,13 +2015,22 @@ mod tests {
     fn a_refinement_parameter_is_a_fact_the_body_may_use() {
         // `(i: natLt(n))` is what makes `xs[i]` safe, and it says so
         // twice: not below nought, and below `n`.
-        let arr = Ty::Index(Box::new(Ty::App("array".into(), vec![Ty::Name("int".into())])), vec![v("n")]);
+        let arr = Ty::Index(
+            Box::new(Ty::App("array".into(), vec![Ty::Name("int".into())])),
+            vec![v("n")],
+        );
         let idx = Ty::Index(Box::new(Ty::Name("natLt".into())), vec![v("n")]);
         let program = Program::new(vec![fun(
-            "get", vec![], vec![p("xs", arr), p("i", idx)], Ty::Name("int".into()),
+            "get",
+            vec![],
+            vec![p("xs", arr), p("i", idx)],
+            Ty::Name("int".into()),
             Expr::Index(Box::new(var("xs")), Box::new(var("i"))),
         )]);
-        for o in obligations(&program, &Program::new(vec![])).iter().filter(|o| matches!(o.origin, Origin::Bound { .. })) {
+        for o in obligations(&program, &Program::new(vec![]))
+            .iter()
+            .filter(|o| matches!(o.origin, Origin::Bound { .. }))
+        {
             assert_eq!(
                 crate::constraints::entails(&o.hyps, &o.goal),
                 crate::constraints::Verdict::Proved,
@@ -1641,12 +2049,19 @@ mod tests {
         // reach into them exactly as a result type does.
         let x = var("x");
         let annotated = Expr::IfThenElse(
-            Box::new(Expr::BinOp(BinOp::Ge, Box::new(x.clone()), Box::new(Expr::IntLit(0)))),
+            Box::new(Expr::BinOp(
+                BinOp::Ge,
+                Box::new(x.clone()),
+                Box::new(Expr::IntLit(0)),
+            )),
             Box::new(x),
             Box::new(Expr::IntLit(0)),
         );
         let program = Program::new(vec![fun(
-            "clamp", vec![], vec![p("x", int_of(v("k")))], Ty::Name("int".into()),
+            "clamp",
+            vec![],
+            vec![p("x", int_of(v("k")))],
+            Ty::Name("int".into()),
             Expr::Let(
                 vec![LetBind {
                     opened: Vec::new(),
@@ -1679,12 +2094,16 @@ mod tests {
         let g = Def::Fun(FunDef {
             ty_params: vec![],
             universals: vec![],
-            existentials: vec![Quant { vars: vec![("r".into(), Sort::Nat)], guard: None }],
+            existentials: vec![Quant {
+                vars: vec![("r".into(), Sort::Nat)],
+                guard: None,
+            }],
             metric: vec![],
             name: "g".into(),
             params: vec![],
             ret: int_of(v("r")),
             body: Expr::IntLit(0),
+            proof: false,
         });
         let body = Expr::Let(
             vec![LetBind {
@@ -1727,7 +2146,10 @@ mod tests {
             }],
             existentials: vec![],
             params: vec![],
-            ret: Ty::Index(Box::new(Ty::Name("FACT".into())), vec![v("n"), app("*", v("n"), v("r"))]),
+            ret: Ty::Index(
+                Box::new(Ty::Name("FACT".into())),
+                vec![v("n"), app("*", v("n"), v("r"))],
+            ),
         });
         let body = Expr::Let(
             vec![LetBind {
@@ -1736,10 +2158,7 @@ mod tests {
                 name: Some("pf".into()),
                 ty: None,
                 value: Expr::Call(
-                    Box::new(Expr::StaticInst(
-                        Box::new(var("FACTind")),
-                        vec![i(3), i(2)],
-                    )),
+                    Box::new(Expr::StaticInst(Box::new(var("FACTind")), vec![i(3), i(2)])),
                     vec![],
                 ),
                 mutable: false,
@@ -1751,9 +2170,17 @@ mod tests {
         let program = Program::new(defs);
         // The walk records both indices; nothing is demanded, but the
         // proof is in scope with everything it proves.
-        assert!(obligations(&program, &Program::new(vec![])).iter().all(|o| o.goal.to_string() != "3 > 0"
-            || crate::constraints::entails(&o.hyps, &o.goal) == crate::constraints::Verdict::Proved));
-        assert_eq!(proof_indices(&program, "pf"), vec!["3".to_string(), "3 * 2".to_string()]);
+        assert!(
+            obligations(&program, &Program::new(vec![]))
+                .iter()
+                .all(|o| o.goal.to_string() != "3 > 0"
+                    || crate::constraints::entails(&o.hyps, &o.goal)
+                        == crate::constraints::Verdict::Proved)
+        );
+        assert_eq!(
+            proof_indices(&program, "pf"),
+            vec!["3".to_string(), "3 * 2".to_string()]
+        );
     }
 
     /// The indices the walk gave a proof binding — reached by re-walking
@@ -1812,24 +2239,38 @@ mod tests {
             }],
             Box::new(Expr::ProofPair(
                 Box::new(var("pf")),
-                Box::new(Expr::BinOp(BinOp::Mul, Box::new(Expr::IntLit(3)), Box::new(var("k")))),
+                Box::new(Expr::BinOp(
+                    BinOp::Mul,
+                    Box::new(Expr::IntLit(3)),
+                    Box::new(var("k")),
+                )),
             )),
         );
         let f = Def::Fun(FunDef {
             ty_params: vec![],
             universals: vec![nat()],
-            existentials: vec![Quant { vars: vec![("r".into(), Sort::Int)], guard: None }],
+            existentials: vec![Quant {
+                vars: vec![("r".into(), Sort::Int)],
+                guard: None,
+            }],
             metric: vec![],
             name: "f".into(),
             params: vec![p("x", int_of(v("n"))), p("k", int_of(v("k")))],
             ret: Ty::Proof(
-                Box::new(Ty::Index(Box::new(Ty::Name("P".into())), vec![v("n"), v("r")])),
+                Box::new(Ty::Index(
+                    Box::new(Ty::Name("P".into())),
+                    vec![v("n"), v("r")],
+                )),
                 Box::new(int_of(app("*", v("r"), v("k")))),
             ),
             body,
+            proof: false,
         });
         let program = Program::new(vec![ctor, f]);
-        for o in obligations(&program, &Program::new(vec![])).iter().filter(|o| matches!(o.origin, Origin::Return { .. })) {
+        for o in obligations(&program, &Program::new(vec![]))
+            .iter()
+            .filter(|o| matches!(o.origin, Origin::Return { .. }))
+        {
             assert_eq!(
                 crate::constraints::entails(&o.hyps, &o.goal),
                 crate::constraints::Verdict::Proved,
@@ -1853,6 +2294,7 @@ mod tests {
             params: vec![p("x", int_of(v("n")))],
             ret: int_of(app("+", v("n"), i(1))),
             body: Expr::ProofPair(Box::new(var("pf")), Box::new(var("x"))),
+            proof: false,
         });
         assert!(
             goals(&Program::new(vec![f])).contains(&"n == n + 1".to_string()),
@@ -1871,6 +2313,7 @@ mod tests {
             params: vec![p("x", int_of(v("n")))],
             ret: int_of(app("+", v("n"), i(1))),
             body: Expr::ProofPair(Box::new(var("pf")), Box::new(var("x"))),
+            proof: false,
         })
     }
 
@@ -1882,15 +2325,37 @@ mod tests {
         // reject the argument handling of half the corpus.
         let assertion = Expr::Call(
             Box::new(var("assertexn")),
-            vec![Expr::BinOp(BinOp::Ge, Box::new(var("x")), Box::new(Expr::IntLit(0)))],
+            vec![Expr::BinOp(
+                BinOp::Ge,
+                Box::new(var("x")),
+                Box::new(Expr::IntLit(0)),
+            )],
         );
         let program = Program::new(vec![
-            fun("needs_nat", vec![nat()], vec![p("x", int_of(v("n")))], Ty::Name("int".into()), Expr::IntLit(0)),
-            fun("caller", vec![], vec![p("x", int_of(v("k")))], Ty::Name("int".into()),
+            fun(
+                "needs_nat",
+                vec![nat()],
+                vec![p("x", int_of(v("n")))],
+                Ty::Name("int".into()),
+                Expr::IntLit(0),
+            ),
+            fun(
+                "caller",
+                vec![],
+                vec![p("x", int_of(v("k")))],
+                Ty::Name("int".into()),
                 Expr::Let(
-                    vec![LetBind { opened: vec![], proof: false, name: None, ty: None, value: assertion, mutable: false }],
+                    vec![LetBind {
+                        opened: vec![],
+                        proof: false,
+                        name: None,
+                        ty: None,
+                        value: assertion,
+                        mutable: false,
+                    }],
                     Box::new(call("needs_nat", vec![var("x")])),
-                )),
+                ),
+            ),
         ]);
         let owed = obligations(&program, &Program::new(vec![]))
             .into_iter()
@@ -1911,15 +2376,37 @@ mod tests {
         // boolean would otherwise make its argument true by being called.
         let checked = Expr::Call(
             Box::new(var("check")),
-            vec![Expr::BinOp(BinOp::Ge, Box::new(var("x")), Box::new(Expr::IntLit(0)))],
+            vec![Expr::BinOp(
+                BinOp::Ge,
+                Box::new(var("x")),
+                Box::new(Expr::IntLit(0)),
+            )],
         );
         let program = Program::new(vec![
-            fun("needs_nat", vec![nat()], vec![p("x", int_of(v("n")))], Ty::Name("int".into()), Expr::IntLit(0)),
-            fun("caller", vec![], vec![p("x", int_of(v("k")))], Ty::Name("int".into()),
+            fun(
+                "needs_nat",
+                vec![nat()],
+                vec![p("x", int_of(v("n")))],
+                Ty::Name("int".into()),
+                Expr::IntLit(0),
+            ),
+            fun(
+                "caller",
+                vec![],
+                vec![p("x", int_of(v("k")))],
+                Ty::Name("int".into()),
                 Expr::Let(
-                    vec![LetBind { opened: vec![], proof: false, name: None, ty: None, value: checked, mutable: false }],
+                    vec![LetBind {
+                        opened: vec![],
+                        proof: false,
+                        name: None,
+                        ty: None,
+                        value: checked,
+                        mutable: false,
+                    }],
                     Box::new(call("needs_nat", vec![var("x")])),
-                )),
+                ),
+            ),
         ]);
         let owed = obligations(&program, &Program::new(vec![]))
             .into_iter()
@@ -1939,7 +2426,11 @@ mod tests {
         // does — joined first, it is unprovable.
         let x = var("x");
         let inner = Expr::IfThenElse(
-            Box::new(Expr::BinOp(BinOp::Ge, Box::new(x.clone()), Box::new(Expr::IntLit(0)))),
+            Box::new(Expr::BinOp(
+                BinOp::Ge,
+                Box::new(x.clone()),
+                Box::new(Expr::IntLit(0)),
+            )),
             Box::new(x),
             Box::new(Expr::IntLit(0)),
         );
@@ -1948,12 +2439,30 @@ mod tests {
             Ty::Index(Box::new(Ty::Name("intGte".into())), vec![i(0)]),
         );
         let program = Program::new(vec![
-            fun("needs_nat", vec![nat()], vec![p("x", int_of(v("n")))], Ty::Name("int".into()), Expr::IntLit(0)),
-            fun("caller", vec![], vec![p("x", int_of(v("k")))], Ty::Name("int".into()),
+            fun(
+                "needs_nat",
+                vec![nat()],
+                vec![p("x", int_of(v("n")))],
+                Ty::Name("int".into()),
+                Expr::IntLit(0),
+            ),
+            fun(
+                "caller",
+                vec![],
+                vec![p("x", int_of(v("k")))],
+                Ty::Name("int".into()),
                 Expr::Let(
-                    vec![LetBind { opened: vec![], proof: false, name: Some("y".into()), ty: None, value: bounded, mutable: false }],
+                    vec![LetBind {
+                        opened: vec![],
+                        proof: false,
+                        name: Some("y".into()),
+                        ty: None,
+                        value: bounded,
+                        mutable: false,
+                    }],
                     Box::new(call("needs_nat", vec![var("y")])),
-                )),
+                ),
+            ),
         ]);
         for o in obligations(&program, &Program::new(vec![])) {
             assert_eq!(
@@ -1969,9 +2478,17 @@ mod tests {
     #[test]
     fn every_obligation_says_which_function_it_came_from() {
         let program = Program::new(vec![fun(
-            "succ", vec![nat()], vec![p("x", int_of(v("n")))],
-            int_of(app("+", v("n"), i(1))), var("x"),
+            "succ",
+            vec![nat()],
+            vec![p("x", int_of(v("n")))],
+            int_of(app("+", v("n"), i(1))),
+            var("x"),
         )]);
-        assert_eq!(obligations(&program, &Program::new(vec![]))[0].origin, Origin::Return { function: "succ".into() });
+        assert_eq!(
+            obligations(&program, &Program::new(vec![]))[0].origin,
+            Origin::Return {
+                function: "succ".into()
+            }
+        );
     }
 }

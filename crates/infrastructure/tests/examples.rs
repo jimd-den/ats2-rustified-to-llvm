@@ -23,7 +23,10 @@ use ats2_infrastructure::llvm_ir::LlvmIrEmitter;
 use ats2_infrastructure::parser::Parser;
 
 fn examples_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples").canonicalize().expect("examples/ exists")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples")
+        .canonicalize()
+        .expect("examples/ exists")
 }
 
 fn lli_available() -> bool {
@@ -40,8 +43,13 @@ fn run_sample(dats: &Path) -> String {
         panic!("{}: emit failed: {e}", dats.display());
     });
 
-    let stem = dats.file_stem().expect("a file stem").to_string_lossy().to_string();
-    let ir_path = std::env::temp_dir().join(format!("ats2llvm-ex-{}-{}.ll", stem, std::process::id()));
+    let stem = dats
+        .file_stem()
+        .expect("a file stem")
+        .to_string_lossy()
+        .to_string();
+    let ir_path =
+        std::env::temp_dir().join(format!("ats2llvm-ex-{}-{}.ll", stem, std::process::id()));
     std::fs::write(&ir_path, &ir).expect("write the IR");
     let out = Command::new("lli").arg(&ir_path).output().expect("run lli");
     let _ = std::fs::remove_file(&ir_path);

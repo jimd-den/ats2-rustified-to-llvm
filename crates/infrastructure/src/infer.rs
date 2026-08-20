@@ -250,7 +250,10 @@ impl InferCtx {
                     .iter()
                     .map(|f| {
                         let inner = self.env_of(&f.params);
-                        FunDef { body: self.walk(&f.body, &inner), ..f.clone() }
+                        FunDef {
+                            body: self.walk(&f.body, &inner),
+                            ..f.clone()
+                        }
                     })
                     .collect();
                 Expr::LetFun(funs, Box::new(self.walk(body, env)))
@@ -260,22 +263,36 @@ impl InferCtx {
                 Box::new(self.walk(t, env)),
                 Box::new(self.walk(e, env)),
             ),
-            Expr::BinOp(op, l, r) => Expr::BinOp(*op, Box::new(self.walk(l, env)), Box::new(self.walk(r, env))),
+            Expr::BinOp(op, l, r) => Expr::BinOp(
+                *op,
+                Box::new(self.walk(l, env)),
+                Box::new(self.walk(r, env)),
+            ),
             Expr::UnaryNeg(e) => Expr::UnaryNeg(Box::new(self.walk(e, env))),
-            Expr::Index(b, i) => Expr::Index(Box::new(self.walk(b, env)), Box::new(self.walk(i, env))),
+            Expr::Index(b, i) => {
+                Expr::Index(Box::new(self.walk(b, env)), Box::new(self.walk(i, env)))
+            }
             Expr::Proj(b, i) => Expr::Proj(Box::new(self.walk(b, env)), *i),
             Expr::Deref(b) => Expr::Deref(Box::new(self.walk(b, env))),
-            Expr::Store(p, v) => Expr::Store(Box::new(self.walk(p, env)), Box::new(self.walk(v, env))),
+            Expr::Store(p, v) => {
+                Expr::Store(Box::new(self.walk(p, env)), Box::new(self.walk(v, env)))
+            }
             Expr::Assign(n, v) => Expr::Assign(n.clone(), Box::new(self.walk(v, env))),
-            Expr::While(c, b) => Expr::While(Box::new(self.walk(c, env)), Box::new(self.walk(b, env))),
+            Expr::While(c, b) => {
+                Expr::While(Box::new(self.walk(c, env)), Box::new(self.walk(b, env)))
+            }
             Expr::For(i, c, s, b) => Expr::For(
                 Box::new(self.walk(i, env)),
                 Box::new(self.walk(c, env)),
                 Box::new(self.walk(s, env)),
                 Box::new(self.walk(b, env)),
             ),
-            Expr::MacroCall(n, args) => Expr::MacroCall(n.clone(), args.iter().map(|a| self.walk(a, env)).collect()),
-            Expr::TupleLit(items) => Expr::TupleLit(items.iter().map(|a| self.walk(a, env)).collect()),
+            Expr::MacroCall(n, args) => {
+                Expr::MacroCall(n.clone(), args.iter().map(|a| self.walk(a, env)).collect())
+            }
+            Expr::TupleLit(items) => {
+                Expr::TupleLit(items.iter().map(|a| self.walk(a, env)).collect())
+            }
             Expr::Lam(ps, r, b) => Expr::Lam(ps.clone(), r.clone(), Box::new(self.walk(b, env))),
             _ => expr.clone(),
         }
@@ -296,13 +313,23 @@ impl InferCtx {
         }
         // Every hole must be filled; a partly-known instance is no
         // instance at all.
-        let resolved: Option<Vec<Ty>> = sig.ty_params.iter().map(|p| subst.get(p).cloned()).collect();
+        let resolved: Option<Vec<Ty>> = sig
+            .ty_params
+            .iter()
+            .map(|p| subst.get(p).cloned())
+            .collect();
         Some(Expr::Inst(name.to_string(), resolved?))
     }
 
     /// Line a declared type up against an actual one, learning what the
     /// template's parameters must be.
-    fn match_types(&self, declared: &Ty, actual: &Ty, holes: &[String], subst: &mut HashMap<String, Ty>) {
+    fn match_types(
+        &self,
+        declared: &Ty,
+        actual: &Ty,
+        holes: &[String],
+        subst: &mut HashMap<String, Ty>,
+    ) {
         let declared = strip_annotations(declared);
         let actual = strip_annotations(actual);
         match (&declared, &actual) {
@@ -333,9 +360,9 @@ impl InferCtx {
             Expr::StrLit(_) => Some(Ty::Name("string".into())),
             Expr::Var(n) => env.get(n).cloned().or_else(|| self.nullary_ctor_type(n)),
             Expr::UnaryNeg(_) => Some(Ty::Name("int".into())),
-            Expr::BinOp(op, _, _) => {
-                Some(Ty::Name(if op.is_comparison() { "bool" } else { "int" }.into()))
-            }
+            Expr::BinOp(op, _, _) => Some(Ty::Name(
+                if op.is_comparison() { "bool" } else { "int" }.into(),
+            )),
             Expr::TupleLit(items) => {
                 let parts: Option<Vec<Ty>> = items.iter().map(|i| self.type_of(i, env)).collect();
                 Some(Ty::Tuple(parts?))
@@ -377,8 +404,12 @@ impl InferCtx {
                     }
                 }
                 let sig = self.signatures.get(name)?;
-                let subst: HashMap<String, Ty> =
-                    sig.ty_params.iter().cloned().zip(args.iter().cloned()).collect();
+                let subst: HashMap<String, Ty> = sig
+                    .ty_params
+                    .iter()
+                    .cloned()
+                    .zip(args.iter().cloned())
+                    .collect();
                 Some(apply(&sig.ret, &subst))
             }
             Expr::Call(callee, args) => match &**callee {
@@ -417,7 +448,11 @@ impl InferCtx {
                 self.match_types(declared, &actual, &shape.ty_params, &mut subst);
             }
         }
-        let resolved: Option<Vec<Ty>> = shape.ty_params.iter().map(|p| subst.get(p).cloned()).collect();
+        let resolved: Option<Vec<Ty>> = shape
+            .ty_params
+            .iter()
+            .map(|p| subst.get(p).cloned())
+            .collect();
         Some(Ty::App(shape.datatype.clone(), resolved?))
     }
 
@@ -454,7 +489,9 @@ impl InferCtx {
             // a question for the emitter, not for inference.
             Pattern::InPlace(inner) => self.bind_pattern(inner, subject, env),
             Pattern::Ctor(name, fields) => {
-                let Some(shape) = self.ctors.get(name) else { return };
+                let Some(shape) = self.ctors.get(name) else {
+                    return;
+                };
                 // The scrutinee's own type says what the datatype's
                 // parameters are, and therefore what the fields hold.
                 let subst = match subject {
@@ -483,13 +520,19 @@ fn apply(ty: &Ty, subst: &HashMap<String, Ty>) -> Ty {
         Ty::App(n, args) => Ty::App(n.clone(), args.iter().map(|a| apply(a, subst)).collect()),
         Ty::Tuple(items) => Ty::Tuple(items.iter().map(|i| apply(i, subst)).collect()),
         Ty::Proof(p, v) => Ty::Proof(Box::new(apply(p, subst)), Box::new(apply(v, subst))),
-        Ty::Fun(ps, r) => Ty::Fun(ps.iter().map(|p| apply(p, subst)).collect(), Box::new(apply(r, subst))),
+        Ty::Fun(ps, r) => Ty::Fun(
+            ps.iter().map(|p| apply(p, subst)).collect(),
+            Box::new(apply(r, subst)),
+        ),
         // A type parameter is substituted for a *type*, never for a
         // static index, so the indices ride along untouched.
         Ty::Index(base, idx) => Ty::Index(Box::new(apply(base, subst)), idx.clone()),
-        Ty::Record(fields) => {
-            Ty::Record(fields.iter().map(|(n, t)| (n.clone(), apply(t, subst))).collect())
-        }
+        Ty::Record(fields) => Ty::Record(
+            fields
+                .iter()
+                .map(|(n, t)| (n.clone(), apply(t, subst)))
+                .collect(),
+        ),
     }
 }
 
@@ -514,7 +557,6 @@ fn strip_annotations(ty: &Ty) -> Ty {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,7 +579,10 @@ mod tests {
              fun f {n:nat} (xs: list(int, n)): int = length(xs)",
         );
         let rendered = format!("{:?}", p.defs());
-        assert!(rendered.contains("Inst(\"length\""), "no instance named:\n{rendered}");
+        assert!(
+            rendered.contains("Inst(\"length\""),
+            "no instance named:\n{rendered}"
+        );
     }
 
     #[test]
