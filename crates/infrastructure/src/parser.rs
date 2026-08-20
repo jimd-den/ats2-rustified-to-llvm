@@ -4223,6 +4223,24 @@ impl ParseCtx<'_> {
         Ok(head)
     }
 
+    /// Whether the next token begins a pattern argument that may be
+    /// written against a constructor name without parentheses: `C _`,
+    /// `C x`, `C 0`.
+    fn starts_a_juxtaposed_pattern(&self) -> bool {
+        matches!(
+            self.peek().kind,
+            TokenKind::Underscore
+                | TokenKind::IntLit(_)
+                | TokenKind::CharLit(_)
+                | TokenKind::StrLit(_)
+                | TokenKind::True
+                | TokenKind::False
+                | TokenKind::Tilde
+                | TokenKind::At
+                | TokenKind::Ident(_)
+        )
+    }
+
     /// One pattern with no trailing operator.
     fn parse_pattern_primary(&mut self) -> Result<Pattern, CompileError> {
         match self.peek().kind.clone() {
@@ -4323,6 +4341,11 @@ impl ParseCtx<'_> {
                         "expected `)` after the constructor fields",
                     )?;
                     Ok(Pattern::Ctor(name, fields))
+                } else if self.starts_a_juxtaposed_pattern() {
+                    // `C _`, `C x` — a constructor applied to one argument
+                    // written without the parentheses ATS allows omitting.
+                    let arg = self.parse_pattern_primary()?;
+                    Ok(Pattern::Ctor(name, vec![arg]))
                 } else {
                     Ok(Pattern::Var(name))
                 }
@@ -7432,6 +7455,25 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
         // parameter list on `itm`.
         let p = Parser::parse("typedef key = string and itm = symbol").expect("parse");
         assert!(p.defs().is_empty(), "typedefs fold into a table, not defs");
+    }
+
+
+    #[test]
+    fn a_constructor_with_a_juxtaposed_wildcard_is_a_pattern() {
+        // `CAhelp _` is `CAhelp(_)` — a constructor applied to a wildcard,
+        // written without the parentheses ATS allows omitting.  The `_` was
+        // left unparsed, and the arm unreadable.
+        let body = impl_body("implement main0 () = case+ x of | CAhelp _ => 0");
+        match body {
+            Expr::Case(_, arms) => {
+                assert_eq!(arms.len(), 1);
+                assert_eq!(
+                    arms[0].0,
+                    Pattern::Ctor("CAhelp".into(), vec![Pattern::Wildcard])
+                );
+            }
+            other => panic!("expected a case, got {other:?}"),
+        }
     }
 
 }
