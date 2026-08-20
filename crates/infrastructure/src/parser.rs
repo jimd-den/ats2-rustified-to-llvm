@@ -4551,6 +4551,21 @@ impl ParseCtx<'_> {
             }
             TokenKind::Ident(name) => {
                 self.advance();
+                // `$C.Red` — a constructor reached through a `staload`
+                // alias.  The qualifier is dropped exactly as it is in
+                // an expression and a type.
+                let name = if name.starts_with('$')
+                    && self.at(&TokenKind::Dot)
+                    && matches!(
+                        self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                        Some(TokenKind::Ident(_))
+                    )
+                {
+                    self.advance(); // `.`
+                    self.expect_ident("expected a constructor name")?
+                } else {
+                    name
+                };
                 let name = self.renames.get(&name).cloned().unwrap_or(name);
                 self.skip_template_arguments();
                 // The parentheses are what separate a constructor from a
@@ -6994,6 +7009,19 @@ mod tests {
             panic!("expected an extern declaration")
         };
         assert_eq!(d.params[0].ty, Ty::Name("FILEref".into()));
+    }
+
+    #[test]
+    fn a_constructor_qualified_by_a_staload_alias_drops_the_alias() {
+        // `| $C.Red() => ...` — a constructor reached through the module
+        // a `staload` bound to `$C`.  The qualifier is dropped and the
+        // constructor stands alone, as it does in an expression and a
+        // type.
+        let a =
+            arms("implement main0() = case c of | $C.Red() => 0 | $C.Green() => 1");
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].0, Pattern::Ctor("Red".into(), vec![]));
+        assert_eq!(a[1].0, Pattern::Ctor("Green".into(), vec![]));
     }
 
     #[test]
