@@ -1251,15 +1251,16 @@ impl ParseCtx<'_> {
             self.advance();
             self.skip_effect_annotation();
             let existentials = self.parse_existentials();
-            let ret = self.parse_type()?;
+            let whole = self.parse_type()?;
             self.skip_static_annotations();
+            let (params, ret) = Self::split_curried(whole);
             let decl = self.finish_fun_decl(
                 proof,
                 ty_params,
                 universals,
                 existentials,
                 name,
-                Vec::new(),
+                params,
                 ret,
             )?;
             self.pop_type_vars(scope);
@@ -1508,15 +1509,30 @@ impl ParseCtx<'_> {
         // As with a `fun`, the template's parameters are in scope for
         // the signature being declared.
         let scope = self.push_type_vars(&ty_params);
-        let params = self.parse_params()?;
-        if !self.at(&TokenKind::Colon) {
-            return Err(self.error_here("expected `:` and a return type"));
-        }
-        self.advance();
-        self.skip_effect_annotation();
-        let existentials = self.parse_existentials();
-        let ret = self.parse_type()?;
-        self.skip_static_annotations();
+        let (params, ret, existentials) = if self.at(&TokenKind::Colon) {
+            // `extern fun fact : int -> int = "mac#fact"` — no
+            // parenthesised parameter list; the whole signature is the
+            // curried type after the colon, which is split back into a
+            // parameter list and a return type.
+            self.advance();
+            self.skip_effect_annotation();
+            let existentials = self.parse_existentials();
+            let whole = self.parse_type()?;
+            self.skip_static_annotations();
+            let (params, ret) = Self::split_curried(whole);
+            (params, ret, existentials)
+        } else {
+            let params = self.parse_params()?;
+            if !self.at(&TokenKind::Colon) {
+                return Err(self.error_here("expected `:` and a return type"));
+            }
+            self.advance();
+            self.skip_effect_annotation();
+            let existentials = self.parse_existentials();
+            let ret = self.parse_type()?;
+            self.skip_static_annotations();
+            (params, ret, existentials)
+        };
         // `= "ext#name"` binds the declaration to a C symbol; the subset
         // has no foreign-function interface, so the binding is dropped
         // and the signature kept.
@@ -1540,6 +1556,33 @@ impl ParseCtx<'_> {
             ret,
         })
     }
+
+/// A curried function type, split back into a parameter list and a
+/// return type.
+///
+/// `int -> int` declares one parameter of `int` returning `int`.  A
+/// colon-form signature (`fun abs_int0 : int -<fun> int`) writes the
+/// whole function as one type, and an `implement` that fills it in gives
+/// the parameter a name; the two have to agree on how many there are.
+fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
+    let mut params = Vec::new();
+    let mut cur = ty;
+    loop {
+        match cur {
+            Ty::Fun(args, ret) => {
+                for a in args {
+                    params.push(Param {
+                        name: "_".into(),
+                        ty: a,
+                        borrowed: false,
+                    });
+                }
+                cur = *ret;
+            }
+            other => return (params, other),
+        }
+    }
+}
 
     fn parse_implement_def(&mut self) -> Result<Def, CompileError> {
         self.advance(); // `implement`
@@ -7033,13 +7076,26 @@ mod tests {
             panic!("expected an extern declaration")
         };
         assert_eq!(d.name, "abs_int0");
-        assert_eq!(
-            d.ret,
-            Ty::Fun(
-                vec![Ty::Name("int".into())],
-                Box::new(Ty::Name("int".into()))
-            )
-        );
+        assert_eq!(d.params.len(), 1);
+        assert_eq!(d.params[0].ty, Ty::Name("int".into()));
+        assert_eq!(d.ret, Ty::Name("int".into()));
+    }
+
+    #[test]
+    fn an_extern_fun_with_a_curried_type_declares_its_parameters() {
+        // `extern fun fact : int -> int = "mac#fact"` — a signature with
+        // no parenthesised parameter list: the whole type is the curried
+        // arrow after the colon, which declares one parameter of `int`
+        // returning `int`.  It used to be skipped, so the `implement`
+        // that followed found nothing to fill in.
+        let p = Parser::parse("extern fun fact : int -> int = \"mac#fact\"\n").expect("parse");
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!("expected an extern declaration")
+        };
+        assert_eq!(d.name, "fact");
+        assert_eq!(d.params.len(), 1);
+        assert_eq!(d.params[0].ty, Ty::Name("int".into()));
+        assert_eq!(d.ret, Ty::Name("int".into()));
     }
 
     #[test]
