@@ -132,7 +132,17 @@ fn is_variance_annotation(name: &str) -> bool {
 /// `and`, `where` — stay ordinary identifiers, and those are the ones a
 /// type could otherwise absorb as a static index.
 fn starts_a_declaration(word: &str) -> bool {
-    is_skippable_directive(word) || matches!(word, "and" | "where")
+    is_skippable_directive(word)
+        || is_abstract_atype_prefix(word)
+        || matches!(word, "and" | "where")
+}
+
+/// Whether `word` is the prefix of an abstract-type form written with an
+/// `@`, like `abst@ype`, `absvt@ype`, `absviewt@ype`.  The lexer cuts the
+/// `@` out, so the prefix arrives alone and has to be recognised for what
+/// it begins.
+fn is_abstract_atype_prefix(word: &str) -> bool {
+    matches!(word, "abst" | "absvt" | "absviewt")
 }
 
 /// One `val`/`var` binding: a plain name, or a pattern the source
@@ -857,7 +867,7 @@ impl ParseCtx<'_> {
             // name was already gathered by the pre-pass, so the
             // declaration itself is skipped like the other abstract
             // forms, not mistaken for a definition.
-            TokenKind::Ident(name) if name == "abst" && self.at_at_joined_abstract() => {
+            TokenKind::Ident(_) if self.at_at_joined_abstract() => {
                 self.skip_directive();
                 Ok(())
             }
@@ -4175,8 +4185,15 @@ impl ParseCtx<'_> {
     /// tokens.  Rejoining them reads like `abstype`, the boxed form;
     /// both are declarations of a type name, and the difference is one
     /// of representation the subset does not distinguish.
+    /// The abstract-type forms written `abst@ype`, `absvt@ype`,
+    /// `absviewt@ype` — the linear, view, and viewtype spellings, all
+    /// cut at the `@` by the lexer into three tokens.
     fn at_at_joined_abstract(&self) -> bool {
-        if !matches!(&self.tokens[self.pos].kind, TokenKind::Ident(w) if w == "abst") {
+        let is_prefix = matches!(
+            &self.tokens[self.pos].kind,
+            TokenKind::Ident(w) if is_abstract_atype_prefix(w)
+        );
+        if !is_prefix {
             return false;
         }
         if !matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::At)) {
@@ -4193,7 +4210,7 @@ impl ParseCtx<'_> {
         if !self.at_at_joined_abstract() {
             return false;
         }
-        self.advance(); // `abst`
+        self.advance(); // prefix
         self.advance(); // `@`
         self.advance(); // `ype`
         if !self.parse_typedef_body() {
@@ -6970,6 +6987,27 @@ mod tests {
             Ty::Tuple(vec![Ty::Name("int".into()), Ty::Name("int".into())])
         );
     }
+
+    #[test]
+    fn every_abstract_type_spelling_with_an_at_is_rejoined() {
+        // `abst@ype`, `absvt@ype`, `absviewt@ype` — the linear, view and
+        // viewtype abstract forms — are all cut at the `@` by the lexer
+        // into three tokens.  Only the `abst` one used to be rejoined and
+        // read as a type alias; the other two stopped a `.sats` header
+        // before its declarations were ever seen.
+        let p = Parser::parse(concat!(
+            "absvt@ype v = int\n",
+            "absviewt@ype a = int\n",
+            "fun f (x: v, y: a): int = 1\n",
+        ))
+        .expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else {
+            panic!("first definition is not a fun")
+        };
+        assert_eq!(f.params[0].ty, Ty::Name("int".into()));
+        assert_eq!(f.params[1].ty, Ty::Name("int".into()));
+    }
+
 
     #[test]
     fn a_fun_with_no_body_is_a_declaration() {
