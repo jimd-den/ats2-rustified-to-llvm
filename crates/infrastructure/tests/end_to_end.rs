@@ -313,3 +313,63 @@ fn an_extfcall_lowers_to_a_call() {
     assert!(ir.contains("declare i64 @atoi"), "got:\n{ir}");
     assert!(ir.contains("call i64 @atoi"), "got:\n{ir}");
 }
+
+#[test]
+fn an_extval_reads_a_c_global() {
+    // `$extval(T, "CONST")` with no arguments names a C *value* — a
+    // global the host side defines — rather than a function to call.  It
+    // is declared and read, so a name the source never defined still
+    // answers at link time.
+    if !clang_available() {
+        eprintln!("skipping: no clang on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("ats2llvm-extval-global-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a place to work");
+    // ATS `int` is a machine word, so the C side names a `long`.
+    let source = "%{^\nlong the_answer = 42;\n%}\n\
+                  implement main0 () = println! (\"answer = \", $extval(int, \"the_answer\"))";
+
+    use ats2_application::use_cases::CompileExecutableUseCase;
+    use ats2_infrastructure::io::FileOutput;
+    use ats2_infrastructure::toolchain::ClangToolchain;
+
+    let ir = dir.join("g.ll");
+    let bin = dir.join("g");
+    let uc = CompileExecutableUseCase::new(Parser, LlvmIrEmitter, ClangToolchain, FileOutput);
+    uc.execute(source, &ir, &bin)
+        .expect("the program should build");
+
+    let out = Command::new(&bin).output().expect("run the linked program");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "answer = 42");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_extval_reads_a_c_macro() {
+    // `$extval(int, "MACRO")` names a C macro, which has no symbol of its
+    // own.  The compiler generates a shim beside the program's C — where
+    // the `#include` that defines the macro lives — and reads that.
+    if !clang_available() {
+        eprintln!("skipping: no clang on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("ats2llvm-extval-macro-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a place to work");
+    let source = "%{^\n#define THE_ANSWER 42\n%}\n\
+                  implement main0 () = println! (\"answer = \", $extval(int, \"THE_ANSWER\"))";
+
+    use ats2_application::use_cases::CompileExecutableUseCase;
+    use ats2_infrastructure::io::FileOutput;
+    use ats2_infrastructure::toolchain::ClangToolchain;
+
+    let ir = dir.join("m.ll");
+    let bin = dir.join("m");
+    let uc = CompileExecutableUseCase::new(Parser, LlvmIrEmitter, ClangToolchain, FileOutput);
+    uc.execute(source, &ir, &bin)
+        .expect("the program should build");
+
+    let out = Command::new(&bin).output().expect("run the linked program");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "answer = 42");
+    let _ = std::fs::remove_dir_all(&dir);
+}

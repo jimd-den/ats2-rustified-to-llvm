@@ -107,12 +107,14 @@ impl<P: ParserPort, E: LlvmEmitterPort, T: ToolchainPort, O: OutputPort>
             .write(ir_path, &ir)
             .map_err(|m| vec![CompileError::target(m)])?;
         let mut inputs = vec![ir_path.to_path_buf()];
-        // A program that brought its own C compiles to two files.  The
-        // block is the body of some `extern fun` declared beside it, so
-        // it goes to the toolchain together with the IR that calls into
-        // it — written next to the IR, because that is where the other
-        // half of the program already is.
-        if let Some(c) = inline_c(&program) {
+        // A program that brought its own C compiles to two files, and a
+        // program that named a C constant brings its shims: both are C,
+        // and both go to the toolchain together with the IR that calls
+        // into them — written next to the IR, because that is where the
+        // other half of the program already is.
+        let mut c = inline_c(&program).unwrap_or_default();
+        c.push_str(&extval_shims(&program).map_err(|e| vec![e])?);
+        if !c.is_empty() {
             let c_path = ir_path.with_extension("c");
             self.output
                 .write(&c_path, &c)
@@ -141,6 +143,73 @@ fn inline_c(program: &ats2_domain::ast::Program) -> Option<String> {
         })
         .collect();
     (!blocks.is_empty()).then(|| blocks.join("\n"))
+}
+
+/// The C spelling of a type an external constant can have.  Only the two
+/// that have one both in C and in the IR are admitted; the rest have no
+/// honest shim, and a shim is the one thing a constant cannot do without.
+fn c_type(ty: &ats2_domain::ast::Ty) -> Option<&'static str> {
+    match ty {
+        ats2_domain::ast::Ty::Name(n) if n == "int" => Some("long"),
+        ats2_domain::ast::Ty::Name(n) if n == "double" => Some("double"),
+        _ => None,
+    }
+}
+
+/// A name safe to use as a C identifier.  `$extval` constant names are C
+/// identifiers already; this is a backstop, not a hope.
+fn c_ident(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect()
+}
+
+/// Every `$extval(T, "CONST")` a program names with no arguments, and the
+/// C shim each one needs: a macro or enum has no symbol, so it is pinned
+/// into a global — `T ats_extval_CONST = (T)(CONST);` — beside the
+/// program's own C, where the `#include` that defines it lives.
+fn extval_shims(program: &ats2_domain::ast::Program) -> Result<String, CompileError> {
+    use ats2_domain::ast::{Def, Expr};
+
+    let mut found: Vec<(String, String, String)> = Vec::new();
+    let mut unsupported: Option<CompileError> = None;
+
+    fn collect(e: &Expr, found: &mut Vec<(String, String, String)>, unsupported: &mut Option<CompileError>) {
+        if let Expr::ExtVal { ty, name, args, .. } = e {
+            if args.is_empty() {
+                let Some(cty) = c_type(ty) else {
+                    if unsupported.is_none() {
+                        *unsupported = Some(CompileError::emit(format!(
+                            "external constant `{name}` has a type with no C spelling"
+                        )));
+                    }
+                    return;
+                };
+                let entry = (cty.to_string(), format!("ats_extval_{}", c_ident(name)), name.clone());
+                if !found.contains(&entry) {
+                    found.push(entry);
+                }
+            }
+        }
+        e.each_subexpr(&mut |s| collect(s, found, unsupported));
+    }
+
+    for def in program.defs() {
+        match def {
+            Def::Fun(f) => collect(&f.body, &mut found, &mut unsupported),
+            Def::Implement(i) => collect(&i.body, &mut found, &mut unsupported),
+            Def::Val(v) => collect(&v.value, &mut found, &mut unsupported),
+            _ => {}
+        }
+    }
+    if let Some(e) = unsupported {
+        return Err(e);
+    }
+    let mut out = String::new();
+    for (cty, ident, original) in found {
+        out.push_str(&format!("{cty} {ident}(void) {{ return ({cty})({original}); }}\n"));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

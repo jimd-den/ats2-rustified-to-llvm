@@ -1951,13 +1951,24 @@ impl LlvmIrEmitter {
             // function symbol here, so both declare one and call it.)
             Expr::ExtVal { ty, name, args, .. } => {
                 if args.is_empty() {
-                    // `$extval(T, "C_CONST")` names a C constant or macro,
-                    // not a function: there is nothing to call.  Lowering it
-                    // needs the header that defines it, which is a step of
-                    // its own.
-                    return Err(CompileError::emit(format!(
-                        "external C value `{name}` (no arguments) is not emitted yet"
-                    )));
+                    // `$extval(T, "CONST")` names a C constant — a macro
+                    // or enum, most often, which has no symbol of its own,
+                    // or a global.  A getter is generated beside the
+                    // program's own C — `T ats_extval_CONST(void) { return
+                    // (T)(CONST); }` — where the defining `#include` lives,
+                    // and this is the call into it.  A getter, not a
+                    // global, because a file-scope initializer cannot read
+                    // a global, and the point of the name is that it may
+                    // be either.
+                    let ty = llvm_type_in(ty, registry)?;
+                    let c_name = format!("ats_extval_{}", sanitize(name));
+                    module.externs.insert(Box::leak(
+                        format!("declare {} @{}()", llvm_ty_str(ty), c_name)
+                            .into_boxed_str(),
+                    ));
+                    let reg = fb.fresh_temp();
+                    fb.line(format!("{reg} = call {} @{}()", llvm_ty_str(ty), c_name));
+                    return Ok(FnValue { reg, ty });
                 }
                 let ret = llvm_type_in(ty, registry)?;
                 let mut arg_tys: Vec<LlvmType> = Vec::new();
