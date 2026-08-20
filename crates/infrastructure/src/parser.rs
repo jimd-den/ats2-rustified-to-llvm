@@ -2809,7 +2809,10 @@ impl ParseCtx<'_> {
             }
             // A projection is a place too, so `xx.0 := e` is a store
             // into that slot rather than a rebinding of a name.
-            if matches!(lhs, Expr::Proj(..) | Expr::Index(..) | Expr::Deref(..)) {
+            if matches!(
+                lhs,
+                Expr::Proj(..) | Expr::Index(..) | Expr::Deref(..) | Expr::Field(..)
+            ) {
                 let compound = self.compound_assign_op();
                 if compound.is_some() {
                     self.advance();
@@ -2966,6 +2969,21 @@ impl ParseCtx<'_> {
                 };
                 self.advance();
                 expr = Expr::Field(Box::new(expr), field);
+            } else if self.at(&TokenKind::Arrow)
+                && matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::Ident(_))
+                )
+            {
+                // `p->f` — a field reached *through* a pointer, ATS's
+                // shorthand for `(!p).f`.  The pointer is read and the
+                // field taken in one step: nothing reads the pointer alone.
+                self.advance();
+                let TokenKind::Ident(field) = self.peek().kind.clone() else {
+                    unreachable!()
+                };
+                self.advance();
+                expr = Expr::Field(Box::new(Expr::Deref(Box::new(expr))), field);
             } else if self.at(&TokenKind::LBracket) {
                 self.advance();
                 let index = self.parse_expr(0)?;
@@ -7314,6 +7332,44 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
             panic!("expected a fun def");
         };
         assert_eq!(f.name, "loop");
+    }
+
+
+    #[test]
+    fn a_pointer_field_read_is_a_deref_then_a_field() {
+        // `p->f` is ATS's shorthand for `(!p).f`: the pointer is read, then
+        // the field.  It failed before because `->` had no expression arm.
+        let body = impl_body("implement main0 () = p->f");
+        match body {
+            Expr::Field(base, f) => {
+                assert_eq!(f, "f");
+                match *base {
+                    Expr::Deref(inner) => assert_eq!(*inner, Expr::Var("p".into())),
+                    other => panic!("expected a deref, got {other:?}"),
+                }
+            }
+            other => panic!("expected a field read, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pointer_field_store_writes_through_the_pointer() {
+        // `p->f := e` stores through the pointer into the field, so the
+        // place is the field reached by deref and `:=` is the store.
+        let body = impl_body("implement main0 () = p->f := 7");
+        match body {
+            Expr::Store(place, value) => {
+                assert_eq!(*value, Expr::IntLit(7));
+                match *place {
+                    Expr::Field(base, f) => {
+                        assert_eq!(f, "f");
+                        assert!(matches!(*base, Expr::Deref(_)));
+                    }
+                    other => panic!("expected a field place, got {other:?}"),
+                }
+            }
+            other => panic!("expected a store, got {other:?}"),
+        }
     }
 
 }
