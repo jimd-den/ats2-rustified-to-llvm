@@ -533,6 +533,10 @@ impl ParseCtx<'_> {
         self.tokens.get(self.pos).unwrap_or(&EOF_TOKEN)
     }
 
+    fn at_ident(&self, word: &str) -> bool {
+        matches!(&self.peek().kind, TokenKind::Ident(w) if w == word)
+    }
+
     fn at(&self, kind: &TokenKind) -> bool {
         self.peek().kind == *kind
     }
@@ -876,6 +880,20 @@ impl ParseCtx<'_> {
             // forms, not mistaken for a definition.
             TokenKind::Ident(_) if self.at_at_joined_abstract() => {
                 self.skip_directive();
+                Ok(())
+            }
+            // `datatype a = ... and b = ...` — a group of datatypes that
+            // may refer to one another.  Each clause is a datatype; the
+            // `and` is the mutual-recursion link, not a function's.
+            TokenKind::Datatype => {
+                // The first clause carries the `datatype` keyword; each
+                // later clause is just `and name (...) = ...`, with no
+                // repeated keyword.
+                out.push(self.parse_datatype_def()?);
+                while self.at_ident("and") {
+                    self.advance(); // `and`
+                    out.push(self.parse_datatype_body(false)?);
+                }
                 Ok(())
             }
             _ => {
@@ -5278,6 +5296,27 @@ mod tests {
         };
         assert_eq!(d.ctors[1].name, "BTnode");
         assert_eq!(d.ctors[1].fields.len(), 2);
+    }
+
+    #[test]
+    fn a_datatype_group_joined_by_and_reads_every_clause() {
+        // `datatype btree(...) = ... and btreelst(...) = ...` — datatypes
+        // that refer to one another are written as one group joined by
+        // `and`.  Each clause is a datatype, not a function, so the `and`
+        // continues the group instead of starting a function body.
+        let p = Parser::parse(
+            "datatype btree(a) = BTnil | BTcons of (a, btree(a))\n             and btreelst(a) = BLnil | BLcons of (a, btreelst(a))\n",
+        )
+        .expect("parse");
+        let names: Vec<&str> = p
+            .defs()
+            .iter()
+            .filter_map(|d| match d {
+                Def::Datatype(d) => Some(d.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["btree", "btreelst"]);
     }
 
     // --- template arguments in braces ------------------------------
