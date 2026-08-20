@@ -152,3 +152,120 @@ implement main0() = println!(\"ok\")\
     assert!(!ir.contains("@base"), "the proof was emitted:\n{ir}");
     assert!(ir.contains("define i32 @main()"), "got:\n{ir}");
 }
+
+#[test]
+fn a_program_written_in_three_files_builds_and_runs() {
+    // The point of `staload`.  `main.dats` names `math.sats` for the
+    // declaration and `math.dats` for the definition, and `math.dats`
+    // reaches one directory down for a helper of its own — so the walk
+    // has to resolve relative to the file that asked rather than to the
+    // root, and has to fold `math.sats` in once even though two files
+    // named it.
+    //
+    // It lives here rather than in `examples/` for the same reason the
+    // inline-C test does: the suite there hands one `.dats` to `lli`,
+    // and a program in three files is one the *front end* has to
+    // assemble before there is any IR to interpret.
+    if !clang_available() {
+        eprintln!("skipping: no clang on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("ats2llvm-modules-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("lib")).expect("a place to work");
+
+    std::fs::write(
+        dir.join("lib/double.dats"),
+        "fun double (n: int): int = n + n\n",
+    )
+    .expect("write lib/double.dats");
+    std::fs::write(
+        dir.join("math.sats"),
+        "extern fun quadruple (n: int): int\n",
+    )
+    .expect("write math.sats");
+    std::fs::write(
+        dir.join("math.dats"),
+        "staload \"math.sats\"\n\
+         staload \"lib/double.dats\"\n\
+         implement quadruple (n) = double (double (n))\n",
+    )
+    .expect("write math.dats");
+    let main = dir.join("main.dats");
+    std::fs::write(
+        &main,
+        "staload \"math.sats\"\n\
+         staload _ = \"math.dats\"\n\
+         implement main0 () = println! (\"quadruple 7 = \", quadruple (7))\n",
+    )
+    .expect("write main.dats");
+
+    use ats2_application::use_cases::CompileExecutableUseCase;
+    use ats2_infrastructure::io::FileOutput;
+    use ats2_infrastructure::sources::FileSources;
+    use ats2_infrastructure::toolchain::ClangToolchain;
+
+    let source = std::fs::read_to_string(&main).expect("read main.dats");
+    let ir = dir.join("main.ll");
+    let bin = dir.join("main");
+    let uc = CompileExecutableUseCase::new(Parser, LlvmIrEmitter, ClangToolchain, FileOutput)
+        .loading(FileSources::at(&main));
+    uc.execute(&source, &ir, &bin)
+        .expect("the program should build");
+
+    let out = Command::new(&bin).output().expect("run the linked program");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "quadruple 7 = 28"
+    );
+
+    // `math.sats` was named by both files and defined `quadruple` once.
+    // Twice would be a duplicate symbol, and the link above would have
+    // said so — but the IR is where it reads plainly.
+    let text = std::fs::read_to_string(&ir).expect("read the IR");
+    assert_eq!(
+        text.matches("define i64 @quadruple(").count(),
+        1,
+        "got:\n{text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_staload_naming_no_file_is_refused_rather_than_skipped() {
+    // The old behaviour was to skip every `staload`, which turned a
+    // misspelt filename into a missing symbol at link time named after
+    // something the user never typed.
+    use ats2_application::use_cases::CompileToIrUseCase;
+    use ats2_infrastructure::sources::FileSources;
+
+    let dir = std::env::temp_dir().join(format!("ats2llvm-missing-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a place to work");
+    let main = dir.join("main.dats");
+    let source = "staload \"hlper.sats\"\nimplement main0 () = ()\n";
+    std::fs::write(&main, source).expect("write main.dats");
+
+    let uc = CompileToIrUseCase::new(Parser, LlvmIrEmitter).loading(FileSources::at(&main));
+    let errs = uc.execute(source).expect_err("should fail");
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].message().contains("hlper.sats"), "{}", errs[0]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_staload_into_the_ats_distribution_is_still_answered_by_the_prelude() {
+    // Every `staload` in the corpus names something under `prelude/` or
+    // `libats/`.  Those must stay silent with a loader wired in, or
+    // multi-file support arrives by breaking all 36 samples.
+    use ats2_application::use_cases::CompileToIrUseCase;
+    use ats2_infrastructure::sources::FileSources;
+
+    let main = std::env::temp_dir().join("ats2llvm-dist-main.dats");
+    let source = "staload \"prelude/DATS/integer.dats\"\n\
+                  staload UN = \"prelude/SATS/unsafe.sats\"\n\
+                  staload _ = \"libats/ML/DATS/list0.dats\"\n\
+                  implement main0 () = println! (\"ok\")\n";
+    let uc = CompileToIrUseCase::new(Parser, LlvmIrEmitter).loading(FileSources::at(&main));
+    let ir = uc.execute(source).expect("the program should compile");
+    assert!(ir.contains("define i32 @main()"), "got:\n{ir}");
+}

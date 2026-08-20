@@ -18,21 +18,67 @@
 
 use crate::statics::{Quant, SExp, Sort};
 
-/// A whole compiled unit: an ordered list of top-level definitions.
+/// A whole compiled unit: an ordered list of top-level definitions, and
+/// the other units it asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
     pub defs: Vec<Def>,
+    /// The `staload`s this unit wrote, in source order.
+    ///
+    /// They are not definitions and deliberately not a [`Def`] variant.
+    /// A `staload` is a statement *about* the unit — where the rest of
+    /// it lives — and it is answered and discarded before anything
+    /// downstream runs.  Putting it in `defs` would oblige the checker,
+    /// the resource walk and the emitter each to grow an arm for a node
+    /// none of them can ever meet, which is three chances to forget one.
+    pub staloads: Vec<Staload>,
 }
 
 impl Program {
     pub fn new(defs: Vec<Def>) -> Self {
-        Self { defs }
+        Self {
+            defs,
+            staloads: Vec::new(),
+        }
+    }
+
+    /// The same unit, with the units it asked for recorded.
+    pub fn asking_for(mut self, staloads: Vec<Staload>) -> Self {
+        self.staloads = staloads;
+        self
     }
 
     /// The definitions, in source order.
     pub fn defs(&self) -> &[Def] {
         &self.defs
     }
+
+    /// The other units this one asked for, in source order.
+    pub fn staloads(&self) -> &[Staload] {
+        &self.staloads
+    }
+}
+
+/// One `staload` — a unit naming another it needs.
+///
+/// The four spellings ATS has all say the same thing to this compiler:
+///
+/// * `staload "x.sats"` — bring it in.
+/// * `staload H = "x.sats"` — bring it in, reachable as `$H.name`.
+/// * `staload _ = "x.dats"` — bring it in for its definitions.
+/// * `dynload "x.dats"` — the same, said differently.
+///
+/// The distinctions ATS draws between them are about namespaces, and
+/// this compiler has one namespace, so what survives is the path.  The
+/// alias survives with it because `$H.name` is written in source and
+/// something has to know that `H` was a module rather than a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Staload {
+    /// The path exactly as written, quotes removed.
+    pub path: String,
+    /// `H` in `staload H = "..."`.  `None` for the plain and `_`
+    /// spellings, which introduce no name.
+    pub alias: Option<String>,
 }
 
 /// A top-level definition: a datatype, a function, or an implementation.

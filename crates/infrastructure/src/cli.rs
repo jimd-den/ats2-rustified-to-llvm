@@ -20,6 +20,7 @@ use crate::diagnostics::StderrDiagnostics;
 use crate::io::FileOutput;
 use crate::llvm_ir::LlvmIrEmitter;
 use crate::parser::Parser;
+use crate::sources::FileSources;
 use crate::toolchain::ClangToolchain;
 use ats2_application::ports::{DiagnosticsPort, OutputPort};
 
@@ -36,6 +37,9 @@ pub struct CliArgs {
     /// than the language it reasons about, and a program the checker
     /// merely cannot follow is not a program that is wrong.
     pub strictness: Strictness,
+    /// Extra directories to look in for a `staload`ed file, tried after
+    /// the directory of whichever file wrote the `staload`.
+    pub include: Vec<PathBuf>,
 }
 
 impl CliArgs {
@@ -48,6 +52,7 @@ impl CliArgs {
         let mut ir: Option<PathBuf> = None;
         let mut binary: Option<PathBuf> = None;
         let mut strictness = Strictness::default();
+        let mut include: Vec<PathBuf> = Vec::new();
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
@@ -61,9 +66,16 @@ impl CliArgs {
                     let value = args.get(i).ok_or("`--bin` needs a value")?;
                     binary = Some(PathBuf::from(value));
                 }
+                "-I" | "--include" => {
+                    i += 1;
+                    let value = args.get(i).ok_or("`-I` needs a directory")?;
+                    include.push(PathBuf::from(value));
+                }
                 "--permissive" => strictness = Strictness::Permissive,
                 "--strict" => strictness = Strictness::Strict,
-                flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+                flag if flag.starts_with("-") && flag != "-" => {
+                    return Err(format!("unknown flag `{flag}`"));
+                }
                 file => {
                     if source.is_some() {
                         return Err(format!("unexpected extra argument `{file}`"));
@@ -84,6 +96,7 @@ impl CliArgs {
             ir,
             binary,
             strictness,
+            include,
         })
     }
 }
@@ -111,8 +124,16 @@ pub fn run(args: Vec<String>) -> i32 {
 /// Print a usage error and return the usage exit code.
 fn usage_error(message: &str) -> i32 {
     eprintln!("ats2llvm: {message}");
-    eprintln!("usage: ats2llvm <file.dats> [--ir <file.ll>] [--bin <executable>] [--permissive]");
+    eprintln!(
+        "usage: ats2llvm <file.dats> [--ir <file.ll>] [--bin <executable>] \\
+         [-I <dir>] [--permissive]"
+    );
     2
+}
+
+/// Where this invocation looks for the units the source `staload`s.
+fn sources(cli: &CliArgs) -> FileSources {
+    FileSources::at(&cli.source).searching(cli.include.iter().cloned())
 }
 
 /// The `--bin` route: compile to IR, persist it, link it.
@@ -124,7 +145,8 @@ fn build_binary(
 ) -> i32 {
     let ir_path = cli.ir.as_ref().expect("parse_args guarantees an IR path");
     let uc = CompileExecutableUseCase::new(Parser, LlvmIrEmitter, ClangToolchain, FileOutput)
-        .checking(cli.strictness);
+        .checking(cli.strictness)
+        .loading(sources(cli));
     match uc.execute(source, ir_path, binary) {
         Ok(()) => {
             diag.info(&format!("wrote IR      {}", ir_path.display()));
@@ -140,7 +162,9 @@ fn build_binary(
 
 /// The IR route: compile source text down to IR, then persist or print.
 fn build_ir(source: &str, cli: &CliArgs, diag: &StderrDiagnostics) -> i32 {
-    let uc = CompileToIrUseCase::new(Parser, LlvmIrEmitter).checking(cli.strictness);
+    let uc = CompileToIrUseCase::new(Parser, LlvmIrEmitter)
+        .checking(cli.strictness)
+        .loading(sources(cli));
     match uc.execute(source) {
         Ok(ir) => match &cli.ir {
             Some(ir_path) => match FileOutput.write(ir_path, &ir) {
@@ -172,6 +196,39 @@ mod tests {
     fn parse(args: &[&str]) -> Result<CliArgs, String> {
         let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         CliArgs::parse_args(&owned)
+    }
+
+    #[test]
+    fn a_program_looks_only_beside_itself_unless_told_otherwise() {
+        assert_eq!(
+            parse(&["hello.dats"]).expect("parse").include,
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    #[test]
+    fn include_directories_are_kept_in_the_order_they_were_given() {
+        // They are tried in order after the directory of whichever file
+        // wrote the `staload`, so the order is the meaning.
+        let a = parse(&["-I", "vendor", "--include", "third_party", "hello.dats"]).expect("parse");
+        assert_eq!(
+            a.include,
+            vec![PathBuf::from("vendor"), PathBuf::from("third_party")]
+        );
+        assert_eq!(a.source, PathBuf::from("hello.dats"));
+    }
+
+    #[test]
+    fn an_include_with_no_directory_is_a_usage_error() {
+        assert!(parse(&["hello.dats", "-I"]).is_err());
+    }
+
+    #[test]
+    fn a_short_flag_nobody_defined_is_still_a_flag() {
+        // `-x` used to be taken for a source file, so the error came
+        // out as \"unexpected extra argument\" pointing at the real one.
+        let message = parse(&["-x", "hello.dats"]).expect_err("should fail");
+        assert!(message.contains("-x"), "{message}");
     }
 
     #[test]

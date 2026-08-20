@@ -17,4 +17,5 @@ pub mod llvm_ir;
 pub mod mono;
 pub mod parser;
 pub mod prelude;
+pub mod sources;
 pub mod toolchain;

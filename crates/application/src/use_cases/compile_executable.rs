@@ -12,7 +12,7 @@ use std::path::Path;
 use ats2_domain::errors::CompileError;
 
 use crate::checking::Strictness;
-use crate::ports::{LlvmEmitterPort, OutputPort, ParserPort, ToolchainPort};
+use crate::ports::{LlvmEmitterPort, OutputPort, ParserPort, SourceLoaderPort, ToolchainPort};
 
 /// Compiles source text into an executable binary.
 pub struct CompileExecutableUseCase<
@@ -29,6 +29,15 @@ pub struct CompileExecutableUseCase<
     /// check, and both must check the same way, or the guarantee depends
     /// on which one was used.
     strictness: Strictness,
+    /// Where to find the units the source `staload`s, if anywhere.
+    ///
+    /// `None` is "this program is one file", which is what every
+    /// caller wanted before multi-file support existed and what the
+    /// fakes in these tests still want.  It is a trait object rather
+    /// than a fifth type parameter because it is the only port that is
+    /// genuinely optional, and making every existing caller name a
+    /// do-nothing loader to say so would be a worse contract.
+    modules: Option<Box<dyn SourceLoaderPort>>,
 }
 
 impl<P: ParserPort, E: LlvmEmitterPort, T: ToolchainPort, O: OutputPort>
@@ -41,7 +50,17 @@ impl<P: ParserPort, E: LlvmEmitterPort, T: ToolchainPort, O: OutputPort>
             toolchain,
             output,
             strictness: Strictness::default(),
+            modules: None,
         }
+    }
+
+    /// Compile a program that may be spread over several files.
+    ///
+    /// Without this the source is the whole program and every `staload`
+    /// is answered by the built-in prelude or by nothing.
+    pub fn loading(mut self, loader: impl SourceLoaderPort + 'static) -> Self {
+        self.modules = Some(Box::new(loader));
+        self
     }
 
     /// Compile under a different strictness than the default.  See
@@ -61,6 +80,15 @@ impl<P: ParserPort, E: LlvmEmitterPort, T: ToolchainPort, O: OutputPort>
         binary_path: &Path,
     ) -> Result<(), Vec<CompileError>> {
         let program = self.parser.parse(source)?;
+        // Everything the source asked for, folded in before anything
+        // looks at it.  It happens here, above the checker, because a
+        // declaration in another file is a declaration this one is
+        // entitled to rest on — and below the parser, because finding
+        // files is not a parser's business.
+        let program = match &self.modules {
+            Some(loader) => crate::modules::resolve(program, &self.parser, loader.as_ref())?,
+            None => program,
+        };
         // See `compile_to_ir`: the static language is checked before it
         // is erased, and both entry points must check, or the guarantee
         // depends on which one was used.

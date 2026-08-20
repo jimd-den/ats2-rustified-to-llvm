@@ -1,6 +1,6 @@
 use ats2_domain::ast::{
     BinOp, ConstDef, Ctor, DatatypeDef, Def, Expr, FunDecl, FunDef, ImplementDef, LetBind, Param,
-    Pattern, Program, Ty, ValDef,
+    Pattern, Program, Staload, Ty, ValDef,
 };
 use ats2_domain::errors::CompileError;
 use ats2_domain::statics::{Quant, SExp, Sort};
@@ -37,6 +37,7 @@ impl Parser {
             macros: HashMap::new(),
             typedefs: HashMap::new(),
             pending: Vec::new(),
+            staloads: Vec::new(),
             gensym: 0,
             type_vars: Vec::new(),
             macro_funs: HashMap::new(),
@@ -427,6 +428,10 @@ struct ParseCtx<'a> {
     /// Declarations found inside a body that belong to the program as a
     /// whole, such as an `overload` written in a `let`.
     pending: Vec<Def>,
+    /// Every `staload` the file wrote, in source order.  They name the
+    /// other units this one needs, and answering them is somebody
+    /// else's job — the parser reads one file and has no filesystem.
+    staloads: Vec<Staload>,
     /// A counter for names the parser invents, so a desugaring can bind
     /// a temporary without any chance of shadowing the source's own.
     gensym: usize,
@@ -531,7 +536,7 @@ impl ParseCtx<'_> {
         }
         // Declarations found inside bodies join the program's own.
         defs.extend(std::mem::take(&mut self.pending));
-        Ok(Program::new(defs))
+        Ok(Program::new(defs).asking_for(std::mem::take(&mut self.staloads)))
     }
 
     /// Find every type alias in the file before parsing any of it.
@@ -777,6 +782,18 @@ impl ParseCtx<'_> {
                 }
                 Ok(())
             }
+            // `staload` and `dynload` are still skipped as text — but
+            // what they *named* is written down first.  Every other
+            // directive on that list speaks to a part of ATS this
+            // compiler does not implement; these two speak to where the
+            // rest of the program is, which is a question it can answer.
+            TokenKind::Ident(name) if name == "staload" || name == "dynload" => {
+                if let Some(s) = self.read_staload() {
+                    self.staloads.push(s);
+                }
+                self.skip_directive();
+                Ok(())
+            }
             TokenKind::Ident(name) if is_skippable_directive(&name) => {
                 self.skip_directive();
                 Ok(())
@@ -877,6 +894,44 @@ impl ParseCtx<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Read what a `staload` names, without consuming any of it.
+    ///
+    /// The four spellings differ only in what sits between the keyword
+    /// and the path — nothing, `H =`, or `_ =` — so this looks past
+    /// exactly that and takes the string.  `(*anon*)`, which the corpus
+    /// writes after the `_`, is a comment and is gone by now.
+    ///
+    /// `None` when there is no string to find.  That is not an error:
+    /// `staload` has spellings this compiler has never met, and the
+    /// established answer to one of those is to skip the line, not to
+    /// refuse the file.
+    fn read_staload(&self) -> Option<Staload> {
+        let mut at = self.pos + 1;
+        let mut alias = None;
+        // `H =` or `_ =`, if either is there.
+        if matches!(self.nth(at + 1), Some(TokenKind::Eq)) {
+            alias = match self.nth(at) {
+                Some(TokenKind::Ident(name)) => Some(name.clone()),
+                // `_` names nothing, which is the whole point of it.
+                Some(TokenKind::Underscore) => None,
+                _ => return None,
+            };
+            at += 2;
+        }
+        match self.nth(at) {
+            Some(TokenKind::StrLit(path)) => Some(Staload {
+                path: path.clone(),
+                alias,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The kind of the token `n` places along, if the file is that long.
+    fn nth(&self, n: usize) -> Option<&TokenKind> {
+        self.tokens.get(n).map(|t| &t.kind)
     }
 
     /// Consume a form we do not model, stopping just before whatever looks
@@ -4513,6 +4568,60 @@ mod tests {
         };
         assert_eq!(d.name, "t");
         assert_eq!(d.ctors.len(), 2);
+    }
+
+    // --- `staload`, recorded rather than forgotten -----------------
+
+    #[test]
+    fn a_staload_says_which_file_it_wants() {
+        let p = Parser::parse("staload \"helper.sats\"\nfun f(): int = 1").expect("parse");
+        assert_eq!(p.staloads().len(), 1, "{:?}", p.staloads());
+        assert_eq!(p.staloads()[0].path, "helper.sats");
+        assert_eq!(p.staloads()[0].alias, None);
+        // Recording it must not stop the rest of the file parsing.
+        assert_eq!(p.defs().len(), 1);
+    }
+
+    #[test]
+    fn a_staload_with_a_name_keeps_the_name() {
+        // `$UN.cast` is written in source, so something has to know that
+        // `UN` was a module rather than a value.
+        let p = Parser::parse("staload UN = \"unsafe.sats\"\nfun f(): int = 1").expect("parse");
+        assert_eq!(p.staloads().len(), 1, "{:?}", p.staloads());
+        assert_eq!(p.staloads()[0].path, "unsafe.sats");
+        assert_eq!(p.staloads()[0].alias.as_deref(), Some("UN"));
+    }
+
+    #[test]
+    fn an_anonymous_staload_introduces_no_name() {
+        // `_` and `_(*anon*)` both mean \"for its definitions, not its
+        // namespace\" — there is no alias to record.
+        for src in [
+            "staload _ = \"x.dats\"\nfun f(): int = 1",
+            "staload _(*anon*) = \"x.dats\"\nfun f(): int = 1",
+        ] {
+            let p = Parser::parse(src).expect("parse");
+            assert_eq!(p.staloads().len(), 1, "{src:?} -> {:?}", p.staloads());
+            assert_eq!(p.staloads()[0].path, "x.dats", "{src:?}");
+            assert_eq!(p.staloads()[0].alias, None, "{src:?}");
+        }
+    }
+
+    #[test]
+    fn a_dynload_is_a_staload_said_differently() {
+        let p = Parser::parse("dynload \"x.dats\"\nfun f(): int = 1").expect("parse");
+        assert_eq!(p.staloads().len(), 1, "{:?}", p.staloads());
+        assert_eq!(p.staloads()[0].path, "x.dats");
+    }
+
+    #[test]
+    fn every_staload_in_a_file_is_kept_in_order() {
+        let p = Parser::parse(
+            "staload \"a.sats\"\nstaload B = \"b.sats\"\ndynload \"c.dats\"\nfun f(): int = 1",
+        )
+        .expect("parse");
+        let paths: Vec<&str> = p.staloads().iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(paths, ["a.sats", "b.sats", "c.dats"]);
     }
 
     // --- `val rec` -------------------------------------------------

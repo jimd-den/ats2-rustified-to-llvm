@@ -50,6 +50,39 @@ pub trait ParserPort {
     }
 }
 
+/// One unit of source, found on the strength of a `staload`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unit {
+    /// Where it was found — the identity two `staload`s of the same file
+    /// are compared on, and what its own relative `staload`s resolve
+    /// against.
+    pub path: PathBuf,
+    pub source: String,
+}
+
+/// Finds the source a `staload` named.
+///
+/// This is the port that makes a program bigger than one file.  It is
+/// deliberately not part of [`ParserPort`]: a parser reads the text it
+/// is handed and has no business knowing that files exist, and the rule
+/// deciding *which* paths are worth looking for is policy, which lives
+/// here rather than in the adapter that does the looking.
+pub trait SourceLoaderPort {
+    /// The unit being compiled — what a `staload` in the top-level
+    /// source resolves against.
+    fn origin(&self) -> PathBuf;
+
+    /// Find `requested`, as written in a `staload` inside `from`.
+    ///
+    /// `Ok(None)` means *not one of ours*.  Every `staload` in the
+    /// corpus names something in the ATS distribution — `prelude/…`,
+    /// `libats/…` — which this compiler answers with its own built-in
+    /// prelude rather than by reading ATS's sources.  Those must come
+    /// back as `None` and not as an error, or every real program stops
+    /// compiling.
+    fn load(&self, requested: &str, from: &Path) -> Result<Option<Unit>, String>;
+}
+
 /// Lowers a parsed program to canonical textual LLVM IR.
 pub trait LlvmEmitterPort {
     fn emit(&self, program: &Program) -> Result<String, CompileError>;

@@ -11,5 +11,6 @@
 pub mod checking;
 pub mod constraints;
 pub mod linearity;
+pub mod modules;
 pub mod ports;
 pub mod use_cases;
