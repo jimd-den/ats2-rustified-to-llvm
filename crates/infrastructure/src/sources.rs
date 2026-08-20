@@ -48,7 +48,7 @@ const DISTRIBUTION: [&str; 5] = [
 /// result feeds the same rules any other path does — one that lands in the
 /// distribution is declined for the prelude to answer, and the rest are
 /// looked for like any user file.
-const PATH_MACROS: [(&str, &str); 11] = [
+const PATH_MACROS: [(&str, &str); 17] = [
     ("$LIBATSCC2JS", "contrib/libatscc2js"),
     ("$LIBATSCC2PY3", "contrib/libatscc2py3"),
     ("$LIBATSCC2ERL", "contrib/libatscc2erl"),
@@ -60,6 +60,14 @@ const PATH_MACROS: [(&str, &str); 11] = [
     ("$ATSCNTRB", "contrib/atscntrb"),
     ("$CATSPARSEMIT", "contrib/CATS-parsemit"),
     ("$EXTSOLVE", "contrib/ATS-extsolve"),
+    // The `atscntrb` add-ons and the testing library, all of which live
+    // inside the distribution.
+    ("$MYTESTING", "contrib/atscntrb/atscntrb-hx-mytesting"),
+    ("$LIBJSONC", "contrib/atscntrb/atscntrb-hx-libjson-c"),
+    ("$LIBGMP", "contrib/atscntrb/atscntrb-hx-libgmp"),
+    ("$INTINF", "contrib/atscntrb/atscntrb-hx-intinf"),
+    ("$LIBPCRE", "contrib/atscntrb/atscntrb-hx-libpcre"),
+    ("$PATSCONTRIB", "contrib"),
 ];
 
 /// Reads `staload`ed units from the file system.
