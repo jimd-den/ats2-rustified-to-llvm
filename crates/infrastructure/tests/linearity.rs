@@ -110,3 +110,56 @@ fn a_resource_a_body_made_is_a_resource_the_body_owes() {
 fn a_resource_a_body_made_and_gave_away_is_settled() {
     assert!(faults("fun f (): void = let val b = make_vt () in free_vt(b) end").is_empty());
 }
+
+#[test]
+fn a_resource_the_body_made_and_gave_away_twice_is_refused() {
+    // The same mistake as `giving_the_same_resource_away_twice`, but on
+    // a resource the body made rather than one it was handed.  The two
+    // `free_vt(b)` calls sit in separate statements of one block, which
+    // is the shape a person actually writes — and the shape the earlier
+    // tests, all phrased on a parameter, never put the walk through.
+    let errs = faults(
+        "fun f (): void = let val b = make_vt () val () = free_vt(b) in free_vt(b) end",
+    );
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].contains('b'), "{}", errs[0]);
+    assert!(errs[0].contains("already"), "{}", errs[0]);
+}
+
+#[test]
+fn a_resource_a_constructor_built_is_still_a_resource() {
+    // `mk_vt(3)` has no signature to look up — the `datavtype`
+    // declaration is the only thing that says it hands back something
+    // owed.  Before the walk read that declaration, a value built this
+    // way was invisible: freed twice without complaint, and dropped
+    // without complaint either.
+    let errs = faults("fun f (): void = let val b = mk_vt(3) in free_vt(b) end");
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn a_constructor_built_resource_given_away_twice_is_refused() {
+    let errs = faults(
+        "fun f (): void = let val b = mk_vt(3) val () = free_vt(b) in free_vt(b) end",
+    );
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].contains('b'), "{}", errs[0]);
+    assert!(errs[0].contains("already"), "{}", errs[0]);
+}
+
+#[test]
+fn a_constructor_built_resource_nobody_gives_away_is_refused() {
+    let errs = faults("fun f (): void = let val b = mk_vt(3) in () end");
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].contains("never"), "{}", errs[0]);
+}
+
+#[test]
+fn building_with_a_resource_hands_it_to_the_structure() {
+    // `b` goes into the box and is the box's from then on.  The body
+    // owes the box, not `b` — and must not be told it leaked `b`.
+    let errs = faults(
+        "fun f (b: box_vt(int)): void = let val outer = mk_vt(b) in free_vt(outer) end",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}

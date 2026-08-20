@@ -64,7 +64,9 @@ pub fn faults(program: &Program, ambient: &Program) -> Vec<Fault> {
     let mut sigs = SigTable::of(ambient);
     sigs.extend(SigTable::of(program));
     let linear = linear_types(ambient, program);
-    let mut walk = Walk { sigs: &sigs, linear: &linear, out: Vec::new(), function: String::new(), certain: true };
+    let ctors = linear_ctors(ambient, program);
+    let mut walk =
+        Walk { sigs: &sigs, linear: &linear, ctors: &ctors, out: Vec::new(), function: String::new(), certain: true };
     for def in program.defs() {
         match def {
             Def::Fun(f) => walk.function_def(f),
@@ -99,6 +101,24 @@ fn linear_types(ambient: &Program, program: &Program) -> HashSet<String> {
     out
 }
 
+/// The constructors that *build* a resource.
+///
+/// A function that returns one says so in a signature, and the walk can
+/// look that up.  A constructor has no signature to look up — the
+/// `datavtype` declaration is the only place that says `mk_vt` hands
+/// back something owed, so that is where the walk has to read it.
+fn linear_ctors(ambient: &Program, program: &Program) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for def in ambient.defs().iter().chain(program.defs()) {
+        if let Def::Datatype(d) = def {
+            if d.linear {
+                out.extend(d.ctors.iter().map(|c| c.name.clone()));
+            }
+        }
+    }
+    out
+}
+
 /// The name at the head of a type, past anything that only decorates it.
 fn type_name(ty: &Ty) -> Option<String> {
     match strip_index(ty) {
@@ -112,6 +132,8 @@ fn type_name(ty: &Ty) -> Option<String> {
 struct Walk<'a> {
     sigs: &'a SigTable,
     linear: &'a HashSet<String>,
+    /// The constructors of those types, which have no signature to consult.
+    ctors: &'a HashSet<String>,
     out: Vec<Fault>,
     function: String,
     /// Whether the walk still knows what this body holds.
@@ -292,9 +314,19 @@ impl<'a> Walk<'a> {
 
     /// Whether an expression produces a resource of its own.
     fn returns_a_resource(&self, e: &Expr) -> bool {
-        let Expr::Call(callee, _) = e else { return false };
-        let Some(name) = callee_name(callee) else { return false };
-        self.sigs.get(&name).is_some_and(|sig| self.is_linear(&sig.ret))
+        let named = match e {
+            Expr::Call(callee, _) => callee_name(callee),
+            // A constructor that takes no fields is not written as a
+            // call, and builds a resource all the same.
+            Expr::Var(_) | Expr::Inst(_, _) => callee_name(e),
+            _ => return false,
+        };
+        let Some(name) = named else { return false };
+        if self.ctors.contains(&name) {
+            return true;
+        }
+        matches!(e, Expr::Call(_, _))
+            && self.sigs.get(&name).is_some_and(|sig| self.is_linear(&sig.ret))
     }
 
     /// A call: each argument changes hands, or does not, by what the
@@ -303,7 +335,23 @@ impl<'a> Walk<'a> {
         for arg in args {
             self.expr(arg, held);
         }
-        let declared = callee_name(callee).and_then(|n| self.sigs.get(&n));
+        let named = callee_name(callee);
+        if let Some(name) = &named {
+            // A constructor has no signature, but it is not unknown: it
+            // takes its fields, and whatever resource goes into one is
+            // the structure's from here on.
+            if self.ctors.contains(name) && self.sigs.get(name).is_none() {
+                for arg in args {
+                    if let Expr::Var(n) = arg {
+                        if held.is_held(n) {
+                            self.record(held.consume(n), n);
+                        }
+                    }
+                }
+                return;
+            }
+        }
+        let declared = named.and_then(|n| self.sigs.get(&n));
         let Some(sig) = declared else {
             // Nobody declared it, so nobody knows what it took.  Every
             // argument is left alone and this body stops claiming to
