@@ -2538,6 +2538,21 @@ impl ParseCtx<'_> {
     /// `name` or `name(args)`, optionally followed by `-> rest`.
     fn parse_named_type(&mut self) -> Result<Ty, CompileError> {
         let mut name = self.expect_ident("expected a type name")?;
+        // `$STDLIB.FILEref` — a type reached through a `staload` alias.
+        // The lexer reads `$STDLIB` as one name, and the `.FILEref` is a
+        // whole token after it.  This compiler keeps one flat namespace,
+        // so the qualifier is dropped and the name stands on its own, as
+        // it does in an expression.
+        if name.starts_with('$')
+            && self.at(&TokenKind::Dot)
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                Some(TokenKind::Ident(n)) if !n.starts_with('$')
+            )
+        {
+            self.advance(); // `.`
+            name = self.expect_ident("expected a type name")?;
+        }
         // A bare alias with no arguments still names the canonical type.
         if let Some((canonical, _)) = crate::prelude::canonical_type(&name) {
             name = canonical.to_string();
@@ -6966,6 +6981,19 @@ mod tests {
                 Box::new(Ty::Name("int".into()))
             )
         );
+    }
+
+    #[test]
+    fn a_type_qualified_by_a_staload_alias_drops_the_alias() {
+        // `$STDLIB.FILEref` names a type in the module a `staload` bound
+        // to `$STDLIB`.  This compiler keeps one flat namespace, so the
+        // qualifier is dropped and the name stands as the type it is —
+        // exactly as the same qualifier is dropped in an expression.
+        let p = Parser::parse("extern fun f (x: $STDLIB.FILEref): int\n").expect("parse");
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!("expected an extern declaration")
+        };
+        assert_eq!(d.params[0].ty, Ty::Name("FILEref".into()));
     }
 
     #[test]
