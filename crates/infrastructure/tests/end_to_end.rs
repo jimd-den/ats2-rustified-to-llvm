@@ -135,3 +135,20 @@ fn a_program_that_brought_its_own_c_is_compiled_with_it() {
         "triple 14 = 42"
     );
 }
+
+#[test]
+fn a_proof_reaches_the_emitter_and_leaves_no_trace() {
+    // A `prfun` is a definition now, so it arrives at the emitter as one
+    // — and a proof occupies no storage and runs at no time.  Emitting
+    // it would put a function in the object file whose body is a
+    // derivation, which is not code.
+    let source = "\
+dataprop FACT (int, int) = | FACTbas (0, 1) of () \
+prfun base (): FACT(0, 1) = FACTbas () \
+implement main0() = println!(\"ok\")\
+";
+    let program = Parser::parse(source).expect("parse");
+    let ir = LlvmIrEmitter::emit(&program).expect("emit");
+    assert!(!ir.contains("@base"), "the proof was emitted:\n{ir}");
+    assert!(ir.contains("define i32 @main()"), "got:\n{ir}");
+}

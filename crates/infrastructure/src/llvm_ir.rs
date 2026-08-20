@@ -1301,7 +1301,13 @@ fn without_proofs(program: &Program) -> Program {
         program
             .defs()
             .iter()
+            // A `praxi` is a declaration; a `prfun` is a definition with
+            // a derivation for a body.  Both are proofs, and neither is
+            // code — dropping only the declaration left the derivation
+            // to be emitted as a function whose body builds a value of a
+            // type no machine has.
             .filter(|d| !matches!(d, Def::Extern(decl) if decl.proof))
+            .filter(|d| !matches!(d, Def::Fun(f) if f.proof))
             .cloned()
             .collect(),
     )
