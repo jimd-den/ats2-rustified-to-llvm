@@ -253,6 +253,28 @@ impl<'a> Walk<'a> {
                 }
                 self.expr(rest, held);
             }
+            // A loop body runs more than once, and once is all a
+            // single walk ever sees.  Walking it twice against the same
+            // ledger is what makes the difference visible: a resource
+            // the body made itself is re-acquired on the second pass
+            // and stays correct, while one it was handed from outside
+            // has already gone and the second reach reports it.  Two
+            // passes are enough — a third would find nothing a second
+            // did not, because the ledger has only two states to be in.
+            Expr::While(cond, body) => {
+                for _ in 0..2 {
+                    self.expr(cond, held);
+                    self.expr(body, held);
+                }
+            }
+            Expr::For(init, cond, step, body) => {
+                self.expr(init, held);
+                for _ in 0..2 {
+                    self.expr(cond, held);
+                    self.expr(body, held);
+                    self.expr(step, held);
+                }
+            }
             other => other.each_subexpr(&mut |sub| self.expr(sub, held)),
         }
     }
@@ -284,9 +306,12 @@ impl<'a> Walk<'a> {
             return;
         }
         if let Expr::Var(name) = scrutinee {
-            if held.is_held(name) {
-                self.record(held.consume(name), name);
-            }
+            // No `is_held` guard: a name the ledger never heard of
+            // consumes to `NotAResource` and is ignored, while one it
+            // handed over already consumes to `Again` — and skipping
+            // the call for anything not currently held is exactly what
+            // would swallow the second reading.
+            self.record(held.consume(name), name);
         }
     }
 
@@ -298,22 +323,52 @@ impl<'a> Walk<'a> {
             self.consume_result(&b.value, held);
             return;
         };
-        match &b.value {
+        let takes_over = match &b.value {
             // `val ys = xs` — the resource moves to the new name, and
             // the old one is not the body's any more.
             Expr::Var(from) if held.is_held(from) => {
                 self.record(held.consume(from), from);
-                held.acquire(name);
+                true
             }
             // A call that returns a resource hands one over.
             value => {
                 if self.returns_a_resource(value) {
-                    held.acquire(name);
+                    true
                 } else {
                     self.consume_result(value, held);
+                    false
                 }
             }
+        };
+        // Whatever the name was holding, it is not holding it after
+        // this — and rebinding is not freeing.
+        self.shadowed(name, held);
+        if takes_over {
+            held.acquire(name);
         }
+    }
+
+    /// A name rebound while it still holds a resource.
+    ///
+    /// The ledger is keyed on names, so a second `val b` would quietly
+    /// overwrite the first one's entry and the box it made would go
+    /// unreported — the debt looking paid because the name that owed it
+    /// was reused.  Nothing can reach that box any more, so it is a
+    /// leak, and it is reported here rather than at the end of the body
+    /// because here is where it became unreachable.
+    fn shadowed(&mut self, name: &str, held: &mut Resources) {
+        if !held.is_held(name) {
+            return;
+        }
+        if self.certain {
+            self.out.push(Fault::Leaked {
+                function: self.function.clone(),
+                name: name.to_string(),
+            });
+        }
+        // Settled either way, so the end of the body does not report
+        // the same box a second time under the same name.
+        held.consume(name);
     }
 
     /// Whether an expression produces a resource of its own.
@@ -350,9 +405,12 @@ impl<'a> Walk<'a> {
             if self.ctors.contains(name) && self.sigs.get(name).is_none() {
                 for arg in args {
                     if let Expr::Var(n) = arg {
-                        if held.is_held(n) {
-                            self.record(held.consume(n), n);
-                        }
+                        // Unguarded, for the same reason as
+                        // `take_apart`: putting a box into a second
+                        // structure after the first one took it is a
+                        // use after the handover, and a guard on
+                        // `is_held` reads that as nothing happening.
+                        self.record(held.consume(n), n);
                     }
                 }
                 return;

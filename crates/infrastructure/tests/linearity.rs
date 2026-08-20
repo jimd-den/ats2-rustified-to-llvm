@@ -165,3 +165,71 @@ fn building_with_a_resource_hands_it_to_the_structure() {
         faults("fun f (b: box_vt(int)): void = let val outer = mk_vt(b) in free_vt(outer) end");
     assert!(errs.is_empty(), "{errs:?}");
 }
+
+#[test]
+fn handing_the_same_resource_to_two_structures_is_refused() {
+    // `b` goes into `c`, and is `c`'s from then on.  Putting it into `d`
+    // as well is reaching for something that was already given away —
+    // the same mistake as freeing it twice, and it has to read the same.
+    let errs = faults(
+        "fun f (b: box_vt(int)): void = \
+         let val c = mk_vt(b) val d = mk_vt(b) in (free_vt(c); free_vt(d)) end",
+    );
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].contains('b'), "{}", errs[0]);
+    assert!(errs[0].contains("already"), "{}", errs[0]);
+}
+
+#[test]
+fn taking_apart_what_was_already_given_away_is_refused() {
+    // `~mk_vt(x)` frees the box it matches.  Doing that to a box already
+    // handed to `free_vt` is a use after the handover, and the pattern
+    // being the thing that reaches for it does not make it one less.
+    let errs = faults(
+        "fun f (b: box_vt(int)): void = \
+         let val () = free_vt(b) in case+ b of | ~mk_vt(x) => () end",
+    );
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].contains('b'), "{}", errs[0]);
+    assert!(errs[0].contains("already"), "{}", errs[0]);
+}
+
+#[test]
+fn shadowing_a_name_does_not_settle_what_it_was_holding() {
+    // The second `val b` rebinds the name; it does not free the box the
+    // first one made.  That box is now unreachable and unfreed, which is
+    // a leak — and the ledger keying on the name is what made it look
+    // like the debt had been paid.
+    let errs = faults("fun f (): void = let val b = mk_vt(3) val b = mk_vt(4) in free_vt(b) end");
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].contains('b'), "{}", errs[0]);
+    assert!(errs[0].contains("never"), "{}", errs[0]);
+}
+
+#[test]
+fn a_loop_that_frees_what_it_did_not_make_frees_it_twice() {
+    // One pass through the body looks correct: `b` is held, then given
+    // away.  The second pass is the whole point of a loop, and on that
+    // one `b` is already gone.  A walk that visits the body once cannot
+    // see it.
+    let errs = faults(
+        "fun f (b: box_vt(int)): void = \
+         let var i: int = 0 in while (i < 2) (free_vt(b); i := i + 1) end",
+    );
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].contains('b'), "{}", errs[0]);
+    assert!(errs[0].contains("already"), "{}", errs[0]);
+}
+
+#[test]
+fn a_loop_that_frees_what_it_made_itself_is_fine() {
+    // Every pass makes its own box and gives it away again, so no pass
+    // reaches for the last one's.  A check that walked the body twice
+    // and did not notice this would report a use-after-free on correct
+    // code, which is worse than missing one.
+    let errs = faults(
+        "fun f (): void = \
+         let var i: int = 0 in while (i < 2) (let val b = mk_vt(3) in free_vt(b) end; i := i + 1) end",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
