@@ -3140,7 +3140,9 @@ impl LlvmIrEmitter {
                         }
 
                         LlvmType::Array(_) => {
-                            return Err(CompileError::emit("cannot print an array; index it first"));
+                            return Err(CompileError::emit(
+                                "cannot print an array; index it first",
+                            ));
                         }
                         LlvmType::Closure(_) => {
                             return Err(CompileError::emit("cannot print a function"));

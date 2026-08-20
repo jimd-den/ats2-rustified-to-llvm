@@ -491,3 +491,28 @@ fn a_proposition_keeps_the_indices_it_was_written_with() {
     });
     assert!(found, "the proposition lost its indices");
 }
+
+#[test]
+fn a_proof_by_induction_is_a_proof() {
+    // The inductive step, which is what a `dataprop` is *for*: given a
+    // proof about `n-1`, `FACTind` builds one about `n`.  It failed for
+    // a reason worth stating — matching the constructor's `FACT(n-1, r)`
+    // against the caller's identically-written `FACT(n-1, r)` returned
+    // early on the two being equal, leaving `n` undetermined and so
+    // renamed out of the caller's scope.  Every proof by induction sits
+    // on that case, because an inductive step is exactly where the two
+    // sides are written the same way.
+    let errs = check(&format!(
+        "{FACT} prfun step {{n:pos}} {{r:int}} (pf: FACT(n-1, r)): FACT(n, n*r) = FACTind (pf)"
+    ));
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn an_inductive_step_that_claims_too_much_is_refused() {
+    // The same derivation, promising `n*r+1` where it establishes `n*r`.
+    let errs = check(&format!(
+        "{FACT} prfun step {{n:pos}} {{r:int}} (pf: FACT(n-1, r)): FACT(n, n*r+1) = FACTind (pf)"
+    ));
+    assert!(!errs.is_empty(), "a false inductive step was accepted");
+}

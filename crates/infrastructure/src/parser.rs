@@ -640,8 +640,9 @@ impl ParseCtx<'_> {
                         // A pattern at the top level has no remainder to
                         // scope over, so it cannot be lowered here.
                         BindKind::Pattern(..) => {
-                            return Err(self
-                                .error_here("a pattern binding is not supported at the top level"));
+                            return Err(self.error_here(
+                                "a pattern binding is not supported at the top level",
+                            ));
                         }
                     }
                     if rec_form && matches!(&self.peek().kind, TokenKind::Ident(w) if w == "and") {

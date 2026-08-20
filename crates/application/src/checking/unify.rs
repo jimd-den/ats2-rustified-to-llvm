@@ -77,7 +77,17 @@ impl Match {
                 return;
             }
         }
-        if pattern == actual {
+        // Two identical terms still have work to do when the pattern
+        // mentions a variable being determined.  `FACT(n-1, r)` matched
+        // against a caller's own `FACT(n-1, r)` determines `n` to be
+        // `n` — trivially, but really — and returning early here leaves
+        // it undetermined, which renames it away from the caller's
+        // scope and loses the very relationship the match established.
+        // This is the same hazard the variable case above guards
+        // against, one level down; every proof by induction sits on it,
+        // because an inductive step is precisely the case where the
+        // callee's indices are written the same way as the caller's.
+        if pattern == actual && !pattern.vars().iter().any(|v| vars.contains(v)) {
             return;
         }
         match pattern {
