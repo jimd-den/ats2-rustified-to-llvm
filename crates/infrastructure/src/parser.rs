@@ -896,6 +896,17 @@ impl ParseCtx<'_> {
             }
         };
         self.advance();
+        // `#staload` / `#dynload` — the pseudocode spellings of the two
+        // directives that name another unit.  What they name is a
+        // dependency every bit as much as the unpragmatic form's is, so
+        // it is written down here; the rest of the line is still skipped.
+        if word == "staload" || word == "dynload" {
+            if let Some(s) = self.read_staload_after_keyword() {
+                self.staloads.push(s);
+            }
+            self.skip_directive();
+            return Ok(());
+        }
         if word != "define" {
             self.skip_directive();
             return Ok(());
@@ -966,6 +977,33 @@ impl ParseCtx<'_> {
             alias = match self.nth(at) {
                 Some(TokenKind::Ident(name)) => Some(name.clone()),
                 // `_` names nothing, which is the whole point of it.
+                Some(TokenKind::Underscore) => None,
+                _ => return None,
+            };
+            at += 2;
+        }
+        match self.nth(at) {
+            Some(TokenKind::StrLit(path)) => Some(Staload {
+                path: path.clone(),
+                alias,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Read a `staload` that follows a `#staload`/`#dynload` keyword, with
+    /// the cursor already past that keyword (the `#` consumed it the way
+    /// any hash directive is read).  Identical in shape to `read_staload`,
+    /// which sits on the keyword itself; the only difference is the
+    /// offset of the first token that can begin the path or alias.
+    ///
+    /// `#staload H = "path"` / `#staload "path"` / `#dynload "path"`.
+    fn read_staload_after_keyword(&self) -> Option<Staload> {
+        let mut at = self.pos;
+        let mut alias = None;
+        if matches!(self.nth(at + 1), Some(TokenKind::Eq)) {
+            alias = match self.nth(at) {
+                Some(TokenKind::Ident(name)) => Some(name.clone()),
                 Some(TokenKind::Underscore) => None,
                 _ => return None,
             };
@@ -1195,6 +1233,28 @@ impl ParseCtx<'_> {
         // The template's parameters are in scope for its own signature
         // and body, so `bintree a` in either place applies `bintree`.
         let scope = self.push_type_vars(&ty_params);
+        // `fun abs_int0 : int -<fun> int = "mac#%"` — the colon form,
+        // common in `.sats` headers.  The whole signature is one curried
+        // type written after the name; there is no parameter list to
+        // flatten, so it is always a declaration.
+        if self.at(&TokenKind::Colon) {
+            self.advance();
+            self.skip_effect_annotation();
+            let existentials = self.parse_existentials();
+            let ret = self.parse_type()?;
+            self.skip_static_annotations();
+            let decl = self.finish_fun_decl(
+                proof,
+                ty_params,
+                universals,
+                existentials,
+                name,
+                Vec::new(),
+                ret,
+            )?;
+            self.pop_type_vars(scope);
+            return Ok(Def::Extern(decl));
+        }
         let params = self.parse_params()?;
         // A missing return type is written as `_`: some functions leave it
         // out when the body says what it is, as `fun f (m: int) = lam ...`
@@ -1213,6 +1273,23 @@ impl ParseCtx<'_> {
         } else {
             return Err(self.error_here("expected `:` and a return type after the parameters"));
         };
+        // A `.sats` signature ends with no `=`, or with `= "mac#..."` /
+        // `= "sta#..."` / `= "ext#..."` — an *external binding* naming
+        // where the implementation lives, not a body.  Both are
+        // declarations; the body lives in a `.dats` somewhere else.
+        if !self.at(&TokenKind::Eq) || self.at_external_binding() {
+            let decl = self.finish_fun_decl(
+                proof,
+                ty_params,
+                universals,
+                existentials,
+                name,
+                params,
+                ret,
+            )?;
+            self.pop_type_vars(scope);
+            return Ok(Def::Extern(decl));
+        }
         self.expect(&TokenKind::Eq, "expected `=` before the function body")?;
         let body = self.parse_expr(0)?;
         self.pop_type_vars(scope);
@@ -1227,6 +1304,59 @@ impl ParseCtx<'_> {
             body,
             proof,
         }))
+    }
+
+    /// Whether the cursor sits on a `= "mac#..."` / `= "sta#..."` /
+    /// `= "ext#..."` — an external-name binding rather than a body.
+    ///
+    /// These are the strings ATS uses to say *where* the implementation
+    /// lives (`"mac#name"` is a macro of `name`, `"ext#name"` a C symbol,
+    /// `"sta#name"` a static one), as opposed to an expression.  They are
+    /// the whole of what distinguishes a `.sats` signature that happens
+    /// to carry a binding from a definition whose body is a string.
+    fn at_external_binding(&self) -> bool {
+        if !self.at(&TokenKind::Eq) {
+            return false;
+        }
+        match self.tokens.get(self.pos + 1).map(|t| &t.kind) {
+            Some(TokenKind::StrLit(s)) => {
+                s.starts_with("mac#") || s.starts_with("sta#") || s.starts_with("ext#")
+            }
+            _ => false,
+        }
+    }
+
+    /// Finish a `fun` read as a *declaration*: the signature is complete
+    /// and there is no body.  An `= "..."` external binding is dropped
+    /// and the signature kept, exactly as `extern fun`'s is.
+    fn finish_fun_decl(
+        &mut self,
+        proof: bool,
+        ty_params: Vec<String>,
+        universals: Vec<Quant>,
+        existentials: Vec<Quant>,
+        name: String,
+        params: Vec<Param>,
+        ret: Ty,
+    ) -> Result<FunDecl, CompileError> {
+        if self.at(&TokenKind::Eq) {
+            self.advance();
+            if matches!(self.peek().kind, TokenKind::StrLit(_)) {
+                self.advance();
+            } else {
+                return Err(self.error_here("expected an external name after `=`"));
+            }
+        }
+        Ok(FunDecl {
+            linear: false,
+            proof,
+            name,
+            ty_params,
+            universals,
+            existentials,
+            params,
+            ret,
+        })
     }
 
     /// The body of an `extern fun` declaration: everything a `fun` has
@@ -6806,6 +6936,39 @@ mod tests {
     }
 
     #[test]
+    fn a_fun_with_no_body_is_a_declaration() {
+        // A `.sats` file states a signature with `fun f (x: int): int`
+        // and leaves the body to the `.dats`.  A top-level `fun` with no
+        // body is therefore a declaration, not a definition.
+        let p = Parser::parse("fun f (x: int): int\n").expect("parse");
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!("expected an extern declaration")
+        };
+        assert_eq!(d.name, "f");
+        assert_eq!(d.ret, Ty::Name("int".into()));
+    }
+
+    #[test]
+    fn a_fun_declared_as_a_curried_type_is_a_declaration() {
+        // `fun abs_int0 : int -<fun> int = "mac#%"` — the signature is
+        // the curried type after the colon, with no parameter list, and
+        // the `= "mac#%"` names where the implementation lives rather
+        // than providing a body.
+        let p = Parser::parse("fun abs_int0 : int -<fun> int = \"mac#%\"\n").expect("parse");
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!("expected an extern declaration")
+        };
+        assert_eq!(d.name, "abs_int0");
+        assert_eq!(
+            d.ret,
+            Ty::Fun(
+                vec![Ty::Name("int".into())],
+                Box::new(Ty::Name("int".into()))
+            )
+        );
+    }
+
+    #[test]
     fn implementing_a_value_binds_it() {
         // `implement x0 = e` fills in an `extern val`: no parameter list
         // sits between the name and the `=`, which is the whole of what
@@ -6816,6 +6979,22 @@ mod tests {
             panic!("a value implement is not a val")
         };
         assert_eq!(v.name, "x0");
+    }
+
+    #[test]
+    fn a_pragmatic_staload_names_its_unit_like_the_plain_form() {
+        // `#staload H = "..."` and `#dynload "..."` are the pseudocode
+        // spellings of `staload`/`dynload`.  The unit they name is a
+        // dependency either way; recording only the unpragmatic form
+        // would make a program silently one file again.
+        let p = Parser::parse(concat!(
+            "#staload H = \"./h.sats\"\n",
+            "#staload \"./plain.sats\"\n",
+            "#dynload \"./l.dats\"\n",
+        ))
+        .expect("parse");
+        let paths: Vec<&str> = p.staloads().iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(paths, vec!["./h.sats", "./plain.sats", "./l.dats"]);
     }
 
     #[test]
