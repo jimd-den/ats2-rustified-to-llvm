@@ -4897,6 +4897,9 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
             TokenKind::Star => (BinOp::Mul, 9),
             TokenKind::Slash => (BinOp::Div, 9),
             TokenKind::Mod => (BinOp::Mod, 9),
+            // `%` is ATS's modulo, as in `x % 3`; the same token opens an
+            // inline-C block only when followed by `{`.
+            TokenKind::Percent => (BinOp::Mod, 9),
             _ => return None,
         };
         Some((op, lbp, lbp + 1))
@@ -5526,6 +5529,20 @@ mod tests {
             )
         );
     }
+    #[test]
+    fn percent_is_the_modulo_operator() {
+        // `x % 3` — the `%` that opens an inline-C block when it is
+        // followed by `{` is the modulo operator when used as a binary
+        // infix, sharing `mod`'s precedence.
+        let Expr::BinOp(BinOp::Mod, a, b) =
+            body_of("fun f(x: int): int = x % 3")
+        else {
+            panic!("expected a modulo")
+        };
+        assert_eq!(*a, Expr::Var("x".into()));
+        assert_eq!(*b, int(3));
+    }
+
 
     // --- expressions: structure -----------------------------------
 
