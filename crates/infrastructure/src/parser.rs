@@ -3899,63 +3899,72 @@ impl ParseCtx<'_> {
     fn parse_typedef(&mut self) -> bool {
         let save = self.pos;
         self.advance(); // `typedef`
-        let Some(TokenKind::Ident(name)) = self.tokens.get(self.pos).map(|t| t.kind.clone()) else {
-            self.pos = save;
-            return false;
-        };
-        self.advance();
-        // `typedef pair (a:t@ype) = ...` — an alias for a *family* of
-        // types.  The parameters are in scope for the body and are
-        // substituted at each use, which is the whole of what a
-        // parameterized alias means.
-        let mut params = Vec::new();
-        if self.at(&TokenKind::LParen) {
+        // `typedef key = string and itm = symbol` chains several aliases;
+        // the `and` is the chain, not a function's mutual-recursion word.
+        loop {
+            let Some(TokenKind::Ident(name)) = self.tokens.get(self.pos).map(|t| t.kind.clone()) else {
+                self.pos = save;
+                return false;
+            };
             self.advance();
-            while let TokenKind::Ident(p) = self.peek().kind.clone() {
+            // `typedef pair (a:t@ype) = ...` — an alias for a *family* of
+            // types.  The parameters are in scope for the body and are
+            // substituted at each use, which is the whole of what a
+            // parameterized alias means.
+            let mut params = Vec::new();
+            if self.at(&TokenKind::LParen) {
                 self.advance();
-                params.push(p);
-                if self.at(&TokenKind::Colon) {
+                while let TokenKind::Ident(pp) = self.peek().kind.clone() {
                     self.advance();
-                    if self.parse_sort_name().is_none() {
-                        self.pos = save;
-                        return false;
+                    params.push(pp);
+                    if self.at(&TokenKind::Colon) {
+                        self.advance();
+                        if self.parse_sort_name().is_none() {
+                            self.pos = save;
+                            return false;
+                        }
+                    }
+                    if self.at(&TokenKind::Comma) {
+                        self.advance();
+                    } else {
+                        break;
                     }
                 }
-                if self.at(&TokenKind::Comma) {
-                    self.advance();
-                } else {
-                    break;
+                if !self.at(&TokenKind::RParen) {
+                    self.pos = save;
+                    return false;
                 }
+                self.advance();
             }
-            if !self.at(&TokenKind::RParen) {
+            if !self.at(&TokenKind::Eq) {
                 self.pos = save;
                 return false;
             }
             self.advance();
-        }
-        if !self.at(&TokenKind::Eq) {
-            self.pos = save;
-            return false;
-        }
-        self.advance();
-        let scope = self.push_type_vars(&params);
-        let parsed = self.parse_type();
-        self.pop_type_vars(scope);
-        match parsed {
-            Ok(ty) if !params.is_empty() => {
-                self.typedef_families.insert(name, (params, ty));
-                true
+            let scope = self.push_type_vars(&params);
+            let parsed = self.parse_type();
+            self.pop_type_vars(scope);
+            match parsed {
+                Ok(ty) if !params.is_empty() => {
+                    self.typedef_families.insert(name, (params, ty));
+                }
+                Ok(ty) => {
+                    self.typedefs.insert(name, ty);
+                }
+                Err(_) => {
+                    self.pos = save;
+                    return false;
+                }
             }
-            Ok(ty) => {
-                self.typedefs.insert(name, ty);
-                true
+            // `and itm = symbol` — the next alias in the chain.
+            if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "and") {
+                self.advance();
+                continue;
             }
-            Err(_) => {
-                self.pos = save;
-                false
-            }
+            return true;
         }
     }
+
 
     /// `macdef name = expr` — bind a name to an expression.
     ///
@@ -7412,6 +7421,17 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
         // made into a parse error.
         let p = Parser::parse("viewtypedef v = view").expect("parse");
         assert!(p.defs().is_empty());
+    }
+
+
+    #[test]
+    fn a_typedef_chained_with_and_is_not_a_function() {
+        // `typedef key = string and itm = symbol` declares two aliases; the
+        // `and` is the chain, not a function's mutual-recursion word.  It
+        // was read as the latter, and the parser went looking for a
+        // parameter list on `itm`.
+        let p = Parser::parse("typedef key = string and itm = symbol").expect("parse");
+        assert!(p.defs().is_empty(), "typedefs fold into a table, not defs");
     }
 
 }
