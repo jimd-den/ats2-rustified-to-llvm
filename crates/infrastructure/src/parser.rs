@@ -585,7 +585,7 @@ impl ParseCtx<'_> {
         self.pos = 0;
         while !self.at(&TokenKind::Eof) {
             let opens_an_alias = matches!(
-                &self.peek().kind,
+                &self.tokens[self.pos].kind,
                 TokenKind::Ident(w)
                     // Only the *abstract* forms are gathered early.  A
                     // plain `typedef` means what it means from where it
@@ -594,9 +594,22 @@ impl ParseCtx<'_> {
                     // it would take those out of the only scope that
                     // gives them a meaning.
                     if matches!(w.as_str(), "abstype" | "absvtype" | "abst0ype" | "abstbox" | "abstflat" | "assume")
-            );
+            ) || self.at_at_joined_abstract();
             let before = self.pos;
-            if !opens_an_alias || !self.parse_typedef() {
+            if opens_an_alias {
+                // The `abst @ ype` form arrives with its keyword cut
+                // into three tokens, and is read by the reader that
+                // rejoins them; the single-word forms share the ordinary
+                // `typedef` reader.
+                let ok = if self.at_at_joined_abstract() {
+                    self.parse_at_joined_abstract()
+                } else {
+                    self.parse_typedef()
+                };
+                if !ok {
+                    self.advance();
+                }
+            } else {
                 self.advance();
             }
             if self.pos == before {
@@ -837,6 +850,15 @@ impl ParseCtx<'_> {
             // is `and` here rather than `fun`.
             TokenKind::Ident(name) if name == "and" => {
                 out.push(self.parse_fun_def()?);
+                Ok(())
+            }
+            // `abst @ ype` — the abstract linear type form, cut at the
+            // `@` by the lexer.  It is a declaration of a type name; the
+            // name was already gathered by the pre-pass, so the
+            // declaration itself is skipped like the other abstract
+            // forms, not mistaken for a definition.
+            TokenKind::Ident(name) if name == "abst" && self.at_at_joined_abstract() => {
+                self.skip_directive();
                 Ok(())
             }
             _ => {
@@ -3897,13 +3919,30 @@ impl ParseCtx<'_> {
     /// types are not modelled, so a `typedef` that does not fit is left
     /// to the directive skipper rather than half-recorded.
     fn parse_typedef(&mut self) -> bool {
+        // The leading keyword is the token we are sitting on (`typedef`,
+        // or an abstract form like `abstype`).  It is consumed, and the
+        // aliases that follow are read by the body reader.
         let save = self.pos;
-        self.advance(); // `typedef`
+        self.advance();
+        if !self.parse_typedef_body() {
+            self.pos = save;
+            return false;
+        }
+        true
+    }
+
+    /// The body of a `typedef`, once the keyword is consumed: one or more
+    /// `name [params] = type` aliases joined by `and`.  Split out from
+    /// `parse_typedef` so the abstract `abst @ ype` form, whose keyword
+    /// the lexer cut into three tokens, can feed it the same shape a
+    /// single-word keyword would.
+    fn parse_typedef_body(&mut self) -> bool {
+        let start = self.pos;
         // `typedef key = string and itm = symbol` chains several aliases;
         // the `and` is the chain, not a function's mutual-recursion word.
         loop {
             let Some(TokenKind::Ident(name)) = self.tokens.get(self.pos).map(|t| t.kind.clone()) else {
-                self.pos = save;
+                self.pos = start;
                 return false;
             };
             self.advance();
@@ -3920,7 +3959,7 @@ impl ParseCtx<'_> {
                     if self.at(&TokenKind::Colon) {
                         self.advance();
                         if self.parse_sort_name().is_none() {
-                            self.pos = save;
+                            self.pos = start;
                             return false;
                         }
                     }
@@ -3931,13 +3970,13 @@ impl ParseCtx<'_> {
                     }
                 }
                 if !self.at(&TokenKind::RParen) {
-                    self.pos = save;
+                    self.pos = start;
                     return false;
                 }
                 self.advance();
             }
             if !self.at(&TokenKind::Eq) {
-                self.pos = save;
+                self.pos = start;
                 return false;
             }
             self.advance();
@@ -3952,7 +3991,7 @@ impl ParseCtx<'_> {
                     self.typedefs.insert(name, ty);
                 }
                 Err(_) => {
-                    self.pos = save;
+                    self.pos = start;
                     return false;
                 }
             }
@@ -3963,6 +4002,40 @@ impl ParseCtx<'_> {
             }
             return true;
         }
+    }
+
+
+    /// Whether the cursor rests on `abst @ ype` — the abstract linear
+    /// type form, which the lexer cuts apart at the `@` into three
+    /// tokens.  Rejoining them reads like `abstype`, the boxed form;
+    /// both are declarations of a type name, and the difference is one
+    /// of representation the subset does not distinguish.
+    fn at_at_joined_abstract(&self) -> bool {
+        if !matches!(&self.tokens[self.pos].kind, TokenKind::Ident(w) if w == "abst") {
+            return false;
+        }
+        if !matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::At)) {
+            return false;
+        }
+        matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind), Some(TokenKind::Ident(_)))
+    }
+
+    /// Read `abst @ ype name = type` as a type alias.  The three keyword
+    /// tokens are consumed, and the body is read exactly as `abstype`'s
+    /// would be.
+    fn parse_at_joined_abstract(&mut self) -> bool {
+        let save = self.pos;
+        if !self.at_at_joined_abstract() {
+            return false;
+        }
+        self.advance(); // `abst`
+        self.advance(); // `@`
+        self.advance(); // `ype`
+        if !self.parse_typedef_body() {
+            self.pos = save;
+            return false;
+        }
+        true
     }
 
 
@@ -6695,6 +6768,27 @@ mod tests {
             panic!("expected a fun")
         };
         assert_eq!(f.ret, Ty::App("list0".into(), vec![Ty::Name("int".into())]));
+    }
+
+    #[test]
+    fn an_at_joined_abstract_linear_type_is_an_alias() {
+        // `abst@ype` — the linear (unboxed) abstract type form — is cut
+        // by the lexer at the `@` into `abst @ ype`.  It is still a
+        // declaration of a type name, so the parser must rejoin the
+        // pieces (the way it rejoins a sort name) and know that name the
+        // way it knows any other abstract type.
+        let p = Parser::parse(concat!(
+            "abst@ype int2 = (int, int)\n",
+            "fun f (): int2 = (1, 2)\n",
+        ))
+        .expect("parse");
+        let Def::Fun(f) = &p.defs()[0] else {
+            panic!("first definition is not a fun")
+        };
+        assert_eq!(
+            f.ret,
+            Ty::Tuple(vec![Ty::Name("int".into()), Ty::Name("int".into())])
+        );
     }
 
     #[test]
