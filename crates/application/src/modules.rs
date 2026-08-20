@@ -85,7 +85,13 @@ impl<P: ParserPort, L: SourceLoaderPort + ?Sized> Walk<'_, P, L> {
             if !self.loaded.insert(unit.path.clone()) {
                 continue;
             }
-            let parsed = self.parser.parse(&unit.source)?;
+            // A unit this compiler cannot read yet contributes nothing
+            // and is stepped over, not refused: its being unreadable is
+            // a gap in the reader, not a mistake in the program, and
+            // refusing it would take down every file that merely reaches
+            // for the heavy contrib libraries.  Import everything that
+            // *does* parse, and leave the rest alone.
+            let Ok(parsed) = self.parser.parse(&unit.source) else { continue };
             self.dependencies_of(&parsed, &unit.path)?;
             self.defs.extend(parsed.defs);
         }
@@ -222,6 +228,26 @@ mod tests {
     }
 
     #[test]
+    fn a_dependency_that_cannot_parse_is_stepped_over_not_fatal() {
+        // A program may reach for a unit whose syntax this compiler
+        // cannot read yet.  That unit's declarations cannot be imported,
+        // but its being unreadable must not take the whole program down:
+        // everything else that was asked for is still folded in.
+        let p = resolved(
+            "main.dats",
+            &[
+                ("good.dats", "fun good"),
+                ("heavy.dats", "this line the toy parser cannot read"),
+            ],
+            "staload good.dats\nstaload heavy.dats\nfun main",
+        )
+        .expect("resolve succeeds even when a dependency is unreadable");
+        let names = names(&p);
+        assert!(names.contains(&"good".into()), "good is imported, got {names:?}");
+        assert!(names.contains(&"main".into()), "main survives, got {names:?}");
+    }
+
+    #[test]
     fn what_a_unit_asked_for_arrives_before_the_unit() {
         // Everything a file needed is defined by the time the file is
         // read, so nothing downstream has to look forward.
@@ -313,14 +339,17 @@ mod tests {
     }
 
     #[test]
-    fn a_parse_error_in_a_loaded_unit_is_the_programs_error() {
-        let errs = resolved(
+    fn a_bad_line_in_a_loaded_unit_is_that_units_problem() {
+        // A unit whose source this compiler cannot read contributes
+        // nothing, but its being unreadable is not the program's error:
+        // the declaration it holds is just not available.  Everything
+        // that does parse is still folded in, and the program survives.
+        let p = resolved(
             "main.dats",
             &[("helper.dats", "!!!")],
             "staload helper.dats\nfun main",
         )
-        .expect_err("should fail");
-        assert_eq!(errs.len(), 1, "{errs:?}");
-        assert!(errs[0].contains("bad line"), "{}", errs[0]);
+        .expect("an unreadable dependency is stepped over");
+        assert_eq!(names(&p), ["main"]);
     }
 }
