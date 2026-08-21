@@ -70,6 +70,19 @@ impl Mono {
         atoms.sort();
         Mono(atoms)
     }
+
+    /// What remains after dividing this monomial by `divisor`.
+    ///
+    /// Both atom lists are sorted multisets, so division is cancellation.
+    /// `None` means the divisor is not a factor.
+    fn quotient(&self, divisor: &Mono) -> Option<Mono> {
+        let mut remaining = self.0.clone();
+        for atom in &divisor.0 {
+            let at = remaining.binary_search(atom).ok()?;
+            remaining.remove(at);
+        }
+        Some(Mono(remaining))
+    }
 }
 
 /// A polynomial `sum(coeff * monomial) + constant`, read as `>= 0`.
@@ -169,6 +182,19 @@ impl Linear {
             term(n.clone(), self.konst.checked_mul(*d)?)?;
         }
         Some(out)
+    }
+
+    /// Multiply a polynomial by one monomial.
+    fn times_mono(&self, factor: &Mono) -> Linear {
+        let mut terms: BTreeMap<Mono, i64> = self
+            .terms
+            .iter()
+            .map(|(mono, coeff)| (mono.times(factor), *coeff))
+            .collect();
+        if self.konst != 0 {
+            terms.insert(factor.clone(), self.konst);
+        }
+        Linear { terms, konst: 0 }
     }
 
     /// The same constraint with the common factor divided out.
@@ -451,6 +477,14 @@ fn push_new(out: &[Linear], fresh: &mut Vec<Linear>, l: Linear) {
     }
 }
 
+fn push_equality(out: &[Linear], fresh: &mut Vec<Linear>, l: Linear) {
+    let reverse = l.scale(-1);
+    push_new(out, fresh, l);
+    if let Some(reverse) = reverse {
+        push_new(out, fresh, reverse);
+    }
+}
+
 /// The sound consequences of multiplication, joined to a system before
 /// it is decided.
 ///
@@ -470,11 +504,42 @@ fn push_new(out: &[Linear], fresh: &mut Vec<Linear>, l: Linear) {
 /// rounds let a bound derived for one product feed a later one.
 fn strengthen(system: &[Linear]) -> Vec<Linear> {
     const ROUNDS: usize = 3;
+    const MAX_EQUALITY_LIFTS: usize = 128;
     let mut out = system.to_vec();
     for _ in 0..ROUNDS {
         let bounds = interval_bounds(&out);
         let snapshot: Vec<Mono> = out.iter().flat_map(|l| l.terms.keys().cloned()).collect();
         let mut fresh: Vec<Linear> = Vec::new();
+        // Equality is preserved by multiplication.  Lift only by a factor
+        // that reaches a monomial already present in this system (usually
+        // one side of the goal), and cap the closure so a large polynomial
+        // remains `Unknown` rather than consuming the compiler.
+        let equalities: Vec<Linear> = out
+            .iter()
+            .filter(|line| {
+                line.scale(-1)
+                    .is_some_and(|reverse| out.contains(&reverse))
+            })
+            .cloned()
+            .collect();
+        let mut lifts = 0;
+        'equalities: for equality in &equalities {
+            for source in equality.terms.keys() {
+                for target in &snapshot {
+                    let Some(factor) = target.quotient(source) else {
+                        continue;
+                    };
+                    if factor.0.is_empty() {
+                        continue;
+                    }
+                    push_equality(&out, &mut fresh, equality.times_mono(&factor));
+                    lifts += 1;
+                    if lifts >= MAX_EQUALITY_LIFTS {
+                        break 'equalities;
+                    }
+                }
+            }
+        }
         for mono in &snapshot {
             let atoms = &mono.0;
             if atoms.len() < 2 {
@@ -503,6 +568,23 @@ fn strengthen(system: &[Linear]) -> Vec<Linear> {
                 let prod = |x: i64, y: i64| {
                     (x as i128).checked_mul(y as i128).and_then(|p| i64::try_from(p).ok())
                 };
+                // If one factor is fixed exactly, the product is linear in
+                // the other.  This is the substitution bridge needed for
+                // `fact(0) == 1` to imply `fact(0) * r == r`.
+                if let (Some(lo), Some(hi), Some(neg)) = (alo, ahi, alo.and_then(i64::checked_neg)) {
+                    if lo == hi {
+                        if let Some(l) = triple(mono, 1, &a, 0, &bb, neg, 0) {
+                            push_equality(&out, &mut fresh, l);
+                        }
+                    }
+                }
+                if let (Some(lo), Some(hi), Some(neg)) = (blo, bhi, blo.and_then(i64::checked_neg)) {
+                    if lo == hi {
+                        if let Some(l) = triple(mono, 1, &a, neg, &bb, 0, 0) {
+                            push_equality(&out, &mut fresh, l);
+                        }
+                    }
+                }
                 if let (Some(la), Some(lb)) = (alo, blo) {
                     if let Some(k) = prod(la, lb) {
                         if let Some(l) = triple(mono, 1, &a, -lb, &bb, -la, k) {
@@ -997,6 +1079,50 @@ mod tests {
         let lhs = app("*", app("+", v("n"), i(1)), v("m"));
         let rhs = app("+", app("*", v("n"), v("m")), v("m"));
         assert_eq!(entails(&[], &app("==", lhs, rhs)), Verdict::Proved);
+    }
+
+    #[test]
+    fn a_product_substitutes_a_factor_fixed_by_an_opaque_equation() {
+        // A proof axiom may establish `fact(0) == 1`.  The static function
+        // remains uninterpreted, but multiplication must still use the
+        // value the equation fixed for this application.
+        let fact0 = SExp::App("fact".into(), vec![i(0)]);
+        let hyps = vec![app("==", fact0.clone(), i(1))];
+        assert_eq!(
+            entails(&hyps, &app("==", app("*", fact0, v("r")), v("r"))),
+            Verdict::Proved
+        );
+    }
+
+    #[test]
+    fn exact_factor_substitution_works_on_either_side_and_beyond_one() {
+        let hyps = vec![app("==", v("k"), i(3))];
+        for product in [
+            app("*", v("k"), v("r")),
+            app("*", v("r"), v("k")),
+        ] {
+            assert_eq!(
+                entails(&hyps, &app("==", product, app("*", i(3), v("r")))),
+                Verdict::Proved
+            );
+        }
+    }
+
+    #[test]
+    fn multiplying_both_sides_of_a_known_equation_preserves_it() {
+        // The factorial induction axiom has this shape: an opaque
+        // application equals a product.  An accumulator multiplies both
+        // sides by `r`, and that is still the same equation.
+        let fact_n = SExp::App("fact".into(), vec![v("n")]);
+        let fact_prev = SExp::App("fact".into(), vec![app("-", v("n"), i(1))]);
+        let unfolded = app("*", v("n"), fact_prev);
+        let hyps = vec![app("==", fact_n.clone(), unfolded.clone())];
+        let goal = app(
+            "==",
+            app("*", fact_n, v("r")),
+            app("*", unfolded, v("r")),
+        );
+        assert_eq!(entails(&hyps, &goal), Verdict::Proved);
     }
 
     #[test]
