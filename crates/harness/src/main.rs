@@ -16,7 +16,7 @@
 //! two different gaps.
 //!
 //! ```text
-//! ats2-harness [ROOT] [--dir DIR] [--limit N] [--workers N] [--top N] [--sats]
+//! ats2-harness [ROOT] [--dir DIR] [--limit N] [--workers N] [--top N] [--sats] [--fragments]
 //! ```
 //!
 //! `ROOT` defaults to the `ATS-Postiats` checkout beside this workspace.
@@ -32,7 +32,7 @@ use ats2_application::checking::{check_program, Strictness};
 use ats2_application::elaboration;
 use ats2_application::linearity::check_linearity;
 use ats2_application::modules;
-use ats2_application::ports::ParserPort;
+use ats2_application::ports::{ParserPort, SourceLoaderPort};
 use ats2_domain::ast::Program;
 use ats2_domain::errors::{CompileError, ErrorKind};
 use ats2_infrastructure::llvm_ir::LlvmIrEmitter;
@@ -368,10 +368,28 @@ fn diagnostic_slug(message: &str) -> String {
     }
 }
 
-/// Every `.dats` (and, if asked, `.sats`) file under `root`, optionally
-/// restricted to a subdirectory.
-fn collect(root: &Path, subdir: Option<&Path>, include_sats: bool) -> Vec<PathBuf> {
-    let mut out = Vec::new();
+/// The physical ATS files selected from a corpus, separated from files that
+/// only make sense when textually included by another unit.
+struct Corpus {
+    files: Vec<PathBuf>,
+    included_fragments: usize,
+}
+
+/// Every compilation root under `root`.
+///
+/// A `.dats` named by `#include` is a textual fragment, not an independent ATS
+/// unit: its parent supplies declarations, macros and static bindings before
+/// its text is read. Compiling such a fragment alone reports artificial gaps
+/// such as "implemented but never declared". The reverse include index keeps
+/// those files out of the language-support score while `include_fragments`
+/// retains the old parser-stress behavior when explicitly requested.
+fn collect(
+    root: &Path,
+    subdir: Option<&Path>,
+    include_sats: bool,
+    include_fragments: bool,
+) -> Corpus {
+    let mut candidates = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -395,16 +413,46 @@ fn collect(root: &Path, subdir: Option<&Path>, include_sats: bool) -> Vec<PathBu
             if ext != "dats" && !(include_sats && ext == "sats") {
                 continue;
             }
-            if let Some(d) = subdir {
-                if !path.starts_with(d) {
-                    continue;
-                }
-            }
-            out.push(path);
+            candidates.push(path);
         }
     }
-    out.sort();
-    out
+    candidates.sort();
+
+    let candidate_ids: BTreeSet<PathBuf> = candidates
+        .iter()
+        .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()))
+        .collect();
+    let mut included = BTreeSet::new();
+    for parent in &candidates {
+        let Ok(source) = std::fs::read_to_string(parent) else {
+            continue;
+        };
+        let Ok(program) = Parser.parse_dependency(&source) else {
+            continue;
+        };
+        let loader = FileSources::at(parent).including_distribution(root);
+        for include in program.includes() {
+            let Ok(Some(unit)) = loader.load(&include.path, parent) else {
+                continue;
+            };
+            if candidate_ids.contains(&unit.path) {
+                included.insert(unit.path);
+            }
+        }
+    }
+
+    let files = candidates
+        .into_iter()
+        .filter(|path| subdir.is_none_or(|dir| path.starts_with(dir)))
+        .filter(|path| {
+            include_fragments
+                || !included.contains(&path.canonicalize().unwrap_or_else(|_| path.clone()))
+        })
+        .collect();
+    Corpus {
+        files,
+        included_fragments: included.len(),
+    }
 }
 
 fn stopped(stage: Stage, message: impl Into<String>) -> Outcome {
@@ -635,6 +683,7 @@ fn main() {
         .unwrap_or(8);
     let mut top = 30usize;
     let mut include_sats = false;
+    let mut include_fragments = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -643,6 +692,7 @@ fn main() {
             "--workers" => workers = it.next().and_then(|s| s.parse().ok()).unwrap_or(workers),
             "--top" => top = it.next().and_then(|s| s.parse().ok()).unwrap_or(top),
             "--sats" => include_sats = true,
+            "--fragments" => include_fragments = true,
             other if !other.starts_with("--") => root = Some(PathBuf::from(other)),
             other => {
                 eprintln!("unknown flag `{other}`");
@@ -664,7 +714,14 @@ fn main() {
     }
     let subdir = subdir.as_ref().map(|d| root.join(d));
 
-    let files = collect(&root, subdir.as_deref(), include_sats);
+    let corpus = collect(&root, subdir.as_deref(), include_sats, include_fragments);
+    if !include_fragments && corpus.included_fragments > 0 {
+        eprintln!(
+            "excluding {} include-only fragments (pass --fragments to compile them directly)",
+            corpus.included_fragments
+        );
+    }
+    let files = corpus.files;
     if let Some(limit) = limit {
         eprintln!("limiting to {limit} of {} files", files.len());
     }

@@ -1027,6 +1027,7 @@ impl<'a> ParseCtx<'a> {
     /// compiler's own machinery and have nothing to say to this one.
     fn parse_hash_directive(&mut self, out: &mut Vec<Def>) -> Result<(), CompileError> {
         self.advance(); // `#`
+        let directive_line = self.peek().span.start.line;
         let word = match self.peek().kind.clone() {
             TokenKind::Ident(w) => w,
             _ => {
@@ -1035,6 +1036,17 @@ impl<'a> ParseCtx<'a> {
             }
         };
         self.advance();
+        // These conditional-compilation controls have no arguments.
+        // Sending `#endif` through the generic directive skipper consumes the
+        // first token after it; when that token is `fun`, the parser silently
+        // loses the declaration. The opening controls are deliberately not
+        // handled here: ATS permits their condition on the following line.
+        if matches!(word.as_str(), "else" | "endif") {
+            while !self.at(&TokenKind::Eof) && self.peek().span.start.line == directive_line {
+                self.advance();
+            }
+            return Ok(());
+        }
         // `#staload` / `#dynload` — the pseudocode spellings of the two
         // directives that name another unit.  What they name is a
         // dependency every bit as much as the unpragmatic form's is, so
@@ -2262,11 +2274,7 @@ impl<'a> ParseCtx<'a> {
                 self.pos = save;
                 return None;
             };
-            vars.extend(
-                names
-                    .into_iter()
-                    .map(|name| (name, Sort::from_name(&sort))),
-            );
+            vars.extend(names.into_iter().map(|name| (name, Sort::from_name(&sort))));
         }
         // `{i,j:nat | i <= j+1; i+j == n-1}` — ATS writes a conjunction
         // of claims with semicolons, and this is how every loop
@@ -3222,9 +3230,17 @@ impl<'a> ParseCtx<'a> {
         }
     }
 
-    /// A parenthesized type: `(t)`, `(t, u) -> v`, or a tuple (unsupported).
+    /// A parenthesized type: `()`, `(t)`, `(t, u) -> v`, or a tuple.
     fn parse_paren_type(&mut self) -> Result<Ty, CompileError> {
         self.advance();
+        if self.at(&TokenKind::RParen) {
+            self.advance();
+            if self.eat_arrow() {
+                let ret = self.parse_type()?;
+                return Ok(Ty::Fun(vec![], Box::new(ret)));
+            }
+            return Ok(Ty::Name("void".into()));
+        }
         let mut items = vec![self.parse_type()?];
         while self.at(&TokenKind::Comma) {
             self.advance();
@@ -5651,10 +5667,7 @@ extern fun after(): int
         assert_eq!(p.staloads().len(), 1, "{:?}", p.staloads());
         assert_eq!(p.staloads()[0].path, "helper.sats");
         assert_eq!(p.staloads()[0].alias, None);
-        assert_eq!(
-            p.staloads()[0].kind,
-            ats2_domain::ast::LoadKind::Interface
-        );
+        assert_eq!(p.staloads()[0].kind, ats2_domain::ast::LoadKind::Interface);
         // Recording it must not stop the rest of the file parsing.
         assert_eq!(p.defs().len(), 1);
     }
@@ -7827,16 +7840,51 @@ extern fun after(): int
 
     #[test]
     fn a_template_declaration_accepts_a_type_only_parameter() {
-        let p = Parser::parse(
-            "fun cloref1_app {a:t0p;b:vt0p} (f: cfun1(a, b), a): b = \"mac#%\"\n",
-        )
-        .expect("parse");
+        let p =
+            Parser::parse("fun cloref1_app {a:t0p;b:vt0p} (f: cfun1(a, b), a): b = \"mac#%\"\n")
+                .expect("parse");
         let Def::Extern(d) = &p.defs()[0] else {
             panic!("expected an extern declaration")
         };
         assert_eq!(d.name, "cloref1_app");
         assert_eq!(d.params.len(), 2);
         assert_eq!(d.params[1].ty, Ty::Name("a".into()));
+    }
+
+    #[test]
+    fn a_declaration_may_have_an_empty_template_group_before_its_name() {
+        let p = Parser::parse("fun{} matrix0_of_mtrxszref {a:vt0p}(mtrxszref(a)):<> matrix0(a)\n")
+            .expect("parse");
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!("expected an extern declaration")
+        };
+        assert_eq!(d.name, "matrix0_of_mtrxszref");
+        assert_eq!(d.ty_params, vec!["a"]);
+        assert_eq!(d.params.len(), 1);
+    }
+
+    #[test]
+    fn an_endif_does_not_consume_the_next_declaration() {
+        let p = Parser::parse(
+            "#if(0)\n#endif // #if(0)\nfun{} matrix0_of_mtrxszref {a:vt0p}(mtrxszref(a)):<> matrix0(a)\n",
+        )
+        .expect("parse");
+        assert!(p.defs().iter().any(
+            |definition| matches!(definition, Def::Extern(d) if d.name == "matrix0_of_mtrxszref")
+        ));
+    }
+
+    #[test]
+    fn a_declaration_may_bind_its_type_parameter_after_its_name() {
+        let p =
+            Parser::parse("fun fun2cloref0 {res:t@ype} (fopr: () -> res): cfun(res) = \"mac#%\"\n")
+                .expect("parse");
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!("expected an extern declaration")
+        };
+        assert_eq!(d.name, "fun2cloref0");
+        assert_eq!(d.ty_params, vec!["res"]);
+        assert_eq!(d.params.len(), 1);
     }
 
     #[test]
