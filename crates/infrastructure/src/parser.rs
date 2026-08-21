@@ -2707,6 +2707,18 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
             self.advance(); // `.`
             name = self.expect_ident("expected a type name")?;
         }
+        // `list0@(INV(a), b)` — the `@` between a type former and its
+        // arguments is a view/linear marker.  It decorates the type
+        // without changing what it is, so it is dropped and the
+        // application is read as usual.
+        if self.at(&TokenKind::At)
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                Some(TokenKind::LParen)
+            )
+        {
+            self.advance(); // `@`
+        }
         // A bare alias with no arguments still names the canonical type.
         if let Some((canonical, _)) = crate::prelude::canonical_type(&name) {
             name = canonical.to_string();
@@ -4520,6 +4532,17 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
             return None;
         };
         self.advance();
+        // `overload * with list0_cross of 10` — the `of <n>` names a
+        // precedence level for the overloaded operator.  It is only a
+        // hint to the type checker's disambiguation, so it is read and
+        // dropped.
+        if self.at(&TokenKind::Of) {
+            // `of 10` — the precedence level, a single number.
+            self.advance();
+            if matches!(self.peek().kind, TokenKind::IntLit(_)) {
+                self.advance();
+            }
+        }
         Some(Def::Overload {
             op: op.to_string(),
             func,
