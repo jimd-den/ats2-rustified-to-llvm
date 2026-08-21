@@ -85,6 +85,10 @@ pub struct Staload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Def {
     Datatype(DatatypeDef),
+    /// `exception X of (t1, t2)` — a constructor of the built-in `exn`
+    /// type.  Exceptions are values like any other; this records that
+    /// `X` is one of them and what it carries.
+    Exception(String, Vec<Ty>),
     Fun(FunDef),
     Implement(ImplementDef),
     /// `extern fun f (x: t): u` — a signature with no body here.
@@ -538,6 +542,11 @@ pub enum Expr {
     /// `case e of | p1 => e1 | p2 => e2` — pattern matching, and the
     /// only way to take a datatype apart.
     Case(Box<Expr>, Vec<(Pattern, Expr)>),
+    /// `try e with | p1 => h1 | p2 => h2` — evaluate `e`; if it raises an
+    /// exception, run the first handler whose pattern matches it.
+    Try(Box<Expr>, Vec<(Pattern, Expr)>),
+    /// `$raise e` — raise `e` as the current exception.
+    Raise(Box<Expr>),
     /// `println!(...)` — a macro invocation.
     MacroCall(String, Vec<Expr>),
 }
@@ -604,6 +613,11 @@ impl Expr {
                 f(scrutinee);
                 arms.iter().for_each(|(_, body)| f(body));
             }
+            Expr::Try(scrutinee, handlers) => {
+                f(scrutinee);
+                handlers.iter().for_each(|(_, body)| f(body));
+            }
+            Expr::Raise(value) => f(value),
         }
     }
 }

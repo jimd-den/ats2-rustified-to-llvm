@@ -611,6 +611,9 @@ fn keyword(text: &str) -> Option<TokenKind> {
         "var" => TokenKind::Var,
         "while" => TokenKind::While,
         "for" => TokenKind::For,
+        // `try e with | p => h` — `with` starts the handler list; it is
+        // a keyword so it is not read as an identifier in juxtaposition.
+        "with" => TokenKind::With,
         _ => return None,
     })
 }

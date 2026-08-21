@@ -247,6 +247,11 @@ fn splice_macro_args(expr: &Expr, params: &[String], args: &[Expr]) -> Expr {
             Box::new(sub(scrut)),
             arms.iter().map(|(p, b)| (p.clone(), sub(b))).collect(),
         ),
+        E::Try(scrut, handlers) => E::Try(
+            Box::new(sub(scrut)),
+            handlers.iter().map(|(p, b)| (p.clone(), sub(b))).collect(),
+        ),
+        E::Raise(value) => E::Raise(Box::new(sub(value))),
         E::MacroCall(n, items) => E::MacroCall(n.clone(), items.iter().map(sub).collect()),
     }
 }
@@ -857,6 +862,16 @@ impl ParseCtx<'_> {
                 self.skip_directive();
                 Ok(())
             }
+            // `exception X of (t1, t2)` — a constructor of the built-in
+            // `exn` type.  It is not skipped like the other static
+            // declarations: a program that raises and catches needs to
+            // know the constructors, so they are kept.
+            TokenKind::Ident(w) if w == "exception" => {
+                if let Some(def) = self.parse_exception() {
+                    out.push(def);
+                }
+                Ok(())
+            }
             TokenKind::Ident(name) if is_skippable_directive(&name) => {
                 self.skip_directive();
                 Ok(())
@@ -1313,14 +1328,38 @@ impl ParseCtx<'_> {
             let existentials = self.parse_existentials();
             let whole = self.parse_type()?;
             self.skip_static_annotations();
-            let (params, ret) = Self::split_curried(whole);
+            let (sig_params, ret) = Self::split_curried(whole);
+            // `fun f : T = lam (x, y) => b` — a *definition* written in
+            // the colon form: it carries a body, and when that body is a
+            // lambda the lambda's parameters are the function's.  A
+            // `= "mac#..."` binding is a declaration instead.
+            if self.at(&TokenKind::Eq) && !self.is_string_binding() {
+                self.advance(); // `=`
+                let body = self.parse_expr(0)?;
+                let (params, body) = match body {
+                    Expr::Lam(ps, _ty, inner) => (ps, *inner),
+                    other => (sig_params, other),
+                };
+                self.pop_type_vars(scope);
+                return Ok(Def::Fun(FunDef {
+                    ty_params,
+                    universals,
+                    existentials,
+                    metric,
+                    name,
+                    params,
+                    ret,
+                    body,
+                    proof,
+                }));
+            }
             let decl = self.finish_fun_decl(
                 proof,
                 ty_params,
                 universals,
                 existentials,
                 name,
-                params,
+                sig_params,
                 ret,
             )?;
             self.pop_type_vars(scope);
@@ -1385,6 +1424,13 @@ impl ParseCtx<'_> {
     /// `"sta#name"` a static one), as opposed to an expression.  They are
     /// the whole of what distinguishes a `.sats` signature that happens
     /// to carry a binding from a definition whose body is a string.
+    /// Whether the cursor sits on `= "..."` — a declaration's string
+    /// binding (an external name), as opposed to a real body.
+    fn is_string_binding(&self) -> bool {
+        self.at(&TokenKind::Eq)
+            && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::StrLit(_)))
+    }
+
     fn at_external_binding(&self) -> bool {
         if !self.at(&TokenKind::Eq) {
             return false;
@@ -1686,13 +1732,30 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
         // of what separates a value from a function here.  With no
         // template and no instance to make it function-like, the body is
         // the value itself, and the implement is a top-level `val`.
-        if self.at(&TokenKind::Eq) && ty_params.is_empty() && instance.is_empty() {
+        if self.at(&TokenKind::Eq) {
             self.advance(); // `=`
             let value = self.parse_expr(0)?;
-            return Ok(Def::Val(ValDef {
+            // `implement x0 = e` — filling in an `extern val` with a
+            // value: no template, no instance, the body is the value.
+            if ty_params.is_empty() && instance.is_empty() {
+                return Ok(Def::Val(ValDef {
+                    name,
+                    ty: None,
+                    value,
+                }));
+            }
+            // `implement (a) fprint_val<list0(a)> = fprint_list0<a>` —
+            // a template hole filled with a *function value* (a name and
+            // its instance, no parameters here).  It is an implement
+            // whose parameter list is empty.
+            self.pop_type_vars(scope);
+            return Ok(Def::Implement(ImplementDef {
+                ty_params,
+                instance,
                 name,
-                ty: None,
-                value,
+                params: Vec::new(),
+                ret: None,
+                body: value,
             }));
         }
         // The implement's own parameters are in scope for its signature
@@ -2424,6 +2487,7 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
                         | TokenKind::Fun
                         | TokenKind::Fn
                         | TokenKind::Implement
+                        | TokenKind::Eq
                         | TokenKind::Hash
                         | TokenKind::Eof => true,
                         // A word that begins a declaration cannot be the
@@ -3643,23 +3707,11 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
             // `$ldelay`'s second argument says how to free the stream if
             // it is dropped unforced.  The arena frees everything at
             // once, so it is read and dropped.
-            // `$raise SomeExn` / `$raise SomeExn(x)` — throw.  There is
-            // no `try` in the subset, so nothing can catch it; the name
-            // is kept because it is the only thing that will tell anyone
-            // what went wrong.
+            // `$raise SomeExn(x)` — throw the exception value it names.
             TokenKind::Ident(name) if name == "$raise" => {
                 self.advance();
-                let exn = match self.peek().kind.clone() {
-                    TokenKind::Ident(n) => {
-                        let _thrown = self.parse_primary(min_bp)?;
-                        n
-                    }
-                    _ => "exception".to_string(),
-                };
-                Ok(Expr::Call(
-                    Box::new(Expr::Var("$raise".into())),
-                    vec![Expr::StrLit(exn)],
-                ))
+                let exn = self.parse_prefix(min_bp)?;
+                Ok(Expr::Raise(Box::new(exn)))
             }
             TokenKind::Ident(name) if name == "$delay" || name == "$ldelay" => {
                 self.advance();
@@ -3678,6 +3730,10 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
                     vec![Expr::Lam(Vec::new(), None, Box::new(body))],
                 ))
             }
+            // `try e with | p => h` — `try` is an identifier (not a
+            // keyword), so it must be caught before the general
+            // identifier arm reads it as a function call.
+            TokenKind::Ident(w) if w == "try" => self.parse_try(min_bp),
             TokenKind::Ident(name) => {
                 self.advance();
                 // `addr@ x`, `view@ (x)` — the `@` belongs to the name,
@@ -4499,6 +4555,43 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
 
     /// `overload OP with FUNC` — a function to try when an operator's
     /// operands do not fit it.
+    /// `exception X` or `exception X of (t1, t2)` — an exception
+    /// constructor: a member of the built-in `exn` type, carrying the
+    /// given payload (or none).
+    fn parse_exception(&mut self) -> Option<Def> {
+        let save = self.pos;
+        self.advance(); // `exception`
+        let TokenKind::Ident(name) = self.peek().kind.clone() else {
+            self.pos = save;
+            return None;
+        };
+        self.advance();
+        let mut fields = Vec::new();
+        if self.at(&TokenKind::Of) {
+            self.advance();
+            if self.at(&TokenKind::LParen) {
+                self.advance();
+                if !self.at(&TokenKind::RParen) {
+                    loop {
+                        let Ok(ty) = self.parse_type() else {
+                            self.pos = save;
+                            return None;
+                        };
+                        fields.push(ty);
+                        if self.at(&TokenKind::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&TokenKind::RParen, "expected `)` after the exception fields")
+                    .ok()?;
+            }
+        }
+        Some(Def::Exception(name, fields))
+    }
+
     fn parse_overload(&mut self) -> Option<Def> {
         let save = self.pos;
         self.advance(); // `overload`
@@ -4520,7 +4613,9 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
             }
         };
         self.advance();
-        if !matches!(&self.peek().kind, TokenKind::Ident(w) if w == "with") {
+        if !matches!(self.peek().kind, TokenKind::With)
+            && !matches!(&self.peek().kind, TokenKind::Ident(w) if w == "with")
+        {
             self.pos = save;
             self.skip_directive();
             return None;
@@ -4653,6 +4748,40 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
     /// arm's body runs to the next `|` that starts an arm, which is why
     /// the body is parsed at the loosest precedence and then stops
     /// naturally: nothing in the expression grammar consumes a bare `|`.
+    /// `try e with | p1 => h1 | p2 => h2` — evaluate the body; if it
+    /// raises an exception that matches a handler's pattern, run that
+    /// handler's body instead.
+    fn parse_try(&mut self, min_bp: u8) -> Result<Expr, CompileError> {
+        self.advance(); // `try`
+        let body = self.parse_expr(0)?;
+        self.expect(&TokenKind::With, "expected `with` after the try body")?;
+        let mut handlers = Vec::new();
+        loop {
+            // The leading `|` of the first handler is decoration.
+            if self.at(&TokenKind::Pipe) {
+                self.advance();
+            }
+            let pattern = self.parse_pattern()?;
+            self.expect(
+                &TokenKind::FatArrow,
+                "expected `=>` after the handler pattern",
+            )?;
+            let handler = self.parse_expr(0)?;
+            handlers.push((pattern, handler));
+            if !self.at(&TokenKind::Pipe) {
+                break;
+            }
+        }
+        Ok(Expr::Try(Box::new(body), handlers))
+    }
+
+    /// `$raise e` — raise `e` as the current exception.
+    fn parse_raise(&mut self) -> Result<Expr, CompileError> {
+        self.advance(); // `$raise`
+        let value = self.parse_expr(UNARY_BP)?;
+        Ok(Expr::Raise(Box::new(value)))
+    }
+
     fn parse_case(&mut self) -> Result<Expr, CompileError> {
         self.advance(); // `case` (the `+`/`-` marker is part of the keyword)
         let scrutinee = self.parse_expr(0)?;
@@ -7138,10 +7267,7 @@ mod tests {
     fn raise_names_the_exception_it_throws() {
         assert_eq!(
             body_of("fun f(): int = $raise StreamSubscriptExn"),
-            Expr::Call(
-                Box::new(var("$raise")),
-                vec![Expr::StrLit("StreamSubscriptExn".into())]
-            )
+            Expr::Raise(Box::new(var("StreamSubscriptExn")))
         );
     }
 

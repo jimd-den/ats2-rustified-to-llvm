@@ -108,6 +108,8 @@ pub enum TokenKind {
     Of,
     /// `when` — a guard on a pattern.
     When,
+    /// `with` — the handler separator in `try e with | p => h`.
+    With,
     /// `var` — a stack-allocated mutable binding.
     Var,
     /// `void` is an ordinary type name elsewhere, but `while`/`for` are

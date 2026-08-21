@@ -54,7 +54,7 @@ impl Lifter {
                 Def::Const(c) => Some(c.name.clone()),
                 Def::Implement(im) => Some(im.name.clone()),
                 Def::Val(v) => Some(v.name.clone()),
-                Def::Datatype(_) | Def::Overload { .. } => None,
+                Def::Datatype(_) | Def::Overload { .. } | Def::Exception(_, _) => None,
             })
             .collect();
 
@@ -245,6 +245,14 @@ impl LiftCtx {
                 }
                 Expr::Let(out, Box::new(self.walk(body, &inner)?))
             }
+            Expr::Try(scrutinee, handlers) => {
+                let mut out = Vec::new();
+                for (p, b) in handlers {
+                    out.push((p.clone(), self.walk(b, scope)?));
+                }
+                Expr::Try(Box::new(self.walk(scrutinee, scope)?), out)
+            }
+            Expr::Raise(value) => Expr::Raise(Box::new(self.walk(value, scope)?)),
             Expr::Case(scrutinee, arms) => {
                 let mut out = Vec::new();
                 for (pat, body) in arms {
@@ -462,6 +470,15 @@ fn free_vars(expr: &Expr, bound: &mut HashSet<String>, out: &mut BTreeSet<String
                 free_vars(body, &mut inner, out);
             }
         }
+        Expr::Try(scrutinee, handlers) => {
+            free_vars(scrutinee, bound, out);
+            for (pat, body) in handlers {
+                let mut inner = bound.clone();
+                inner.extend(pat.bound_names());
+                free_vars(body, &mut inner, out);
+            }
+        }
+        Expr::Raise(value) => free_vars(value, bound, out),
         Expr::LetFun(funs, body) => {
             let mut inner = bound.clone();
             inner.extend(funs.iter().map(|f| f.name.clone()));
@@ -533,6 +550,11 @@ fn rewrite_calls(
             Box::new(go(scrutinee)),
             arms.iter().map(|(p, b)| (p.clone(), go(b))).collect(),
         ),
+        Expr::Try(scrutinee, handlers) => Expr::Try(
+            Box::new(go(scrutinee)),
+            handlers.iter().map(|(p, b)| (p.clone(), go(b))).collect(),
+        ),
+        Expr::Raise(value) => Expr::Raise(Box::new(go(value))),
         Expr::LetFun(funs, body) => Expr::LetFun(funs.clone(), Box::new(go(body))),
         Expr::Index(b, i) => Expr::Index(Box::new(go(b)), Box::new(go(i))),
         Expr::Proj(b, i) => Expr::Proj(Box::new(go(b)), *i),

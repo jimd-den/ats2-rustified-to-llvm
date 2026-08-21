@@ -35,6 +35,7 @@ impl LlvmIrEmitter {
             match def {
                 // Not this compiler's language; the toolchain reads it.
                 Def::InlineC(_) => {}
+                Def::Exception(_, _) => {}
                 Def::Fun(f) => emit_function(f, &registry, &mut module)?,
                 Def::Implement(im) if im.name == "main0" || im.name == "main" => {
                     // The initializers run first, in the order they were
@@ -290,6 +291,7 @@ fn def_name(def: &Def) -> Option<String> {
     match def {
         // Not this compiler's language; the toolchain reads it.
         Def::InlineC(_) => None,
+        Def::Exception(name, _) => Some(name.clone()),
         Def::Fun(f) => Some(f.name.clone()),
         Def::Extern(d) => Some(d.name.clone()),
         Def::Implement(im) => Some(im.name.clone()),
@@ -306,6 +308,11 @@ fn collect_names(defs: &[Def], out: &mut std::collections::HashSet<String>) {
         match def {
             // Not this compiler's language; the toolchain reads it.
             Def::InlineC(_) => {}
+            Def::Exception(_, payload) => {
+                for t in payload {
+                    collect_type_names(t, out);
+                }
+            }
             Def::Fun(f) => {
                 for p in &f.params {
                     collect_type_names(&p.ty, out);
@@ -452,6 +459,14 @@ fn collect_expr_names(expr: &Expr, out: &mut std::collections::HashSet<String>) 
                 collect_expr_names(b, out);
             }
         }
+        Expr::Try(s, handlers) => {
+            collect_expr_names(s, out);
+            for (p, b) in handlers {
+                collect_pattern_names(p, out);
+                collect_expr_names(b, out);
+            }
+        }
+        Expr::Raise(v) => collect_expr_names(v, out),
         Expr::LetFun(funs, body) => {
             for f in funs {
                 collect_expr_names(&f.body, out);
@@ -840,6 +855,11 @@ fn registry_of(program: &Program) -> Result<Registry, CompileError> {
         match def {
             // Not this compiler's language; the toolchain reads it.
             Def::InlineC(_) => {}
+            Def::Exception(_, payload) => {
+                for t in payload {
+                    llvm_type_in(t, &registry)?;
+                }
+            }
             Def::Fun(f) => {
                 let params = f
                     .params
@@ -2373,6 +2393,10 @@ impl LlvmIrEmitter {
                 self.emit_case(scrutinee, arms, expected, fb, registry, module)
             }
             Expr::MacroCall(name, args) => self.emit_macro(name, args, fb, registry, module),
+            Expr::Try(_, _) => Err(CompileError::emit(
+                "a `try` with a handler needs exception catching, which is not lowered yet",
+            )),
+            Expr::Raise(value) => self.emit_raise(value, fb, registry, module),
         }
     }
 
@@ -3020,6 +3044,41 @@ impl LlvmIrEmitter {
     /// stream as their first argument.  All of them collapse to a single
     /// `printf`/`fprintf` call with one synthesized format string, which
     /// is both the simplest lowering and the fastest one.
+    /// `$raise e` with no handler to catch it — an *uncaught* exception,
+    /// which is the end of the program.  The value is built (for any
+    /// side effects in it), a word is said, and control exits.  This is
+    /// the honest lowering of a raise that has nowhere to go.
+    fn emit_raise(
+        &self,
+        value: &Expr,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
+        // An unhandled raise is the end of the program.  The name of the
+        // exception (a constructor, bare or built) is the one useful
+        // thing to keep; any side effects in building it still run.
+        let name = match value {
+            Expr::Var(n) => n.clone(),
+            Expr::Call(head, _) => match head.as_ref() {
+                Expr::Var(n) => n.clone(),
+                _ => "exception".to_string(),
+            },
+            _ => {
+                let _ = self.emit_expr(value, fb, registry, module)?;
+                "exception".to_string()
+            }
+        };
+        let msg = format!("exit(ATS): uncaught {name}\n");
+        self.emit_printf(Stream::Stderr, &msg, &[], fb, module);
+        fb.line("call void @exit(i32 1)");
+        fb.line("unreachable");
+        Ok(FnValue {
+            reg: String::new(),
+            ty: LlvmType::Never,
+        })
+    }
+
     fn emit_macro(
         &self,
         name: &str,

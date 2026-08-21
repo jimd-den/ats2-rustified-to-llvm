@@ -600,6 +600,14 @@ impl MonoCtx {
                 }
                 Expr::Let(out, Box::new(self.rewrite(body, subst)?))
             }
+            Expr::Try(scrutinee, handlers) => {
+                let mut out = Vec::new();
+                for (p, b) in handlers {
+                    out.push((p.clone(), self.rewrite(b, subst)?));
+                }
+                Expr::Try(Box::new(self.rewrite(scrutinee, subst)?), out)
+            }
+            Expr::Raise(value) => Expr::Raise(Box::new(self.rewrite(value, subst)?)),
             Expr::Case(scrutinee, arms) => {
                 let mut out = Vec::new();
                 for (p, b) in arms {
