@@ -289,6 +289,9 @@ fn splice_macro_args(expr: &Expr, params: &[String], args: &[Expr]) -> Expr {
 /// is the base type the family refines, so `natLt(n)` is an `int` that
 /// happens to be known to sit below `n`.
 fn indexed_base(name: &str) -> Option<&'static str> {
+    if let Some(base) = crate::prelude::canonical_scalar_type(name) {
+        return Some(base);
+    }
     Some(match name {
         "int" | "intGt" | "intGte" | "intLt" | "intLte" | "intBtw" | "intBtwe" | "nat"
         | "natLt" | "natLte" | "natGt" | "natGte" | "pos" | "Nat" | "Pos" => "int",
@@ -1495,7 +1498,7 @@ impl<'a> ParseCtx<'a> {
             self.pop_type_vars(scope);
             return Ok(Def::Extern(decl));
         }
-        let params = self.parse_params()?;
+        let (params, ambiguous_bare_types) = self.parse_params_with_unknown_bare_types()?;
         // A missing return type is written as `_`: some functions leave it
         // out when the body says what it is, as `fun f (m: int) = lam ...`
         // does.
@@ -1529,6 +1532,9 @@ impl<'a> ParseCtx<'a> {
             )?;
             self.pop_type_vars(scope);
             return Ok(Def::Extern(decl));
+        }
+        if let Some(name) = ambiguous_bare_types.first() {
+            return Err(self.error_here(format!("parameter `{name}` needs a type annotation")));
         }
         self.expect(&TokenKind::Eq, "expected `=` before the function body")?;
         let body = self.parse_expr(0)?;
@@ -2746,11 +2752,37 @@ impl<'a> ParseCtx<'a> {
         &mut self,
         allow_untyped: bool,
     ) -> Result<Vec<Param>, CompileError> {
-        let mut all = self.parse_one_param_list(allow_untyped)?;
+        self.parse_params_with_policy(allow_untyped, false)
+            .map(|(params, _)| params)
+    }
+
+    /// Parse declaration parameters while retaining names that are
+    /// syntactically ambiguous between a value parameter and an imported type.
+    ///
+    /// ATS permits `fun f(imported_type): result` without naming the parameter.
+    /// Dependency parsing does not yet carry imported type aliases into the
+    /// parser, so an unknown bare identifier is provisionally a type here.
+    /// `parse_fun_def` rejects that provisional reading if an implementation
+    /// body follows, where the identifier necessarily names a value instead.
+    fn parse_params_with_unknown_bare_types(
+        &mut self,
+    ) -> Result<(Vec<Param>, Vec<String>), CompileError> {
+        self.parse_params_with_policy(false, true)
+    }
+
+    fn parse_params_with_policy(
+        &mut self,
+        allow_untyped: bool,
+        unknown_bare_is_type: bool,
+    ) -> Result<(Vec<Param>, Vec<String>), CompileError> {
+        let (mut all, mut ambiguous) =
+            self.parse_one_param_list(allow_untyped, unknown_bare_is_type)?;
         while self.at(&TokenKind::LParen) {
-            all.extend(self.parse_one_param_list(allow_untyped)?);
+            let (params, names) = self.parse_one_param_list(allow_untyped, unknown_bare_is_type)?;
+            all.extend(params);
+            ambiguous.extend(names);
         }
-        Ok(all)
+        Ok((all, ambiguous))
     }
 
     /// Whether a parameter's type is prefixed by a borrow marker.
@@ -2777,12 +2809,17 @@ impl<'a> ParseCtx<'a> {
             || self.datatypes.contains(name)
     }
 
-    fn parse_one_param_list(&mut self, allow_untyped: bool) -> Result<Vec<Param>, CompileError> {
+    fn parse_one_param_list(
+        &mut self,
+        allow_untyped: bool,
+        unknown_bare_is_type: bool,
+    ) -> Result<(Vec<Param>, Vec<String>), CompileError> {
         self.expect(
             &TokenKind::LParen,
             "expected `(` to begin the parameter list",
         )?;
         let mut params = Vec::new();
+        let mut ambiguous = Vec::new();
         if !self.at(&TokenKind::RParen) {
             loop {
                 // `fun f (string, int): int` — a *declaration* may give
@@ -2827,6 +2864,16 @@ impl<'a> ParseCtx<'a> {
                     // parameters, so a type name standing alone is a
                     // parameter of that type.
                     self.gensym += 1;
+                    let canonical = crate::prelude::canonical_type(&name)
+                        .map(|(canonical, _)| canonical)
+                        .or_else(|| indexed_base(&name))
+                        .unwrap_or(&name);
+                    let ty = Ty::Name(canonical.into());
+                    name = format!("arg${}", self.gensym);
+                    ty
+                } else if unknown_bare_is_type {
+                    ambiguous.push(name.clone());
+                    self.gensym += 1;
                     let ty = Ty::Name(name.clone());
                     name = format!("arg${}", self.gensym);
                     ty
@@ -2846,7 +2893,7 @@ impl<'a> ParseCtx<'a> {
             }
         }
         self.expect(&TokenKind::RParen, "expected `)` after the parameters")?;
-        Ok(params)
+        Ok((params, ambiguous))
     }
 
     // --- types -----------------------------------------------------
@@ -2988,6 +3035,9 @@ impl<'a> ParseCtx<'a> {
         }
         // A bare alias with no arguments still names the canonical type.
         if let Some((canonical, _)) = crate::prelude::canonical_type(&name) {
+            name = canonical.to_string();
+        }
+        if let Some(canonical) = crate::prelude::canonical_scalar_type(&name) {
             name = canonical.to_string();
         }
         // `int(n)`, `natLt(n+1)`, `string(n)` — the arguments are static
@@ -7872,6 +7922,55 @@ extern fun after(): int
         assert!(p.defs().iter().any(
             |definition| matches!(definition, Def::Extern(d) if d.name == "matrix0_of_mtrxszref")
         ));
+    }
+
+    #[test]
+    fn an_inline_c_include_does_not_consume_the_next_declaration() {
+        let p = Parser::parse(
+            "%{#\n#include \"libats/CATS/hashfun.cats\"\n%}\nfun{} inthash_jenkins(uint32):<> uint32\n",
+        )
+        .expect("parse");
+        assert!(p
+            .defs()
+            .iter()
+            .any(|definition| matches!(definition, Def::Extern(d) if d.name == "inthash_jenkins")));
+        let Def::Extern(declaration) = &p.defs()[1] else {
+            panic!("expected the hash declaration after inline C")
+        };
+        assert_eq!(declaration.params[0].ty, Ty::Name("int".into()));
+        assert_eq!(declaration.ret, Ty::Name("int".into()));
+    }
+
+    #[test]
+    fn a_bare_double_parameter_is_an_ambient_scalar_type() {
+        let p = Parser::parse("fun gvalue_float(double): gvalue = \"mac#%\"\n").expect("parse");
+        let Def::Extern(declaration) = &p.defs()[0] else {
+            panic!("expected a declaration")
+        };
+        assert_eq!(declaration.params[0].ty, Ty::Name("double".into()));
+    }
+
+    #[test]
+    fn an_ml_basis_reference_alias_is_available_to_a_declaration() {
+        let p = Parser::parse("fun{} gvalue_ref(gvref): gvalue\n").expect("parse");
+        let Def::Extern(declaration) = &p.defs()[0] else {
+            panic!("expected a declaration")
+        };
+        assert_eq!(declaration.params[0].ty, Ty::Name("ptr".into()));
+    }
+
+    #[test]
+    fn an_imported_bare_type_is_allowed_in_a_declaration_only() {
+        let p = Parser::parse("fun{} gvalue_is_nil(gvalue): bool\n").expect("declaration");
+        let Def::Extern(declaration) = &p.defs()[0] else {
+            panic!("expected a declaration")
+        };
+        assert_eq!(declaration.params[0].ty, Ty::Name("gvalue".into()));
+
+        let errors = Parser::parse("fun f(x): int = 0\n").expect_err("definition needs a type");
+        assert!(errors[0]
+            .message()
+            .contains("parameter `x` needs a type annotation"));
     }
 
     #[test]

@@ -1022,6 +1022,11 @@ fn registry_of(program: &Program) -> Result<Registry, CompileError> {
 /// knowledge is the checker's business and the machine word is the
 /// emitter's.  This is where the knowledge is dropped.
 fn refined_primitive(name: &str) -> Option<&'static str> {
+    if let Some(base) = crate::prelude::canonical_scalar_type(name) {
+        // Canonicalization is idempotent: only an alias needs another
+        // lowering pass. Re-entering for `double -> double` never terminates.
+        return (base != name).then_some(base);
+    }
     Some(match name {
         "intGt" | "intGte" | "intLt" | "intLte" | "intBtw" | "intBtwe" | "nat" | "natLt"
         | "natLte" | "natGt" | "natGte" | "uintGt" | "uintGte" | "uintLt" | "uintLte"
@@ -6872,6 +6877,13 @@ mod tests {
         assert_eq!(for_a, LlvmType::I8Ptr, "a type variable is boxed");
         let for_under = llvm_type_in(&Ty::Name("_".into()), &registry).expect("_ lowers");
         assert_eq!(for_under, LlvmType::I8Ptr, "an unnamed type is boxed");
+    }
+
+    #[test]
+    fn an_already_canonical_scalar_does_not_recurse() {
+        let registry = Registry::default();
+        let double = llvm_type_in(&Ty::Name("double".into()), &registry).expect("double lowers");
+        assert_eq!(double, LlvmType::F64);
     }
 
     #[test]

@@ -681,6 +681,23 @@ fun fileref_get_lines_stringlst (f: FILEref): list0(string) =
 /// The datatypes the prelude declares.
 pub const PRELUDE_DATATYPES: &[&str] = &["list0", "stream_con", "option0"];
 
+/// The runtime scalar behind an ATS primitive scalar spelling.
+///
+/// This compiler represents every integer as LLVM `i64` and every floating
+/// value as LLVM `double`. The aliases need to be recognized centrally:
+/// otherwise a bare signature parameter such as `(uint32)` or `(double)` is
+/// mistaken for an untyped value name by the parser, while a directly built
+/// AST may lower the same spelling as an opaque pointer.
+pub fn canonical_scalar_type(name: &str) -> Option<&'static str> {
+    match name {
+        "int8" | "uint8" | "int16" | "uint16" | "int32" | "uint32" | "int64" | "uint64" => {
+            Some("int")
+        }
+        "float" | "double" | "ldouble" => Some("double"),
+        _ => None,
+    }
+}
+
 /// Resolve a type name to the one the prelude actually declares, together
 /// with how many of its arguments are *types* rather than static indices.
 ///
@@ -707,6 +724,10 @@ pub fn canonical_type(name: &str) -> Option<(&'static str, usize)> {
         // does not track.  There is no element type to name — bytes are
         // bytes — so every argument is a length.
         "bytes" | "b0ytes" | "bytes_v" | "b0ytes_v" => Some(("bytes", 0)),
+        // `libats/ML/SATS/basis.sats` exports this alias to every ML unit.
+        // A reference is represented by the pointer to its cell; the
+        // `gvalue` element type governs source checking, not its LLVM shape.
+        "gvref" => Some(("ptr", 0)),
         // ATS spells the option several ways, and the linear one differs
         // only in who may keep it.  `opt` is deliberately not among them:
         // it is a name a program is as likely to want for itself, and an
@@ -727,7 +748,10 @@ pub fn canonical_type(name: &str) -> Option<(&'static str, usize)> {
 /// These aliases are declared in distribution headers rather than in each
 /// source unit that uses them. Keeping their expansion here gives the parser
 /// the same ambient type vocabulary as the prelude declarations.
-pub fn expand_type_alias(name: &str, args: &[ats2_domain::ast::Ty]) -> Option<ats2_domain::ast::Ty> {
+pub fn expand_type_alias(
+    name: &str,
+    args: &[ats2_domain::ast::Ty],
+) -> Option<ats2_domain::ast::Ty> {
     use ats2_domain::ast::Ty;
 
     match (name, args) {
