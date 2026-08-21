@@ -917,6 +917,7 @@ pub fn is_singleton_indexed(base: &Ty) -> bool {
             | "g1uint"
             | "double"
             | "float"
+            | "ptr"
     )
 }
 

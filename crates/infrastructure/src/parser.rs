@@ -112,7 +112,6 @@ fn is_skippable_directive(word: &str) -> bool {
             | "dataviewtype"
             | "symelim"
             | "symload"
-            | "castfn"
             | "tkindef"
             | "sexpdef"
             | "vwtpdef"
@@ -892,6 +891,21 @@ impl<'a> ParseCtx<'a> {
                 }
                 self.pos = save;
                 self.skip_directive();
+                Ok(())
+            }
+            // `castfn f {l:addr} (x: ptr l): ptr l` is a function
+            // declaration whose implementation is trusted to change or
+            // preserve a representation. The trust affects its body, not
+            // its dependent signature: callers still need the parameter and
+            // result indices, so it follows the ordinary declaration path.
+            TokenKind::Ident(name) if name == "castfn" => {
+                let save = self.pos;
+                if let Ok(decl) = self.parse_extern_decl() {
+                    out.push(Def::Extern(decl));
+                } else {
+                    self.pos = save;
+                    self.skip_directive();
+                }
                 Ok(())
             }
             TokenKind::Ident(name) if name == "extern" || name == "static" => {

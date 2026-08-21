@@ -97,6 +97,20 @@ fn an_expected_result_cannot_infer_an_instance_outside_its_sort() {
 }
 
 #[test]
+fn a_cast_function_preserves_its_dependent_signature() {
+    // `castfn` is a checked signature for an intentionally representation-
+    // changing operation. Its result and an indexed top-level value both
+    // retain their addresses, so the comparison establishes the promised
+    // `bool(l == null)` rather than becoming an unknown boolean.
+    let errs = check(
+        "val the_null_ptr: ptr(null) = 0 \
+         castfn preserve {l:addr} (x: ptr l): ptr l \
+         fun is_null {l:addr} (x: ptr l): bool(l == null) = preserve(x) = the_null_ptr",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
 fn an_unconstrained_implicit_static_argument_keeps_its_sort() {
     // The omitted indices are inference metavariables rather than arbitrary
     // caller-owned integers. Their sorts constrain the fresh instances, so

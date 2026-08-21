@@ -233,6 +233,7 @@ impl Exposure {
                 Def::Datatype(_)
                     | Def::Exception(_, _)
                     | Def::Extern(_)
+                    | Def::Val(ats2_domain::ast::ValDef { ty: Some(_), .. })
                     | Def::Overload { .. }
                     | Def::Const(_)
             ),
@@ -420,8 +421,17 @@ mod tests {
             name: "private_body".into(),
             ..fun_shape()
         });
+        let value_declaration = Def::Val(ats2_domain::ast::ValDef {
+            name: "the_null_ptr".into(),
+            ty: Some(ats2_domain::ast::Ty::App(
+                "ptr".into(),
+                vec![ats2_domain::ast::Ty::Name("null".into())],
+            )),
+            value: ats2_domain::ast::Expr::IntLit(0),
+        });
 
         assert!(Exposure::Interface.keeps(&declaration));
+        assert!(Exposure::Interface.keeps(&value_declaration));
         assert!(!Exposure::Interface.keeps(&body));
         assert!(Exposure::Definitions.keeps(&body));
     }

@@ -76,9 +76,30 @@ pub fn obligations(program: &Program, ambient: &Program) -> Vec<Obligation> {
         metric: Vec::new(),
         last_call: None,
     };
+    // Typed top-level values are in scope in every function, just as
+    // top-level function declarations are. Their indices matter: the
+    // canonical example is `val the_null_ptr: ptr(null)`, whose identity is
+    // what lets a comparison produce `bool(l == null)`. Collect ambient
+    // values first and let the program's own declaration of a name win.
+    let global_types: HashMap<String, Ty> = ambient
+        .defs()
+        .iter()
+        .chain(program.defs())
+        .filter_map(|definition| match definition {
+            Def::Val(value) => value
+                .ty
+                .as_ref()
+                .map(|ty| (value.name.clone(), ty.clone())),
+            _ => None,
+        })
+        .collect();
+    let mut globals = IndexEnv::new();
+    for (name, ty) in global_types {
+        walk.bind_param(&name, &ty, &mut globals);
+    }
     for def in program.defs() {
         match def {
-            Def::Fun(f) => walk.function_def(f, IndexEnv::new()),
+            Def::Fun(f) => walk.function_def(f, globals.clone()),
             Def::Implement(im) => {
                 // An implementation answers to the declaration it fills
                 // in, which is where the quantifiers were written.
@@ -90,13 +111,13 @@ pub fn obligations(program: &Program, ambient: &Program) -> Vec<Obligation> {
                     ret,
                     &existentials,
                     &im.body,
-                    IndexEnv::new(),
+                    globals.clone(),
                     // An `implement` fills in a function, never a proof.
                     false,
                 );
             }
             Def::Val(val) => {
-                let mut env = IndexEnv::new();
+                let mut env = globals.clone();
                 walk.function = val.name.clone();
                 let _ = walk.expr(&val.value, &mut env);
             }
