@@ -1143,9 +1143,14 @@ fn llvm_type_of(ty: &Ty) -> Result<LlvmType, CompileError> {
         // `argv` is C's `char **`.  Under opaque pointers every pointer is
         // spelled `ptr`, so it shares a representation with `string` and
         // is told apart only by how it may be used.
-        Ty::Name(n) => base_type_named(n).ok_or_else(|| {
-            CompileError::emit(format!("unsupported type `{n}` (only int, bool, string)"))
-        }),
+        //
+        // An unknown name is an *opaque* type: a record from a signature
+        // file this compilation did not load, an abstraction whose body
+        // no one may see, a `$rec` the source only ever passes around.
+        // Whatever its shape, nothing here may take it apart, so a
+        // pointer is what it is — the same box the established rule
+        // gives a type variable or an unnamed type.
+        Ty::Name(n) => Ok(base_type_named(n).unwrap_or(LlvmType::I8Ptr)),
         Ty::Fun(_, _) => Err(CompileError::emit(
             "higher-order function types are not supported yet",
         )),
@@ -9181,13 +9186,18 @@ mod tests {
     // --- unsupported constructs -----------------------------------
 
     #[test]
-    fn an_unknown_type_is_an_error_but_a_generic_list_is_not() {
-        // A name no one declared is a wall: `Frobnicate` is nothing the
-        // emitter has met.
-        let err = emit_err("fun len(xs: Frobnicate): int = 0");
-        assert!(err.message().contains("Frobnicate"), "{}", err);
-        // But a generic `list(a)` is a boxed datatype, and `a` its boxed
-        // element: both lower to a pointer.
+    fn an_opaque_type_is_a_boxed_pointer_and_a_generic_list_is_too() {
+        // A name no one declared is an *opaque* type: the record from a
+        // signature file this compilation did not load, the abstraction
+        // whose body no one may see, the `$rec` a program only passes
+        // around.  Nothing here may take it apart, so a pointer is what
+        // it is — the same box a type variable gets.  `Frobnicate` is a
+        // spellcheck away from being one of those, and the checker is
+        // the wall that catches a name that is truly nothing.
+        let ir = emit("fun len(xs: Frobnicate): int = 0").expect("opaque type");
+        assert!(ir.contains("define i64 @len(ptr %xs)"), "got:\n{ir}");
+        // And a generic `list(a)` is a boxed datatype, with `a` its
+        // boxed element: both lower to a pointer.
         let ir = emit("fun len(xs: list(a)): int = 0").expect("list(a) supports");
         assert!(ir.contains("define i64 @len(ptr %xs)"), "got:\n{ir}");
     }
