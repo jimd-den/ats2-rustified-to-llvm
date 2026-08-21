@@ -967,6 +967,15 @@ impl ParseCtx<'_> {
             return Ok(());
         };
         self.advance();
+        // `#define list0_pair(x1, x2) body` — a *parameterised* macro.
+        // Its parameters and body are read at each use, which this
+        // compiler does not expand; the whole macro is skipped as one
+        // unit so it stops cleanly rather than leaking its body as
+        // declarations.
+        if self.at(&TokenKind::LParen) {
+            self.skip_directive();
+            return Ok(());
+        }
         // `#define cons stream_vt_cons` — one *name* for another.  It is
         // not a constant: the name has to mean the constructor in
         // patterns as well as in expressions, and a constant reaches
@@ -2489,6 +2498,18 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
         matches!(self.peek().kind, TokenKind::Amp | TokenKind::Bang)
     }
 
+    /// Whether `name` is a type this parser knows: a built-in, a type
+    /// variable in scope, or a type alias it has gathered.  A parameter
+    /// entry that is nothing but such a name is a bare type with no name,
+    /// as a signature is allowed to write.
+    fn is_known_type_name(&self, name: &str) -> bool {
+        indexed_base(name).is_some()
+            || crate::prelude::canonical_type(name).is_some()
+            || self.type_vars.iter().any(|t| t == name)
+            || self.typedefs.contains_key(name)
+            || self.typedef_families.contains_key(name)
+    }
+
     fn parse_one_param_list(&mut self, allow_untyped: bool) -> Result<Vec<Param>, CompileError> {
         self.expect(
             &TokenKind::LParen,
@@ -2523,7 +2544,7 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
                     }
                     break;
                 }
-                let name = self.expect_ident("expected a parameter name")?;
+                let mut name = self.expect_ident("expected a parameter name")?;
                 let mut borrowed = false;
                 let ty = if self.at(&TokenKind::Colon) {
                     self.advance();
@@ -2533,6 +2554,15 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
                     // `main`'s two parameters have types fixed by the
                     // language, so ATS lets them go unwritten.
                     known
+                } else if self.is_known_type_name(&name) {
+                    // `fun f (SHR(list0(INV(a))), int): ...` — a bare
+                    // type with no name; a signature need not name its
+                    // parameters, so a type name standing alone is a
+                    // parameter of that type.
+                    self.gensym += 1;
+                    let ty = Ty::Name(name.clone());
+                    name = format!("arg${}", self.gensym);
+                    ty
                 } else if allow_untyped {
                     Ty::Name("_".into())
                 } else {
@@ -5320,6 +5350,23 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["btree", "btreelst"]);
+    }
+
+    #[test]
+    fn a_bare_type_may_stand_as_a_parameter() {
+        // `fun f (list0(a), int): int` — a signature may name a
+        // parameter by its type alone, with no variable name.  A bare
+        // `int` here is a parameter of type int, not an unannotated
+        // variable.
+        let p = Parser::parse(
+            "extern fun list0_remove_at_exn (list0(a), int): list0(a)\n",
+        )
+        .expect("parse");
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!("expected an extern")
+        };
+        assert_eq!(d.params.len(), 2);
+        assert_eq!(d.params[1].ty, Ty::Name("int".into()));
     }
 
     // --- template arguments in braces ------------------------------
