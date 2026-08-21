@@ -10,18 +10,20 @@
 //! language grows — an existential result, a guard, a metric.  A module
 //! that did both would be edited by everyone.
 //!
-//! The one rule it will not bend: nothing is invented.  An argument whose
-//! index nobody knows leaves the callee's variable *undetermined*, and it
-//! says so rather than quietly skolemising the demand away.  Whether an
-//! undetermined variable is an error is a policy question, and policy
-//! lives at the edge of the checker, not in its middle.
+//! The one rule it will not bend: an unknown argument's index is never
+//! invented. It leaves the callee's variable *undetermined*, and says so
+//! rather than quietly skolemising the demand away. A genuinely phantom
+//! implicit variable is different: when only its sort mentions it, choosing
+//! a canonical inhabitant has no observable effect. Whether any remaining
+//! undetermined variable is an error is a policy question, and policy lives
+//! at the edge of the checker, not in its middle.
 
 use std::collections::HashMap;
 
 #[cfg(test)]
 use ats2_domain::ast::Expr;
 use ats2_domain::ast::{Def, Program, Ty};
-use ats2_domain::statics::{Quant, SExp};
+use ats2_domain::statics::{Quant, SExp, Sort};
 
 use super::index_env::Fresh;
 use super::unify::Match;
@@ -205,6 +207,28 @@ impl Signature {
             .collect()
     }
 
+    /// Whether a static variable affects any observable part of the call.
+    ///
+    /// A variable mentioned by a parameter cannot be defaulted when that
+    /// argument's index is unknown. A variable mentioned by the result,
+    /// metric, or existential promises must likewise remain abstract so its
+    /// identity and relationships survive the call.
+    fn observes_static(&self, name: &str) -> bool {
+        self.params
+            .iter()
+            .chain(std::iter::once(&self.ret))
+            .any(|ty| ty_mentions_static(ty, name))
+            || self
+                .metric
+                .iter()
+                .any(|term| term.vars().iter().any(|var| var == name))
+            || self
+                .existentials
+                .iter()
+                .flat_map(Quant::hypotheses)
+                .any(|term| term.vars().iter().any(|var| var == name))
+    }
+
     /// Every variable the universals bind, arithmetic or not, in the
     /// order they were written.
     ///
@@ -307,6 +331,26 @@ impl Signature {
                 }
             }
         }
+        // An omitted, otherwise unconstrained arithmetic argument is an
+        // inference metavariable, not an arbitrary integer owned by the
+        // caller. Choose a canonical inhabitant when the sort is the whole
+        // constraint: zero for `nat`, one for `pos`. A guarded quantifier is
+        // deliberately excluded because choosing a satisfying witness for
+        // an arbitrary predicate is a solver problem, and assuming one
+        // exists would make contradictory signatures callable.
+        for q in self.universals.iter().filter(|q| q.guard.is_none()) {
+            for (name, sort) in &q.vars {
+                if m.get(name).is_some() || self.observes_static(name) {
+                    continue;
+                }
+                let inhabitant = match sort {
+                    Sort::Nat => SExp::IntLit(0),
+                    Sort::Pos => SExp::IntLit(1),
+                    _ => continue,
+                };
+                m.against(&SExp::Var(name.clone()), &inhabitant, &vars);
+            }
+        }
         let undetermined: Vec<String> = vars
             .iter()
             .filter(|v| m.get(v).is_none())
@@ -397,6 +441,31 @@ impl Signature {
             metric,
             result_indices,
             witnesses,
+        }
+    }
+}
+
+fn ty_mentions_static(ty: &Ty, name: &str) -> bool {
+    match ty {
+        Ty::Name(_) => false,
+        Ty::App(_, args) | Ty::Tuple(args) => {
+            args.iter().any(|arg| ty_mentions_static(arg, name))
+        }
+        Ty::Fun(args, ret) => {
+            args.iter().any(|arg| ty_mentions_static(arg, name))
+                || ty_mentions_static(ret, name)
+        }
+        Ty::Index(base, indices) => {
+            ty_mentions_static(base, name)
+                || indices
+                    .iter()
+                    .any(|index| index.vars().iter().any(|var| var == name))
+        }
+        Ty::Record(fields) => fields
+            .iter()
+            .any(|(_, field)| ty_mentions_static(field, name)),
+        Ty::Proof(proof, value) => {
+            ty_mentions_static(proof, name) || ty_mentions_static(value, name)
         }
     }
 }

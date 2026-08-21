@@ -97,6 +97,33 @@ fn an_expected_result_cannot_infer_an_instance_outside_its_sort() {
 }
 
 #[test]
+fn an_unconstrained_implicit_static_argument_keeps_its_sort() {
+    // The omitted indices are inference metavariables rather than arbitrary
+    // caller-owned integers. Their sorts constrain the fresh instances, so
+    // these calls do not owe `n%0 >= 0` or `p%0 > 0` from an empty context.
+    let errs = check(
+        "extern fun consume_nat {n:nat} (): void \
+         extern fun consume_pos {p:pos} (): void \
+         fun run_nat (): void = consume_nat() \
+         fun run_pos (): void = consume_pos()",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn an_unconstrained_guarded_static_argument_is_not_invented() {
+    // Intrinsic sort bounds have canonical inhabitants; an arbitrary guard
+    // does not. In particular the checker must not assume that this
+    // contradictory quantifier has a witness.
+    let errs = check(
+        "extern fun impossible {n:nat | n < 0} (): void \
+         fun run (): void = impossible()",
+    );
+    assert!(!errs.is_empty(), "{errs:?}");
+    assert!(errs.iter().all(|e| e.contains("call to `impossible`")));
+}
+
+#[test]
 fn a_compile_time_constant_is_a_number_the_checker_knows() {
     // `#define N 1024` is not a variable: every mention of `N` *is*
     // 1024, decided before the program runs.  A checker that treated it
