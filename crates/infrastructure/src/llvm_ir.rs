@@ -1133,13 +1133,7 @@ fn llvm_type_of(ty: &Ty) -> Result<LlvmType, CompileError> {
         // zero); it describes no part of the machine value, so the type
         // erases to the base it decorates.  This is what ATS itself does:
         // the static language is gone by the time code is emitted.
-        Ty::App(head, args) => match base_type_named(head) {
-            Some(base) => Ok(base),
-            None => Err(CompileError::emit(format!(
-                "type application `{head}` is not supported yet ({} argument(s))",
-                args.len()
-            ))),
-        },
+        Ty::App(head, _) => Ok(base_type_named(head).unwrap_or(LlvmType::I8Ptr)),
         // `argv` is C's `char **`.  Under opaque pointers every pointer is
         // spelled `ptr`, so it shares a representation with `string` and
         // is told apart only by how it may be used.
@@ -8499,10 +8493,14 @@ mod tests {
     }
 
     #[test]
-    fn an_application_of_an_unknown_head_is_still_unsupported() {
-        // A datatype nobody declared is not an erasable index.
-        let err = emit_err("fun f(xs: bag(int, n)): int = 0");
-        assert!(err.message().contains("bag"), "{err}");
+    fn an_opaque_applied_type_is_a_boxed_pointer() {
+        // A datatype nobody declared is an opaque applied type, like the
+        // type families ATS's own signatures lean on (`fprint_type(t)`,
+        // `cfun(...)`, `List_vt(a)`): whatever its shape, nothing here
+        // may take it apart, so a pointer is what it is.  The checker is
+        // the wall for a head that is truly nothing.
+        let ir = emit("fun f(xs: bag(int, n)): int = 0").expect("opaque applied type");
+        assert!(ir.contains("define i64 @f(ptr %xs)"), "got:\n{ir}");
     }
 
     // --- the prelude shims -----------------------------------------
