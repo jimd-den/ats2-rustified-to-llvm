@@ -12,10 +12,12 @@
 pub mod compile_executable;
 pub mod compile_to_ir;
 pub mod parse;
+pub mod repl_session;
 
 pub use compile_executable::CompileExecutableUseCase;
 pub use compile_to_ir::CompileToIrUseCase;
 pub use parse::ParseUseCase;
+pub use repl_session::{ReplSession, ReplUpdate};
 
 /// Test doubles shared by every use-case test module.
 ///

@@ -166,10 +166,18 @@ pub struct DatatypeDef {
     pub linear: bool,
 }
 
-/// One constructor of a datatype, e.g. `cons(a, list(a))`.
+/// One constructor of a datatype, e.g.
+/// `{n:nat} list_cons(a, n+1) of (a, list(a, n))`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ctor {
     pub name: String,
+    /// Static variables and guards introduced by this constructor.
+    pub universals: Vec<Quant>,
+    /// The indexed datatype instance this constructor builds.
+    ///
+    /// `None` is the unindexed spelling `Some of a`, whose result is the
+    /// enclosing datatype applied to its ordinary type parameters.
+    pub result: Option<Ty>,
     pub fields: Vec<Ty>,
 }
 
@@ -825,10 +833,14 @@ mod tests {
             ctors: vec![
                 Ctor {
                     name: "nil".into(),
+                    universals: vec![],
+                    result: None,
                     fields: vec![],
                 },
                 Ctor {
                     name: "cons".into(),
+                    universals: vec![],
+                    result: None,
                     fields: vec![ty("a"), ty("list")],
                 },
             ],

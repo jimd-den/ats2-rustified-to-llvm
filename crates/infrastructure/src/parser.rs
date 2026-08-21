@@ -1288,7 +1288,7 @@ impl<'a> ParseCtx<'a> {
     fn parse_datatype_body(&mut self, linear: bool) -> Result<Def, CompileError> {
         let name = self.expect_ident("expected a datatype name")?;
         self.datatypes.insert(name.clone());
-        let ty_params = self.parse_optional_type_params()?;
+        let (ty_params, type_arity) = self.parse_optional_type_params()?;
         let scope = self.push_type_vars(&ty_params);
         let def = (|| {
             self.expect(&TokenKind::Eq, "expected `=` after the datatype name")?;
@@ -1296,10 +1296,10 @@ impl<'a> ParseCtx<'a> {
             if self.at(&TokenKind::Pipe) {
                 self.advance();
             }
-            let mut ctors = vec![self.parse_ctor()?];
+            let mut ctors = vec![self.parse_ctor(&name, type_arity)?];
             while self.at(&TokenKind::Pipe) {
                 self.advance();
-                ctors.push(self.parse_ctor()?);
+                ctors.push(self.parse_ctor(&name, type_arity)?);
             }
             Ok(Def::Datatype(DatatypeDef {
                 name,
@@ -1329,23 +1329,41 @@ impl<'a> ParseCtx<'a> {
     /// As with a template's parameters, only the names matter: the sort on
     /// the right of the colon constrains what may be substituted, which is
     /// a question for a type checker this compiler does not have.
-    fn parse_optional_type_params(&mut self) -> Result<Vec<String>, CompileError> {
+    fn parse_optional_type_params(&mut self) -> Result<(Vec<String>, usize), CompileError> {
         if !self.at(&TokenKind::LParen) {
-            return Ok(vec![]);
+            return Ok((vec![], 0));
         }
         self.advance();
         let mut params = Vec::new();
+        let mut type_arity = 0;
         loop {
-            params.push(self.expect_ident("expected a type parameter")?);
+            let name = self.expect_ident("expected a datatype parameter")?;
             if self.at(&TokenKind::Colon) {
-                // Consume the sort, whatever shape it has: `t@ype` alone
-                // is three tokens.
                 self.advance();
+                let sort = self
+                    .parse_sort_name()
+                    .map(|name| Sort::from_name(&name))
+                    .unwrap_or_else(|| Sort::Named("_".into()));
+                if sort == Sort::Type {
+                    params.push(name);
+                    type_arity += 1;
+                }
                 while !self.at(&TokenKind::Comma)
                     && !self.at(&TokenKind::RParen)
                     && !self.at(&TokenKind::Eof)
                 {
                     self.advance();
+                }
+            } else {
+                // `datatype list(a:t@ype, int)` — a bare known sort is an
+                // unnamed static parameter position. A bare unknown name is
+                // the traditional shorthand for a type parameter.
+                match Sort::from_name(&name) {
+                    Sort::Int | Sort::Nat | Sort::Pos | Sort::Bool | Sort::Addr => {}
+                    _ => {
+                        params.push(name);
+                        type_arity += 1;
+                    }
                 }
             }
             if self.at(&TokenKind::Comma) {
@@ -1355,7 +1373,7 @@ impl<'a> ParseCtx<'a> {
             }
         }
         self.expect(&TokenKind::RParen, "expected `)` after the type parameters")?;
-        Ok(params)
+        Ok((params, type_arity))
     }
 
     /// One constructor of a datatype.
@@ -1364,14 +1382,16 @@ impl<'a> ParseCtx<'a> {
     /// `Some of int` when there is exactly one, or `Nil of ()` when there
     /// are none.  The `of`-less spelling `Cons(int, list)` is accepted as
     /// well, since the subset used it before and both read clearly.
-    fn parse_ctor(&mut self) -> Result<Ctor, CompileError> {
+    fn parse_ctor(
+        &mut self,
+        datatype: &str,
+        type_arity: usize,
+    ) -> Result<Ctor, CompileError> {
         // `| {n:nat} btnode (a, n) of (int(n), a)` — an indexed
         // constructor declares its index variables in braces before its
-        // name.  The quantifier is static (it only constrains the field
-        // types), so it is read and dropped and the constructor is read.
-        while self.at(&TokenKind::LBrace) {
-            self.skip_balanced(&TokenKind::LBrace, &TokenKind::RBrace);
-        }
+        // name. It survives because its guard and its result indices are
+        // what a pattern match contributes to dependent checking.
+        let universals = self.parse_quantifiers();
         let name = self.expect_ident("expected a constructor name")?;
         self.skip_static_annotations();
         // `C (i1, i2) of (fields)` — the parens before `of` are the
@@ -1380,22 +1400,78 @@ impl<'a> ParseCtx<'a> {
         // only the fields are kept.
         if self.at(&TokenKind::LParen) {
             let save = self.pos;
-            self.skip_balanced(&TokenKind::LParen, &TokenKind::RParen);
+            let result = self.parse_ctor_result(datatype, type_arity)?;
             if self.at(&TokenKind::Of) {
                 self.advance();
-                return self.parse_ctor_fields(name);
+                return self.parse_ctor_fields(name, universals, Some(result));
             }
             self.pos = save;
         }
         if self.at(&TokenKind::Of) {
             self.advance();
         }
-        self.parse_ctor_fields(name)
+        self.parse_ctor_fields(name, universals, None)
+    }
+
+    /// The datatype instance between a constructor's name and `of`.
+    ///
+    /// In `list_cons(a, n+1)`, the first argument is a runtime type
+    /// parameter and the second is a static result index. The enclosing
+    /// datatype declaration says where that boundary lies.
+    fn parse_ctor_result(
+        &mut self,
+        datatype: &str,
+        type_arity: usize,
+    ) -> Result<Ty, CompileError> {
+        self.expect(&TokenKind::LParen, "expected `(` before constructor indices")?;
+        let mut position = 0;
+        let mut type_args = Vec::new();
+        let mut indices = Vec::new();
+        while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+            if position < type_arity {
+                if let Some(ty) = self.parse_type_argument()? {
+                    type_args.push(ty);
+                }
+            } else {
+                let term = self
+                    .parse_expr(0)
+                    .ok()
+                    .as_ref()
+                    .and_then(sexp_of_expr)
+                    .ok_or_else(|| self.error_here("expected a constructor result index"))?;
+                indices.push(term);
+            }
+            position += 1;
+            if self.at(&TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(
+            &TokenKind::RParen,
+            "expected `)` after the constructor result",
+        )?;
+        let base = if type_args.is_empty() {
+            Ty::Name(datatype.into())
+        } else {
+            Ty::App(datatype.into(), type_args)
+        };
+        Ok(if indices.is_empty() {
+            base
+        } else {
+            Ty::Index(Box::new(base), indices)
+        })
     }
 
     /// The value fields of a constructor, whether written `C of (a, b)`,
     /// `C of a`, the of-less `C(a, b)`, or `C of ()`.
-    fn parse_ctor_fields(&mut self, name: String) -> Result<Ctor, CompileError> {
+    fn parse_ctor_fields(
+        &mut self,
+        name: String,
+        universals: Vec<Quant>,
+        result: Option<Ty>,
+    ) -> Result<Ctor, CompileError> {
         let fields = if self.at(&TokenKind::LParen) {
             self.advance();
             // `of ()` — no fields at all.
@@ -1403,6 +1479,8 @@ impl<'a> ParseCtx<'a> {
                 self.advance();
                 return Ok(Ctor {
                     name,
+                    universals,
+                    result,
                     fields: vec![],
                 });
             }
@@ -1422,7 +1500,12 @@ impl<'a> ParseCtx<'a> {
         } else {
             vec![]
         };
-        Ok(Ctor { name, fields })
+        Ok(Ctor {
+            name,
+            universals,
+            result,
+            fields,
+        })
     }
 
     /// Whether a type could begin at the cursor.
@@ -5610,6 +5693,8 @@ extern fun after(): int
             d.ctors[0],
             Ctor {
                 name: "nil".into(),
+                universals: vec![],
+                result: None,
                 fields: vec![]
             }
         );
@@ -5864,8 +5949,8 @@ extern fun after(): int
     fn a_constructor_quantified_over_its_indices_is_read() {
         // `| {n:nat} btnode (a, n) of (int(n), a)` — an indexed
         // constructor whose index variables are declared in braces before
-        // its name.  The quantifier is static, so it is skipped and the
-        // constructor read, with its fields.
+        // its name. Both the binder and indexed result survive so pattern
+        // checking can invert the constructor later.
         let p =
             Parser::parse("datatype btree(a) = BTleaf | {n:nat} BTnode (a, n) of (int(n), a)\n")
                 .expect("parse");
@@ -5873,6 +5958,14 @@ extern fun after(): int
             panic!("got {:?}", &p.defs()[0])
         };
         assert_eq!(d.ctors[1].name, "BTnode");
+        assert_eq!(d.ctors[1].universals[0].vars[0].0, "n");
+        assert_eq!(
+            d.ctors[1].result,
+            Some(Ty::Index(
+                Box::new(Ty::App("btree".into(), vec![Ty::Name("a".into())])),
+                vec![SExp::Var("n".into())],
+            ))
+        );
         assert_eq!(d.ctors[1].fields.len(), 2);
     }
 

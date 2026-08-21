@@ -786,9 +786,23 @@ impl<'a> Walk<'a> {
             // unknowns is what leaves every recursion over an indexed
             // datatype unchecked.
             Pattern::Ctor(ctor, fields) => {
-                let declared = self.ctors.fields_of(ctor, fields.len(), subject_ty);
+                let matched = self.ctors.match_pattern(
+                    ctor,
+                    fields.len(),
+                    subject_ty,
+                    &env.fresh_supply(),
+                );
+                if let Some(matched) = &matched {
+                    for (name, sort) in &matched.variables {
+                        env.declare(name, sort);
+                    }
+                    env.assume_all(matched.assumptions.clone());
+                }
                 for (i, field) in fields.iter().enumerate() {
-                    let ty = declared.as_ref().and_then(|tys| tys.get(i)).cloned();
+                    let ty = matched
+                        .as_ref()
+                        .and_then(|matched| matched.fields.get(i))
+                        .cloned();
                     self.refine(field, None, ty.as_ref(), env);
                 }
             }
@@ -1656,6 +1670,8 @@ mod tests {
             ty_params: vec!["a".into()],
             ctors: vec![Ctor {
                 name: "none".into(),
+                universals: vec![],
+                result: None,
                 fields: vec![],
             }],
         })]);

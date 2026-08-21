@@ -397,6 +397,8 @@ impl MonoCtx {
             .iter()
             .map(|c| Ctor {
                 name: c.name.clone(),
+                universals: c.universals.clone(),
+                result: c.result.as_ref().map(|r| self.rewrite_ty(r, &subst)),
                 fields: c
                     .fields
                     .iter()

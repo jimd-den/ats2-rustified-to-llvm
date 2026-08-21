@@ -558,16 +558,32 @@ pub fn entry_point_indices(name: &str, params: &[ats2_domain::ast::Param]) -> Op
 /// recursion over an indexed list is checked or is not.
 #[derive(Debug, Clone, Default)]
 pub struct CtorTable {
-    /// constructor name -> (the datatype it builds, its type parameters,
-    /// the types of its fields)
-    by_name: HashMap<String, (String, Vec<String>, Vec<Ty>)>,
+    /// constructor name -> its dependent shape
+    by_name: HashMap<String, CtorShape>,
     /// datatype name -> (its type parameters, one entry per constructor)
     ///
     /// Kept so that a constructor written under one of its *other* names
     /// can still be found.  ATS spells the list constructors several
     /// ways — `cons`, `list_cons`, `list_vt_cons` — and which one a
     /// program wrote says nothing about what the value is made of.
-    by_datatype: HashMap<String, (Vec<String>, Vec<Vec<Ty>>)>,
+    by_datatype: HashMap<String, (Vec<String>, Vec<CtorShape>)>,
+}
+
+#[derive(Debug, Clone)]
+struct CtorShape {
+    datatype: String,
+    params: Vec<String>,
+    universals: Vec<Quant>,
+    result: Option<Ty>,
+    fields: Vec<Ty>,
+}
+
+/// Facts obtained by successfully taking a constructor apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CtorMatch {
+    pub fields: Vec<Ty>,
+    pub variables: Vec<(String, Sort)>,
+    pub assumptions: Vec<SExp>,
 }
 
 impl CtorTable {
@@ -577,16 +593,32 @@ impl CtorTable {
         for def in program.defs() {
             if let Def::Datatype(d) = def {
                 for ctor in &d.ctors {
+                    let shape = CtorShape {
+                        datatype: d.name.clone(),
+                        params: d.ty_params.clone(),
+                        universals: ctor.universals.clone(),
+                        result: ctor.result.clone(),
+                        fields: ctor.fields.clone(),
+                    };
                     table.by_name.insert(
                         ctor.name.clone(),
-                        (d.name.clone(), d.ty_params.clone(), ctor.fields.clone()),
+                        shape,
                     );
                 }
                 table.by_datatype.insert(
                     d.name.clone(),
                     (
                         d.ty_params.clone(),
-                        d.ctors.iter().map(|c| c.fields.clone()).collect(),
+                        d.ctors
+                            .iter()
+                            .map(|ctor| CtorShape {
+                                datatype: d.name.clone(),
+                                params: d.ty_params.clone(),
+                                universals: ctor.universals.clone(),
+                                result: ctor.result.clone(),
+                                fields: ctor.fields.clone(),
+                            })
+                            .collect(),
                     ),
                 );
             }
@@ -606,8 +638,14 @@ impl CtorTable {
     /// not name the datatype it builds — in which case the fields are
     /// unknowns, exactly as before. The rule adds knowledge where there
     /// is some, and invents none.
-    pub fn fields_of(&self, ctor: &str, arity: usize, subject: Option<&Ty>) -> Option<Vec<Ty>> {
-        let (datatype, params, fields) = match self.by_name.get(ctor) {
+    pub fn match_pattern(
+        &self,
+        ctor: &str,
+        arity: usize,
+        subject: Option<&Ty>,
+        fresh: &Fresh,
+    ) -> Option<CtorMatch> {
+        let shape = match self.by_name.get(ctor) {
             Some(found) => found.clone(),
             // A name this table does not hold — one of the several
             // spellings ATS gives the same constructor.  What the value
@@ -621,25 +659,65 @@ impl CtorTable {
                     Ty::App(name, _) | Ty::Name(name) => name.clone(),
                     _ => return None,
                 };
-                let (params, ctors) = self.by_datatype.get(&name)?;
-                let mut fits = ctors.iter().filter(|f| f.len() == arity);
+                let (_, ctors) = self.by_datatype.get(&name)?;
+                let mut fits = ctors.iter().filter(|shape| shape.fields.len() == arity);
                 let only = fits.next()?;
                 if fits.next().is_some() {
                     return None;
                 }
-                (name, params.clone(), only.clone())
+                only.clone()
             }
         };
         let args = match subject.map(strip_index) {
-            Some(Ty::App(name, args)) if *name == datatype => args.clone(),
-            Some(Ty::Name(name)) if *name == datatype => Vec::new(),
+            Some(Ty::App(name, args)) if *name == shape.datatype => args.clone(),
+            Some(Ty::Name(name)) if *name == shape.datatype => Vec::new(),
             // The subject's type is unknown or is not this datatype:
             // the field types stand as declared, which for a
             // parameterised datatype means they stay abstract.
             _ => Vec::new(),
         };
-        let subst: HashMap<String, Ty> = params.iter().cloned().zip(args).collect();
-        Some(fields.iter().map(|f| substitute_ty(f, &subst)).collect())
+        let type_subst: HashMap<String, Ty> =
+            shape.params.iter().cloned().zip(args).collect();
+        let mut variables = Vec::new();
+        let mut index_subst = Vec::new();
+        for quant in &shape.universals {
+            for (name, sort) in &quant.vars {
+                let value = fresh.var(name);
+                let SExp::Var(fresh_name) = &value else {
+                    unreachable!("fresh variables are variables")
+                };
+                variables.push((fresh_name.clone(), sort.clone()));
+                index_subst.push((name.clone(), value));
+            }
+        }
+        let rewrite = |ty: &Ty| {
+            let typed = substitute_ty(ty, &type_subst);
+            substitute_indices(&typed, &index_subst)
+        };
+        let fields = shape.fields.iter().map(rewrite).collect();
+        let mut assumptions = shape
+            .universals
+            .iter()
+            .filter_map(|quant| quant.guard.as_ref())
+            .map(|guard| guard.substitute(&index_subst))
+            .collect::<Vec<_>>();
+        if let (Some(result), Some(subject)) = (shape.result.as_ref(), subject) {
+            let result = rewrite(result);
+            if let (Ty::Index(_, result_indices), Ty::Index(_, subject_indices)) =
+                (&result, subject)
+            {
+                assumptions.extend(result_indices.iter().zip(subject_indices).map(
+                    |(result, subject)| {
+                        SExp::App("==".into(), vec![result.clone(), subject.clone()])
+                    },
+                ));
+            }
+        }
+        Some(CtorMatch {
+            fields,
+            variables,
+            assumptions,
+        })
     }
 }
 

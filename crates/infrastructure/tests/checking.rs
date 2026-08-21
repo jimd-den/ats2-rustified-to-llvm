@@ -293,6 +293,43 @@ fn a_constructor_written_by_one_of_its_other_names_still_takes_the_value_apart()
 }
 
 #[test]
+fn an_indexed_constructor_pattern_refines_its_fields_and_result() {
+    // Postiats declares `list_cons(a, k+1) of (a, list(a, k))`.
+    // Matching it against `list(a, n)` introduces `k:nat`, establishes
+    // `n == k+1`, and gives the tail type `list(a, k)`. Those are exactly
+    // the facts that justify the structurally recursive call.
+    let errs = check(
+        "datatype list(a:t@ype, int) = \
+           list_nil(a, 0) of () | \
+           {k:nat} list_cons(a, k+1) of (a, list(a, k)) \
+         fun drain {n:nat} .<n>. (xs: list(int, n)): int = \
+           case+ xs of \
+           | list_nil() => 0 \
+           | list_cons(_, tail) => drain(tail)",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn each_indexed_constructor_arm_knows_which_result_it_matched() {
+    // Result indices refine the scrutinee in both directions: `nil` proves
+    // `n == 0`, while `cons` proves `n == k+1` for a fresh `k:nat`, hence
+    // `n > 0`. Each arm spends exactly the fact its constructor introduced.
+    let errs = check(
+        "datatype list(a:t@ype, int) = \
+           list_nil(a, 0) of () | \
+           {k:nat} list_cons(a, k+1) of (a, list(a, k)) \
+         extern fun needs_zero {n:int | n == 0} (): int \
+         extern fun needs_positive {n:pos} (): int \
+         fun classify {n:nat} (xs: list(int, n)): int = \
+           case+ xs of \
+           | list_nil() => needs_zero{n}() \
+           | list_cons(_, _) => needs_positive{n}()",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
 fn a_call_hands_on_the_type_of_what_it_returned() {
     // `g(mk(x))` — the argument is not a name, it is what another call
     // produced.  Its indices are in its *type*, and a checker that only
