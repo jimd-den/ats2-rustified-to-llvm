@@ -835,6 +835,13 @@ pub fn is_contradictory(hyps: &[SExp]) -> bool {
 
 /// Does `hyps` entail `goal`?
 pub fn entails(hyps: &[SExp], goal: &SExp) -> Verdict {
+    // Assumption is a logical rule, not an arithmetic technique. In
+    // particular, predicates such as `isord(xs)` are intentionally opaque
+    // to this solver but remain true wherever the checker has assumed that
+    // exact proposition.
+    if hyps.contains(goal) {
+        return Verdict::Proved;
+    }
     // Disjunction and disequality cannot be held as conjunctive systems,
     // but both can be decided in terms of propositions the linear solver
     // already understands. Splitting here rather than in `atoms` keeps
@@ -921,6 +928,15 @@ mod tests {
         let hyps = vec![app(">=", v("n"), i(0))];
         let goal = app(">", app("+", v("n"), i(1)), i(0));
         assert_eq!(entails(&hyps, &goal), Verdict::Proved);
+    }
+
+    #[test]
+    fn an_opaque_proposition_is_proved_when_it_is_an_assumption() {
+        // The arithmetic solver need not understand `isord`; using an
+        // assumption verbatim is a structural rule that precedes arithmetic.
+        let ordered = SExp::App("isord".into(), vec![v("xs")]);
+        let hyps = vec![ordered.clone(), app(">", v("x"), i(0))];
+        assert_eq!(entails(&hyps, &ordered), Verdict::Proved);
     }
 
     #[test]
