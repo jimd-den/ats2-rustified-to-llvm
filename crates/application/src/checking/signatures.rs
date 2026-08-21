@@ -18,7 +18,9 @@
 
 use std::collections::HashMap;
 
-use ats2_domain::ast::{Def, Expr, Program, Ty};
+#[cfg(test)]
+use ats2_domain::ast::Expr;
+use ats2_domain::ast::{Def, Program, Ty};
 use ats2_domain::statics::{Quant, SExp};
 
 use super::index_env::Fresh;
@@ -137,6 +139,24 @@ pub struct CallFacts {
 }
 
 impl Signature {
+    /// Read the callable contract of a function definition.
+    ///
+    /// This deliberately says nothing about where the definition is visible.
+    /// The global table and the lexical walk own that policy; both use the
+    /// same representation of the contract.
+    pub(super) fn of_fun(f: &ats2_domain::ast::FunDef) -> Signature {
+        Signature {
+            name: f.name.clone(),
+            ty_params: f.ty_params.clone(),
+            universals: f.universals.clone(),
+            existentials: f.existentials.clone(),
+            params: f.params.iter().map(|p| p.ty.clone()).collect(),
+            borrowed: f.params.iter().map(|p| p.borrowed).collect(),
+            ret: f.ret.clone(),
+            metric: f.metric.clone(),
+        }
+    }
+
     /// This signature at one instance of its type parameters.
     ///
     /// `nth<N2>(...)` returns an `N2`, and `N2` is `intGte(2)` — an
@@ -380,9 +400,11 @@ pub struct SigTable {
 }
 
 impl SigTable {
-    /// Collect the signatures of every function a program defines or
-    /// declares — including the nested ones, which are as callable from
-    /// inside their scope as a top-level function is from outside it.
+    /// Collect the signatures a program exposes at its top level.
+    ///
+    /// Nested functions are lexical declarations. The expression walk keeps
+    /// those in a scope stack so repeated helper names cannot collide and a
+    /// local declaration cannot leak outside the `let` that introduced it.
     pub fn of(program: &Program) -> Self {
         let mut table = SigTable::default();
         for def in program.defs() {
@@ -407,19 +429,7 @@ impl SigTable {
     }
 
     fn add_fun(&mut self, f: &ats2_domain::ast::FunDef) {
-        self.insert(Signature {
-            name: f.name.clone(),
-            ty_params: f.ty_params.clone(),
-            universals: f.universals.clone(),
-            existentials: f.existentials.clone(),
-            params: f.params.iter().map(|p| p.ty.clone()).collect(),
-            borrowed: f.params.iter().map(|p| p.borrowed).collect(),
-            ret: f.ret.clone(),
-            metric: f.metric.clone(),
-        });
-        // A `let fun` is a signature too, and the body that follows it can
-        // call it.  Gathering them here keeps the walk from having to.
-        collect_nested(&f.body, self);
+        self.insert(Signature::of_fun(f));
     }
 
     /// Lay another table over this one: what `other` declares wins.
@@ -437,16 +447,6 @@ impl SigTable {
     pub fn get(&self, name: &str) -> Option<&Signature> {
         self.by_name.get(name)
     }
-}
-
-/// Find the `fun`s written inside an expression.
-fn collect_nested(e: &Expr, table: &mut SigTable) {
-    if let Expr::LetFun(funs, _) = e {
-        for f in funs {
-            table.add_fun(f);
-        }
-    }
-    e.each_subexpr(&mut |sub| collect_nested(sub, table));
 }
 
 /// The indices ATS's entry point carries but never writes down.
@@ -1364,6 +1364,35 @@ mod tests {
             Some("fact".into())
         );
         assert!(table.get("nope").is_none());
+    }
+
+    #[test]
+    fn a_nested_function_does_not_leak_into_the_global_table() {
+        let nested = FunDef {
+            metric: vec![],
+            ty_params: vec![],
+            universals: vec![],
+            existentials: vec![],
+            name: "aux".into(),
+            params: vec![],
+            ret: Ty::Name("int".into()),
+            body: Expr::IntLit(0),
+            proof: false,
+        };
+        let outer = FunDef {
+            metric: vec![],
+            ty_params: vec![],
+            universals: vec![],
+            existentials: vec![],
+            name: "outer".into(),
+            params: vec![],
+            ret: Ty::Name("int".into()),
+            body: Expr::LetFun(vec![nested], Box::new(Expr::IntLit(0))),
+            proof: false,
+        };
+        let table = SigTable::of(&Program::new(vec![Def::Fun(outer)]));
+        assert!(table.get("outer").is_some());
+        assert!(table.get("aux").is_none());
     }
 
     #[test]

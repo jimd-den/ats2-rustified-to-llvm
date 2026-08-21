@@ -68,6 +68,7 @@ pub fn obligations(program: &Program, ambient: &Program) -> Vec<Obligation> {
         .collect();
     let mut walk = Walk {
         sigs: &sigs,
+        local_sigs: Vec::new(),
         ctors: &ctors,
         consts,
         out: Vec::new(),
@@ -107,6 +108,12 @@ pub fn obligations(program: &Program, ambient: &Program) -> Vec<Obligation> {
 
 struct Walk<'a> {
     sigs: &'a SigTable,
+    /// Function signatures introduced by nested `let fun` groups.
+    ///
+    /// The innermost scope comes last. Postiats deliberately reuses names
+    /// such as `loop`, `aux` and `auxlst`; putting those in the global table
+    /// makes an unrelated helper elsewhere in the module overwrite them.
+    local_sigs: Vec<HashMap<String, Signature>>,
     /// What each constructor takes apart into.
     ctors: &'a CtorTable,
     /// The `#define`d constants, by name.
@@ -513,10 +520,17 @@ impl<'a> Walk<'a> {
                 self.expr(rest, env)
             }
             Expr::LetFun(funs, rest) => {
+                let scope = funs
+                    .iter()
+                    .map(|f| (f.name.clone(), Signature::of_fun(f)))
+                    .collect();
+                self.local_sigs.push(scope);
                 for f in funs {
                     self.function_def(f, env.clone());
                 }
-                self.expr(rest, env)
+                let result = self.expr(rest, env);
+                self.local_sigs.pop();
+                result
             }
             Expr::Lam(params, ret, body) => {
                 let mut inner = env.clone();
@@ -669,7 +683,12 @@ impl<'a> Walk<'a> {
             }
             return None;
         }
-        let declared: &Signature = self.sigs.get(&name)?;
+        let declared: &Signature = self
+            .local_sigs
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(&name))
+            .or_else(|| self.sigs.get(&name))?;
         // A template's arguments choose which code is built, not which
         // claim is made.  Only a callee that abstracts over no types can
         // have meant an index by them.
@@ -681,8 +700,7 @@ impl<'a> Walk<'a> {
         // ...and where they *do* choose the code, they also choose what
         // it produces, which is the whole content of naming an instance.
         let sig = declared.at_instance(&ty_args);
-        let facts =
-            sig.at_call_against(&statics, &supplied, expected, &env.fresh_supply());
+        let facts = sig.at_call_against(&statics, &supplied, expected, &env.fresh_supply());
         for goal in facts.demands.clone() {
             self.demand(
                 goal,
@@ -2236,6 +2254,7 @@ mod tests {
         let ctors = CtorTable::default();
         let mut walk = Walk {
             sigs: &sigs,
+            local_sigs: Vec::new(),
             ctors: &ctors,
             consts: HashMap::new(),
             out: Vec::new(),

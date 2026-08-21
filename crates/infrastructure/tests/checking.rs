@@ -635,3 +635,22 @@ prfun lem {m:nat} {n:nat} (): GE1 (m*n) = GE1c {m*n} ()";
     assert!(!errs.is_empty(), "a product claim the factors do not force was accepted");
 }
 
+#[test]
+fn nested_functions_with_the_same_name_keep_lexical_signatures() {
+    // Local helper names are reused throughout Postiats. A global signature
+    // table lets the second `aux` overwrite the first, making one valid call
+    // answer to an unrelated refinement from another lexical scope.
+    let src = "\
+fun nonnegative (x: int): int = let
+  fun aux {i:nat} (i: int i): int = i
+in
+  if x >= 0 then aux(x) else 0
+end
+fun negative (x: int): int = let
+  fun aux {i:int | i < 0} (i: int i): int = i
+in
+  if x < 0 then aux(x) else 0
+end";
+    let errs = check(src);
+    assert!(errs.is_empty(), "{errs:?}");
+}
