@@ -669,3 +669,16 @@ end";
     let errs = check(src);
     assert!(errs.is_empty(), "{errs:?}");
 }
+
+#[test]
+fn the_empty_list_determines_a_dependent_call_length() {
+    // `list_nil()` is not merely an opaque pointer: its indexed list length
+    // is zero, which determines `j` in the callee instead of skolemising it.
+    let src = "\
+extern fun{a:t@ype} build {i,j:nat}
+  (n: int i, xs: list(a, j)): list(a, i+j)
+fun make {n:nat} (n: int n): list(int, n) =
+  build<int>(n, list_nil())";
+    let errs = check(src);
+    assert!(errs.is_empty(), "{errs:?}");
+}

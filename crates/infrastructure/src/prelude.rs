@@ -74,6 +74,7 @@ extern fun{a:t@ype} length {n:int} (xs: list(a, n)): size_t n
 extern fun{a:t@ype} list_length {n:int} (xs: list(a, n)): size_t n
 extern fun{a:t@ype} list_takeout_at {n:int}{i:nat | i < n}
   (xs: list(a, n), i: size_t i, x: &a): list(a, n-1)
+extern fun{a:t@ype} list_nil (): list(a, 0)
 extern fun{a:t@ype} list_cons {n:int} (x: a, xs: list(a, n)): list(a, n+1)
 extern fun{a:t@ype} list_tail {n:pos} (xs: list(a, n)): list(a, n-1)
 //
