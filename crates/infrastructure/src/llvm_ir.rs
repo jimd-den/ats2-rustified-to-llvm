@@ -851,6 +851,40 @@ fn registry_of(program: &Program) -> Result<Registry, CompileError> {
             registry.ctors.insert((*alias).to_string(), infos);
         }
     }
+
+    // Exceptions: each `exception X of (t1, t2)` is a constructor of a
+    // shared `exn` datatype.  Collecting them here gives every raise a
+    // box to build and every `try` a tag to dispatch on.
+    let exn_ctor: Vec<(String, Vec<LlvmType>)> = program
+        .defs
+        .iter()
+        .filter_map(|d| match d {
+            Def::Exception(name, payload) => payload
+                .iter()
+                .map(|t| llvm_type_in(t, &registry))
+                .collect::<Result<Vec<_>, _>>()
+                .ok()
+                .map(|fields| (name.clone(), fields)),
+            _ => None,
+        })
+        .collect();
+    if !exn_ctor.is_empty() {
+        let exn_index = registry.datatypes.len();
+        registry.datatypes.push("exn".to_string());
+        let width = exn_ctor.iter().map(|(_, f)| f.len()).max().unwrap_or(0);
+        for (tag, (name, fields)) in exn_ctor.into_iter().enumerate() {
+            registry
+                .ctors
+                .entry(name.clone())
+                .or_default()
+                .push(CtorInfo {
+                    datatype: exn_index,
+                    tag: tag as i64,
+                    fields,
+                    width,
+                });
+        }
+    }
     for def in &program.defs {
         match def {
             // Not this compiler's language; the toolchain reads it.
@@ -1511,6 +1545,14 @@ end:
     )
 }
 
+/// The exception runtime: a stack of setjmp frames and a cell where a
+/// raised value waits to be caught.  A raise longjmps to the nearest
+/// enclosing `try`; a `try` began by saving its frame.  Because the
+/// program never returns from a raise, the frames are a linked list
+/// threaded through the arena rather than freed — the same bargain the
+/// heap runtime makes.
+
+
 /// The width of one slot in a datatype value.  Every field occupies one,
 /// whatever its type, so field `i` sits at the same offset regardless of
 /// which constructor built the value.
@@ -1529,6 +1571,9 @@ struct ModuleBuilder {
     externs: std::collections::BTreeSet<&'static str>,
     /// Whether anything in the program allocates, and so needs the arena.
     needs_heap: bool,
+    /// Whether the program raises or catches, and so needs the exception
+    /// runtime (setjmp/longjmp and a thrown-value cell).
+    needs_exn: bool,
     /// How many lambdas have been given names.
     lambdas: usize,
 }
@@ -1543,6 +1588,7 @@ impl ModuleBuilder {
             globals: Vec::new(),
             externs: std::collections::BTreeSet::new(),
             needs_heap: false,
+            needs_exn: false,
             lambdas: 0,
         }
     }
@@ -1632,6 +1678,7 @@ impl ModuleBuilder {
             out.push_str(&heap_runtime());
             out.push('\n');
         }
+
         for line in &self.lines {
             out.push_str(line);
             out.push('\n');
@@ -2393,6 +2440,8 @@ impl LlvmIrEmitter {
                 self.emit_case(scrutinee, arms, expected, fb, registry, module)
             }
             Expr::MacroCall(name, args) => self.emit_macro(name, args, fb, registry, module),
+            Expr::Try(body, handlers) => self.emit_try(body, handlers, expected, fb, registry, module),
+            Expr::Raise(value) => self.emit_raise(value, fb, registry, module),
             Expr::Try(_, _) => Err(CompileError::emit(
                 "a `try` with a handler needs exception catching, which is not lowered yet",
             )),
@@ -3044,10 +3093,12 @@ impl LlvmIrEmitter {
     /// stream as their first argument.  All of them collapse to a single
     /// `printf`/`fprintf` call with one synthesized format string, which
     /// is both the simplest lowering and the fastest one.
-    /// `$raise e` with no handler to catch it — an *uncaught* exception,
-    /// which is the end of the program.  The value is built (for any
-    /// side effects in it), a word is said, and control exits.  This is
-    /// the honest lowering of a raise that has nowhere to go.
+
+    /// `$raise e` — raise an exception.  Until a `try` that catches is
+    /// lowerable (it needs a real setjmp runtime, which needs C passed
+    /// alongside the IR), no raise can be handled: every raise is
+    /// uncaught, which names the exception and stops the program.  This
+    /// is the honest end of an unhandled raise.
     fn emit_raise(
         &self,
         value: &Expr,
@@ -3055,14 +3106,15 @@ impl LlvmIrEmitter {
         registry: &Registry,
         module: &mut ModuleBuilder,
     ) -> Result<FnValue, CompileError> {
-        // An unhandled raise is the end of the program.  The name of the
-        // exception (a constructor, bare or built) is the one useful
-        // thing to keep; any side effects in building it still run.
+        // Build any side effects of constructing the exception value.
         let name = match value {
             Expr::Var(n) => n.clone(),
             Expr::Call(head, _) => match head.as_ref() {
                 Expr::Var(n) => n.clone(),
-                _ => "exception".to_string(),
+                _ => {
+                    let _ = self.emit_expr(value, fb, registry, module)?;
+                    "exception".to_string()
+                }
             },
             _ => {
                 let _ = self.emit_expr(value, fb, registry, module)?;
@@ -3077,6 +3129,25 @@ impl LlvmIrEmitter {
             reg: String::new(),
             ty: LlvmType::Never,
         })
+    }
+
+    /// `try e with | p => h` — catching an exception.  The parse carries
+    /// the whole form; lowering it needs a real setjmp/longjmp runtime
+    /// passed as C beside the IR, which the pipeline does not yet do.  So
+    /// a `try` with a handler is refused cleanly rather than emitted
+    /// wrong.
+    fn emit_try(
+        &self,
+        _body: &Expr,
+        _handlers: &[(Pattern, Expr)],
+        _expected: Option<LlvmType>,
+        _fb: &mut FnBuilder,
+        _registry: &Registry,
+        _module: &mut ModuleBuilder,
+    ) -> Result<FnValue, CompileError> {
+        Err(CompileError::emit(
+            "exception catching (`try`) needs a setjmp/longjmp runtime, which is not lowered yet",
+        ))
     }
 
     fn emit_macro(
