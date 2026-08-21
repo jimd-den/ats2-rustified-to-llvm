@@ -135,6 +135,21 @@ struct Walk<'a> {
 }
 
 impl<'a> Walk<'a> {
+    /// Make a mutually recursive local function group visible as one lexical
+    /// scope. Both ordinary and result-directed expression walks must use the
+    /// same operation or dependent return checking loses local signatures.
+    fn enter_local_functions(&mut self, funs: &[FunDef]) {
+        let scope = funs
+            .iter()
+            .map(|f| (f.name.clone(), Signature::of_fun(f)))
+            .collect();
+        self.local_sigs.push(scope);
+    }
+
+    fn leave_local_functions(&mut self) {
+        self.local_sigs.pop();
+    }
+
     fn demand(&mut self, goal: SExp, origin: Origin, env: &IndexEnv) {
         self.out
             .push(Obligation::new(env.hyps().to_vec(), goal, origin));
@@ -402,10 +417,12 @@ impl<'a> Walk<'a> {
                 self.check_against(rest, promise, env);
             }
             Expr::LetFun(funs, rest) => {
+                self.enter_local_functions(funs);
                 for f in funs {
                     self.function_def(f, env.clone());
                 }
                 self.check_against(rest, promise, env);
+                self.leave_local_functions();
             }
             Expr::Call(callee, args) => {
                 let expected = match claim {
@@ -520,16 +537,12 @@ impl<'a> Walk<'a> {
                 self.expr(rest, env)
             }
             Expr::LetFun(funs, rest) => {
-                let scope = funs
-                    .iter()
-                    .map(|f| (f.name.clone(), Signature::of_fun(f)))
-                    .collect();
-                self.local_sigs.push(scope);
+                self.enter_local_functions(funs);
                 for f in funs {
                     self.function_def(f, env.clone());
                 }
                 let result = self.expr(rest, env);
-                self.local_sigs.pop();
+                self.leave_local_functions();
                 result
             }
             Expr::Lam(params, ret, body) => {

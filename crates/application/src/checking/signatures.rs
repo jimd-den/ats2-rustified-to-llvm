@@ -372,9 +372,17 @@ impl Signature {
             .map(|t| t.substitute(&result_subst))
             .collect();
         // A value has one index; a proof has one per number its
-        // proposition is about, and none of them is "the" result.
+        // proposition is about, and none of them is "the" result. A
+        // refinement such as `Nat` has no singleton index either, but its
+        // dynamic result still has an identity and the refinement holds of
+        // that identity.
         let result = match result_indices.as_slice() {
             [only] => Some(only.clone()),
+            [] => claim_of(&self.ret).map(|claim| {
+                let value = fresh.var("res");
+                assumptions.push(claim.substitute(&[(SELF.to_string(), value.clone())]));
+                value
+            }),
             _ => None,
         };
         let metric = self.metric.iter().map(|m| m.substitute(&subst)).collect();

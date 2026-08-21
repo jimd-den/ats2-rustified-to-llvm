@@ -654,3 +654,18 @@ end";
     let errs = check(src);
     assert!(errs.is_empty(), "{errs:?}");
 }
+
+#[test]
+fn a_refined_result_keeps_a_local_callees_signature() {
+    // Result-directed checking walks through `let fun` independently of the
+    // ordinary expression walk. The local signature must be in scope there
+    // too, or the call returns an unknown `%self` despite its `Nat` result.
+    let src = "\
+fun answer (): Nat = let
+  fun loop (): Nat = 0
+in
+  loop()
+end";
+    let errs = check(src);
+    assert!(errs.is_empty(), "{errs:?}");
+}
