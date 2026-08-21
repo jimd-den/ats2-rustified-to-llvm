@@ -1629,6 +1629,12 @@ impl ModuleBuilder {
             out.push_str(decl);
             out.push('\n');
         }
+        if self.needs_exn {
+            // The current exception frame and the raised value, shared
+            // between every `try` and `$raise`.
+            out.push_str("@ats2_cur = internal global ptr null\n");
+            out.push_str("@ats2_exval = internal global ptr null\n");
+        }
         for g in &self.globals {
             out.push_str(g);
             out.push('\n');
@@ -3094,11 +3100,13 @@ impl LlvmIrEmitter {
     /// `printf`/`fprintf` call with one synthesized format string, which
     /// is both the simplest lowering and the fastest one.
 
-    /// `$raise e` — raise an exception.  Until a `try` that catches is
-    /// lowerable (it needs a real setjmp runtime, which needs C passed
-    /// alongside the IR), no raise can be handled: every raise is
-    /// uncaught, which names the exception and stops the program.  This
-    /// is the honest end of an unhandled raise.
+    /// `$raise e` — store the raised value and longjmp to the nearest
+    /// enclosing `try`.  `setjmp`/`longjmp` are libc, and LLVM requires a
+    /// `setjmp` to be called *directly* in the frame that reads its
+    /// return (a helper would silently never unwind), so the raise emits
+    /// the `longjmp` inline against a frame the try set up the same way.
+    /// The raised value and the current frame live in two globals the
+    /// `try` and `raise` share.
     fn emit_raise(
         &self,
         value: &Expr,
@@ -3106,24 +3114,49 @@ impl LlvmIrEmitter {
         registry: &Registry,
         module: &mut ModuleBuilder,
     ) -> Result<FnValue, CompileError> {
-        // Build any side effects of constructing the exception value.
+        module.needs_exn = true;
+        module.externs.insert("declare i32 @setjmp(ptr)");
+        module.externs.insert("declare void @longjmp(ptr, i32) noreturn");
         let name = match value {
             Expr::Var(n) => n.clone(),
             Expr::Call(head, _) => match head.as_ref() {
                 Expr::Var(n) => n.clone(),
-                _ => {
-                    let _ = self.emit_expr(value, fb, registry, module)?;
-                    "exception".to_string()
-                }
+                _ => "exception".to_string(),
             },
-            _ => {
-                let _ = self.emit_expr(value, fb, registry, module)?;
-                "exception".to_string()
+            _ => "exception".to_string(),
+        };
+        // Build the exception box (a declared exception) or, failing
+        // that, evaluate the value in case it constructs one.
+        let box_reg = if registry.ctors.contains_key(name.as_str()) {
+            let info = resolve_ctor(&name, &[], None, registry)?;
+            let ptr = self.emit_alloc(WORD * (1 + info.width), fb, module);
+            fb.line(format!("store i64 {}, ptr {ptr}", info.tag));
+            ptr
+        } else {
+            // Either a constructed exception (build it) or a genuinely
+            // unknown name: fall back to naming the uncaught raise.
+            match value {
+                Expr::Call(..) => self.emit_expr(value, fb, registry, module)?.reg,
+                Expr::Var(_) => {
+                    let msg = format!("exit(ATS): uncaught {name}\n");
+                    self.emit_printf(Stream::Stderr, &msg, &[], fb, module);
+                    fb.line("call void @exit(i32 1)");
+                    fb.line("unreachable");
+                    return Ok(FnValue {
+                        reg: String::new(),
+                        ty: LlvmType::Never,
+                    });
+                }
+                _ => "null".to_string(),
             }
         };
-        let msg = format!("exit(ATS): uncaught {name}\n");
-        self.emit_printf(Stream::Stderr, &msg, &[], fb, module);
-        fb.line("call void @exit(i32 1)");
+        // Store the raised value, load the current frame, longjmp.
+        fb.line(format!("store ptr {box_reg}, ptr @ats2_exval"));
+        let cur = fb.fresh_temp();
+        fb.line(format!("{cur} = load ptr, ptr @ats2_cur"));
+        let jb = fb.fresh_temp();
+        fb.line(format!("{jb} = getelementptr i8, ptr {cur}, i64 8"));
+        fb.line(format!("call void @longjmp(ptr {jb}, i32 1)"));
         fb.line("unreachable");
         Ok(FnValue {
             reg: String::new(),
@@ -3131,23 +3164,197 @@ impl LlvmIrEmitter {
         })
     }
 
-    /// `try e with | p => h` — catching an exception.  The parse carries
-    /// the whole form; lowering it needs a real setjmp/longjmp runtime
-    /// passed as C beside the IR, which the pipeline does not yet do.  So
-    /// a `try` with a handler is refused cleanly rather than emitted
-    /// wrong.
+    /// `try e with | ~X(p) => h | ... ` — run `e` under a handler.  The
+    /// `setjmp` is emitted *directly* here (LLVM needs it in the frame
+    /// that checks its return), the body runs, and a raise longjmps back
+    /// so this returns nonzero and the handlers dispatch on the tag.
     fn emit_try(
         &self,
-        _body: &Expr,
-        _handlers: &[(Pattern, Expr)],
-        _expected: Option<LlvmType>,
-        _fb: &mut FnBuilder,
-        _registry: &Registry,
-        _module: &mut ModuleBuilder,
+        body: &Expr,
+        handlers: &[(Pattern, Expr)],
+        expected: Option<LlvmType>,
+        fb: &mut FnBuilder,
+        registry: &Registry,
+        module: &mut ModuleBuilder,
     ) -> Result<FnValue, CompileError> {
-        Err(CompileError::emit(
-            "exception catching (`try`) needs a setjmp/longjmp runtime, which is not lowered yet",
-        ))
+        if handlers.is_empty() {
+            return Err(CompileError::emit("a `try` needs at least one handler"));
+        }
+        module.needs_exn = true;
+        module.externs.insert("declare i32 @setjmp(ptr)");
+        module.externs.insert("declare void @longjmp(ptr, i32) noreturn");
+
+        let id = fb.fresh_block_id();
+        let merge = format!("try.done.{id}");
+        let body_label = format!("try.body.{id}");
+        let nolabel = format!("try.ralabel.{id}");
+
+        // Frame: { parent*, jmp_buf }.  Set the chain and save jmp_buf.
+        let frame = self.emit_alloc(512, fb, module);
+        let old = fb.fresh_temp();
+        fb.line(format!("{old} = load ptr, ptr @ats2_cur"));
+        fb.line(format!("store ptr {old}, ptr {frame}"));
+        fb.line(format!("store ptr {frame}, ptr @ats2_cur"));
+        let jb = fb.fresh_temp();
+        fb.line(format!("{jb} = getelementptr i8, ptr {frame}, i64 8"));
+        let r = fb.fresh_temp();
+        fb.line(format!("{r} = call i32 @setjmp(ptr {jb})"));
+        let z = fb.fresh_temp();
+        fb.line(format!("{z} = icmp eq i32 {r}, 0"));
+        let caught_l = format!("try.dsp.{id}.0");
+        fb.line(format!("br i1 {z}, label %{body_label}, label %{caught_l}"));
+
+        // Body: run it; on normal completion restore the frame chain.
+        fb.label(&body_label);
+        let saved_env = fb.env.clone();
+        let saved_cells = fb.cells.clone();
+        let mut results: Vec<(FnValue, String)> = Vec::new();
+        let b = self.emit_expr_expecting(body, expected, fb, registry, module)?;
+        if b.ty != LlvmType::Never {
+            let body_pred = fb.cur_block.clone();
+            // restore: @ats2_cur = old
+            fb.line(format!("store ptr {old}, ptr @ats2_cur"));
+            fb.line(format!("br label %{merge}"));
+            results.push((b, body_pred));
+        }
+        fb.env = saved_env;
+        fb.cells = saved_cells;
+
+        // Caught: read the raised value and its tag, then dispatch.
+        fb.label(&caught_l);
+        let exn = fb.fresh_temp();
+        fb.line(format!("{exn} = load ptr, ptr @ats2_exval"));
+        let tag = fb.fresh_temp();
+        fb.line(format!("{tag} = load i64, ptr {exn}"));
+        let mut catchall_hit = false;
+
+        for (i, (pat, handler)) in handlers.iter().enumerate() {
+            // Each handler's dispatch block (beyond the first, which is
+            // the caught block) is where the previous handler's mismatch
+            // branches to.
+            if i > 0 {
+                let d = format!("try.dsp.{id}.{i}");
+                fb.label(&d);
+            }
+            let arm = format!("try.arm.{id}.{i}");
+            let is_last = i + 1 == handlers.len();
+            let next_i: Option<String> = if is_last {
+                None
+            } else {
+                Some(format!("try.dsp.{id}.{}", i + 1))
+            };
+            match pat {
+                Pattern::Ctor(xname, fieldpats) => {
+                    let Some(info) = registry
+                        .ctors
+                        .get(xname.as_str())
+                        .and_then(|c| c.get(0))
+                    else {
+                        continue;
+                    };
+                    let clash = fb.fresh_temp();
+                    fb.line(format!("{clash} = icmp eq i64 {tag}, {}", info.tag));
+                    let miss = next_i.as_deref().unwrap_or(&nolabel);
+                    let arm_l = arm.clone();
+                    fb.line(format!("br i1 {clash}, label %{arm_l}, label %{miss}"));
+                    fb.label(&arm);
+                    let saved = fb.env.clone();
+                    for (fi, fpat) in fieldpats.iter().enumerate() {
+                        if let Pattern::Var(vname) = fpat {
+                            let ty = info.fields.get(fi).copied().unwrap_or(LlvmType::I64);
+                            let addr = self.emit_slot_address(&exn, fi + 1, fb);
+                            let reg = fb.fresh_temp();
+                            fb.line(format!("{reg} = load {}, ptr {addr}", llvm_ty_str(ty)));
+                            fb.env.insert(vname.clone(), FnValue { reg, ty });
+                        }
+                    }
+                    let hv = self.emit_expr_expecting(handler, expected, fb, registry, module)?;
+                    if hv.ty != LlvmType::Never {
+                        let pred = fb.cur_block.clone();
+                        fb.line(format!("store ptr {old}, ptr @ats2_cur"));
+                        fb.line(format!("br label %{merge}"));
+                        results.push((hv, pred));
+                    }
+                    fb.env = saved;
+                }
+                Pattern::Var(vname) => {
+                    catchall_hit = true;
+                    let saved = fb.env.clone();
+                    let reg = fb.fresh_temp();
+                    fb.line(format!("{reg} = load i64, ptr {exn}"));
+                    fb.env.insert(vname.clone(), FnValue { reg, ty: LlvmType::I64 });
+                    let hv = self.emit_expr_expecting(handler, expected, fb, registry, module)?;
+                    if hv.ty != LlvmType::Never {
+                        let pred = fb.cur_block.clone();
+                        fb.line(format!("store ptr {old}, ptr @ats2_cur"));
+                        fb.line(format!("br label %{merge}"));
+                        results.push((hv, pred));
+                    }
+                    fb.env = saved;
+                    break;
+                }
+                Pattern::Wildcard => {
+                    catchall_hit = true;
+                    let hn = self.emit_expr_expecting(handler, expected, fb, registry, module)?;
+                    if hn.ty != LlvmType::Never {
+                        let pred = fb.cur_block.clone();
+                        fb.line(format!("store ptr {old}, ptr @ats2_cur"));
+                        fb.line(format!("br label %{merge}"));
+                        results.push((hn, pred));
+                    }
+                    break;
+                }
+                _ => continue,
+            }
+        }
+
+        // Re-raise whatever no handler covered (restoring the chain first).
+        if !catchall_hit {
+            fb.label(&nolabel);
+            fb.line(format!("store ptr {old}, ptr @ats2_cur"));
+            let cur2 = fb.fresh_temp();
+            fb.line(format!("{cur2} = load ptr, ptr @ats2_cur"));
+            let jb2 = fb.fresh_temp();
+            fb.line(format!("{jb2} = getelementptr i8, ptr {cur2}, i64 8"));
+            fb.line(format!("call void @longjmp(ptr {jb2}, i32 1)"));
+            fb.line("unreachable");
+        }
+        // A raise that longjmps past this try has already restored the
+        // frame chain via the re-raise above.
+
+        // Merge the arms that produced values.
+        fb.label(&merge);
+        let Some(((first, _), rest)) = results.split_first() else {
+            fb.line("unreachable");
+            return Ok(FnValue {
+                reg: String::new(),
+                ty: LlvmType::Never,
+            });
+        };
+        for (other, _) in rest {
+            if other.ty != first.ty {
+                return Err(CompileError::emit(format!(
+                    "try arms have different types ({} vs {})",
+                    llvm_ty_str(first.ty),
+                    llvm_ty_str(other.ty)
+                )));
+            }
+        }
+        let ty = first.ty;
+        if ty == LlvmType::Void {
+            return Ok(FnValue { reg: String::new(), ty });
+        }
+        let incoming: Vec<String> = results
+            .iter()
+            .map(|(v, p)| format!("[ {}, %{p} ]", v.reg))
+            .collect();
+        let reg = fb.fresh_temp();
+        fb.line(format!(
+            "{reg} = phi {} {}",
+            llvm_ty_str(ty),
+            incoming.join(", ")
+        ));
+        Ok(FnValue { reg, ty })
     }
 
     fn emit_macro(
