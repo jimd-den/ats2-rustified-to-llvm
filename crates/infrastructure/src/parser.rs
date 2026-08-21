@@ -867,9 +867,7 @@ impl ParseCtx<'_> {
             // declarations: a program that raises and catches needs to
             // know the constructors, so they are kept.
             TokenKind::Ident(w) if w == "exception" => {
-                if let Some(def) = self.parse_exception() {
-                    out.push(def);
-                }
+                out.extend(self.parse_exception());
                 Ok(())
             }
             TokenKind::Ident(name) if is_skippable_directive(&name) => {
@@ -4555,41 +4553,62 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
 
     /// `overload OP with FUNC` — a function to try when an operator's
     /// operands do not fit it.
-    /// `exception X` or `exception X of (t1, t2)` — an exception
-    /// constructor: a member of the built-in `exn` type, carrying the
-    /// given payload (or none).
-    fn parse_exception(&mut self) -> Option<Def> {
+    /// `exception X`, `exception X of t` or `exception X of (t1, t2)` —
+    /// an exception constructor: a member of the built-in `exn` type,
+    /// carrying the given payload (or none).  The fields may be
+    /// parenthesized or not — ATS admits both — and one declaration may
+    /// name several exceptions after the first: `exception A and B`
+    /// declares two.
+    fn parse_exception(&mut self) -> Vec<Def> {
         let save = self.pos;
         self.advance(); // `exception`
-        let TokenKind::Ident(name) = self.peek().kind.clone() else {
-            self.pos = save;
-            return None;
-        };
-        self.advance();
-        let mut fields = Vec::new();
-        if self.at(&TokenKind::Of) {
+        let mut out = Vec::new();
+        loop {
+            let TokenKind::Ident(name) = self.peek().kind.clone() else {
+                self.pos = save;
+                return out;
+            };
             self.advance();
-            if self.at(&TokenKind::LParen) {
+            let mut fields = Vec::new();
+            if self.at(&TokenKind::Of) {
                 self.advance();
-                if !self.at(&TokenKind::RParen) {
-                    loop {
-                        let Ok(ty) = self.parse_type() else {
-                            self.pos = save;
-                            return None;
-                        };
-                        fields.push(ty);
-                        if self.at(&TokenKind::Comma) {
-                            self.advance();
-                        } else {
-                            break;
+                if self.at(&TokenKind::LParen) {
+                    self.advance();
+                    if !self.at(&TokenKind::RParen) {
+                        loop {
+                            let Ok(ty) = self.parse_type() else {
+                                self.pos = save;
+                                return Vec::new();
+                            };
+                            fields.push(ty);
+                            if self.at(&TokenKind::Comma) {
+                                self.advance();
+                            } else {
+                                break;
+                            }
                         }
                     }
+                    if self
+                        .expect(&TokenKind::RParen, "expected `)` after the exception fields")
+                        .is_err()
+                    {
+                        return Vec::new();
+                    }
+                } else {
+                    let Ok(ty) = self.parse_type() else {
+                        self.pos = save;
+                        return Vec::new();
+                    };
+                    fields.push(ty);
                 }
-                self.expect(&TokenKind::RParen, "expected `)` after the exception fields")
-                    .ok()?;
             }
+            out.push(Def::Exception(name, fields));
+            if self.at_ident("and") {
+                self.advance();
+                continue;
+            }
+            return out;
         }
-        Some(Def::Exception(name, fields))
     }
 
     fn parse_overload(&mut self) -> Option<Def> {
@@ -7268,6 +7287,39 @@ mod tests {
         assert_eq!(
             body_of("fun f(): int = $raise StreamSubscriptExn"),
             Expr::Raise(Box::new(var("StreamSubscriptExn")))
+        );
+    }
+
+    #[test]
+    fn an_exception_declaration_keeps_its_payload() {
+        // `exception Found of int` — the payload type, written without
+        // parentheses, is kept for the emitter to box and the `try` to
+        // read back.
+        let p = Parser::parse("exception Found of int").expect("parse");
+        assert_eq!(p.defs()[0], Def::Exception("Found".into(), vec![Ty::Name("int".into())]));
+        let p = Parser::parse("exception Found of (int, double)").expect("parse");
+        assert_eq!(
+            p.defs()[0],
+            Def::Exception(
+                "Found".into(),
+                vec![Ty::Name("int".into()), Ty::Name("double".into())]
+            )
+        );
+    }
+
+    #[test]
+    fn one_exception_declaration_may_name_several() {
+        // `exception A and B of int` — the canonical TESTATS spelling.
+        // Each name is its own constructor of `exn`, so each becomes its
+        // own definition.
+        let p = Parser::parse("exception A and B of int").expect("parse");
+        let defs: Vec<Def> = p.defs().to_vec();
+        assert_eq!(
+            defs,
+            vec![
+                Def::Exception("A".into(), vec![]),
+                Def::Exception("B".into(), vec![Ty::Name("int".into())])
+            ]
         );
     }
 

@@ -373,3 +373,299 @@ fn an_extval_reads_a_c_macro() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "answer = 42");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Exceptions, end to end.
+//
+// A `try` must catch what a `$raise` throws — in the same frame, from a
+// deeper frame, or through a handler that raises again.  These link
+// through clang because `setjmp`/`longjmp` are libc, and run the binary,
+// because an exception is only handled when the program says so on the
+// way out.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+static EXN_WORKDIR: AtomicUsize = AtomicUsize::new(0);
+
+/// Build `source` with the full pipeline and run the resulting binary.
+fn build_and_run(source: &str) -> std::process::Output {
+    use ats2_application::use_cases::CompileExecutableUseCase;
+    use ats2_infrastructure::io::FileOutput;
+    use ats2_infrastructure::toolchain::ClangToolchain;
+
+    let n = EXN_WORKDIR.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "ats2llvm-exn-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a place to work");
+    let ir = dir.join("exn.ll");
+    let bin = dir.join("exn");
+    let uc = CompileExecutableUseCase::new(Parser, LlvmIrEmitter, ClangToolchain, FileOutput);
+    uc.execute(source, &ir, &bin)
+        .expect("the program should build");
+    let out = Command::new(&bin).output().expect("run the linked program");
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+/// As `build_and_run`, but a program that loops forever must fail the
+/// test instead of hanging it: a raise inside a handler that re-enters
+/// its own `try` is exactly that program.
+fn build_and_run_timed(source: &str, secs: u64) -> std::process::Output {
+    use ats2_application::use_cases::CompileExecutableUseCase;
+    use ats2_infrastructure::io::FileOutput;
+    use ats2_infrastructure::toolchain::ClangToolchain;
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::Instant;
+
+    let n = EXN_WORKDIR.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "ats2llvm-exn-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a place to work");
+    let ir = dir.join("exn.ll");
+    let bin = dir.join("exn");
+    let uc = CompileExecutableUseCase::new(Parser, LlvmIrEmitter, ClangToolchain, FileOutput);
+    uc.execute(source, &ir, &bin)
+        .expect("the program should build");
+
+    let mut child = Command::new(&bin)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run the linked program");
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().expect("wait for the program") {
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            child
+                .stdout
+                .take()
+                .expect("stdout")
+                .read_to_string(&mut stdout)
+                .expect("read stdout");
+            child
+                .stderr
+                .take()
+                .expect("stderr")
+                .read_to_string(&mut stderr)
+                .expect("read stderr");
+            let _ = std::fs::remove_dir_all(&dir);
+            return std::process::Output {
+                status,
+                stdout: stdout.into_bytes(),
+                stderr: stderr.into_bytes(),
+            };
+        }
+        if start.elapsed().as_secs() > secs {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "the program did not finish within {secs}s; a raise is re-entering its own try"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_try_catches_what_a_raise_throws() {
+    if !clang_available() {
+        eprintln!("skipping: no clang on PATH");
+        return;
+    }
+    let out = build_and_run(
+        "exception E
+         implement main0 () = let
+           val ans = try $raise E with ~E () => 42
+         in println! (\"ans = \", ans) end",
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ans = 42");
+}
+
+#[test]
+fn a_raise_carries_its_payload_to_the_handler() {
+    if !clang_available() {
+        eprintln!("skipping: no clang on PATH");
+        return;
+    }
+    let out = build_and_run(
+        "exception Found of int
+         implement main0 () = let
+           val ans = try $raise Found(7) with ~Found(x) => x + 1
+         in println! (\"ans = \", ans) end",
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ans = 8");
+}
+
+#[test]
+fn a_void_try_catches_and_the_program_ends_normally() {
+    if !clang_available() {
+        eprintln!("skipping: no clang on PATH");
+        return;
+    }
+    // `main0` is void, and so are both arms of the try: the merge of a
+    // void try is where the ret lands.  This is the commonest shape a
+    // catching program has, and it used to be the easy one to get wrong.
+    let out = build_and_run(
+        "exception E
+         implement main0 () = try $raise E with ~E () => println! (\"caught\")",
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "caught");
+}
+
+#[test]
+fn a_handler_that_raises_never_returns_and_needs_no_merge_value() {
+    if !clang_available() {
+        eprintln!("skipping: no clang on PATH");
+        return;
+    }
+    // The handler's arm type is `never`: it raises rather than returning
+    // a value, so it cannot disagree with the body's type.  The try's
+    // merge has one less incoming value because of it.
+    let out = build_and_run(
+        "exception E
+         implement main0 () = let
+           val x = try 5 with ~E () => $raise E
+         in println! (\"x = \", x) end",
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "x = 5");
+}
+
+#[test]
+fn a_try_body_that_completes_keeps_its_value() {
+    if !clang_available() {
+        eprintln!("skipping: no clang on PATH");
+        return;
+    }
+    let out = build_and_run(
+        "exception E
+         implement main0 () = let
+           val ans = try 5 with ~E () => 0
+         in println! (\"ans = \", ans) end",
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ans = 5");
+}
+
+#[test]
+fn an_uncaught_raise_names_the_exception_and_stops() {
+    if !clang_available() {
+        eprintln!("skipping: no clang on PATH");
+        return;
+    }
+    let out = build_and_run("exception E implement main0 () = $raise E");
+    assert!(
+        !out.status.success(),
+        "an uncaught raise must stop the program"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("uncaught E"), "stderr was: {err}");
+}
+
+#[test]
+fn what_no_handler_matches_is_raised_again_one_frame_up() {
+    if !clang_available() {
+        eprintln!("skipping: no clang on PATH");
+        return;
+    }
+    let out = build_and_run(
+        "exception A and B
+         implement main0 () = let
+           val ans = try (try $raise A with ~B () => 0) with ~A () => 1
+         in println! (\"ans = \", ans) end",
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ans = 1");
+}
+
+#[test]
+fn a_handler_that_raises_propagates_outward_without_recatching() {
+    if !clang_available() {
+        eprintln!("skipping: no clang on PATH");
+        return;
+    }
+    // The inner handler raises the very exception it just caught.  Real
+    // ATS sends it to the *outer* try; a lowering that re-enters the
+    // inner one would loop forever, which the timeout would report.
+    let out = build_and_run_timed(
+        "exception A
+         implement main0 () = let
+           val ans = try (try $raise A with ~A () => $raise A) with ~A () => 99
+         in println! (\"ans = \", ans) end",
+        5,
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ans = 99");
+}
+
+#[test]
+fn a_handler_that_raises_a_different_exception_reaches_the_outer_try() {
+    if !clang_available() {
+        eprintln!("skipping: no clang on PATH");
+        return;
+    }
+    let out = build_and_run(
+        "exception A and B
+         implement main0 () = let
+           val ans = try (try $raise A with ~A () => $raise B) with ~B () => 7
+         in println! (\"ans = \", ans) end",
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ans = 7");
+}
+
+#[test]
+fn a_payload_survives_a_reraise_to_the_outer_try() {
+    if !clang_available() {
+        eprintln!("skipping: no clang on PATH");
+        return;
+    }
+    let out = build_and_run(
+        "exception A of int and B
+         implement main0 () = let
+           val ans = try (try $raise A(5) with ~B () => 0) with ~A(x) => x
+         in println! (\"ans = \", ans) end",
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ans = 5");
+}

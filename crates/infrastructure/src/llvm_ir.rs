@@ -2448,10 +2448,6 @@ impl LlvmIrEmitter {
             Expr::MacroCall(name, args) => self.emit_macro(name, args, fb, registry, module),
             Expr::Try(body, handlers) => self.emit_try(body, handlers, expected, fb, registry, module),
             Expr::Raise(value) => self.emit_raise(value, fb, registry, module),
-            Expr::Try(_, _) => Err(CompileError::emit(
-                "a `try` with a handler needs exception catching, which is not lowered yet",
-            )),
-            Expr::Raise(value) => self.emit_raise(value, fb, registry, module),
         }
     }
 
@@ -3131,6 +3127,15 @@ impl LlvmIrEmitter {
             let info = resolve_ctor(&name, &[], None, registry)?;
             let ptr = self.emit_alloc(WORD * (1 + info.width), fb, module);
             fb.line(format!("store i64 {}, ptr {ptr}", info.tag));
+            // `$raise Found(x)` — the payload rides in the slots after
+            // the tag, each argument stored where its handler reads it.
+            if let Expr::Call(_, args) = value {
+                for (i, arg) in args.iter().enumerate() {
+                    let v = self.emit_expr(arg, fb, registry, module)?;
+                    let addr = self.emit_slot_address(&ptr, i + 1, fb);
+                    fb.line(format!("store {} {}, ptr {addr}", llvm_ty_str(v.ty), v.reg));
+                }
+            }
             ptr
         } else {
             // Either a constructed exception (build it) or a genuinely
@@ -3154,6 +3159,21 @@ impl LlvmIrEmitter {
         fb.line(format!("store ptr {box_reg}, ptr @ats2_exval"));
         let cur = fb.fresh_temp();
         fb.line(format!("{cur} = load ptr, ptr @ats2_cur"));
+        // No frame at all: what raised here has nothing to unwind to, so
+        // the honest end is the one the raise always had before a `try`
+        // could catch — name the exception and stop.
+        let id = fb.fresh_block_id();
+        let ok = format!("raise.throw.{id}");
+        let none = format!("raise.none.{id}");
+        let has = fb.fresh_temp();
+        fb.line(format!("{has} = icmp ne ptr {cur}, null"));
+        fb.line(format!("br i1 {has}, label %{ok}, label %{none}"));
+        fb.label(&none);
+        let msg = format!("exit(ATS): uncaught {name}\n");
+        self.emit_printf(Stream::Stderr, &msg, &[], fb, module);
+        fb.line("call void @exit(i32 1)");
+        fb.line("unreachable");
+        fb.label(&ok);
         let jb = fb.fresh_temp();
         fb.line(format!("{jb} = getelementptr i8, ptr {cur}, i64 8"));
         fb.line(format!("call void @longjmp(ptr {jb}, i32 1)"));
@@ -3221,7 +3241,12 @@ impl LlvmIrEmitter {
         fb.cells = saved_cells;
 
         // Caught: read the raised value and its tag, then dispatch.
+        // The frame chain is restored *first*, so a handler that raises
+        // throws into the frame this try was itself under, not back into
+        // this one — a raise must not be caught by the try that is
+        // already handling it.
         fb.label(&caught_l);
+        fb.line(format!("store ptr {old}, ptr @ats2_cur"));
         let exn = fb.fresh_temp();
         fb.line(format!("{exn} = load ptr, ptr @ats2_exval"));
         let tag = fb.fresh_temp();
