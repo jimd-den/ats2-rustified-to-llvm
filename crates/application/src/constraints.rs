@@ -753,13 +753,19 @@ pub fn is_contradictory(hyps: &[SExp]) -> bool {
 
 /// Does `hyps` entail `goal`?
 pub fn entails(hyps: &[SExp], goal: &SExp) -> Verdict {
-    // A disjunction cannot be held as a conjunctive system, but it can be
-    // *decided* by cases: it holds if either half does, and it is false
-    // only if both are.  Splitting here rather than in `atoms` is what
-    // keeps the system a conjunction while still deciding the goals a
-    // lexicographic termination metric produces, which are disjunctions
-    // by their nature.
+    // Disjunction and disequality cannot be held as conjunctive systems,
+    // but both can be decided in terms of propositions the linear solver
+    // already understands. Splitting here rather than in `atoms` keeps
+    // the system a conjunction.
     if let SExp::App(op, args) = goal {
+        if op == "!=" && args.len() == 2 {
+            let equality = SExp::App("==".into(), args.clone());
+            return match entails(hyps, &equality) {
+                Verdict::Proved => Verdict::Refuted,
+                Verdict::Refuted => Verdict::Proved,
+                Verdict::Unknown => Verdict::Unknown,
+            };
+        }
         if op == "||" && args.len() == 2 {
             let (left, right) = (entails(hyps, &args[0]), entails(hyps, &args[1]));
             return match (left, right) {
@@ -848,6 +854,27 @@ mod tests {
         // n > 0 means n >= 1 over the integers, so n >= 1 follows.
         let hyps = vec![app(">", v("n"), i(0))];
         assert_eq!(entails(&hyps, &app(">=", v("n"), i(1))), Verdict::Proved);
+    }
+
+    #[test]
+    fn a_disequality_goal_is_proved_when_it_is_already_known() {
+        let not_zero = app("!=", v("j"), i(0));
+        assert_eq!(
+            entails(std::slice::from_ref(&not_zero), &not_zero),
+            Verdict::Proved
+        );
+    }
+
+    #[test]
+    fn a_strict_bound_proves_the_corresponding_disequality() {
+        let hyps = vec![app(">", v("j"), i(0))];
+        assert_eq!(entails(&hyps, &app("!=", v("j"), i(0))), Verdict::Proved);
+    }
+
+    #[test]
+    fn a_disequality_goal_is_refuted_when_equality_is_known() {
+        let hyps = vec![app("==", v("j"), i(0))];
+        assert_eq!(entails(&hyps, &app("!=", v("j"), i(0))), Verdict::Refuted);
     }
 
     #[test]
