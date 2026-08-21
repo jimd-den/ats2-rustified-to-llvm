@@ -400,6 +400,20 @@ impl<'a> Walk<'a> {
                 }
                 self.check_against(rest, promise, env);
             }
+            Expr::Call(callee, args) => {
+                let expected = match claim {
+                    SExp::App(op, parts)
+                        if op == "=="
+                            && parts.len() == 2
+                            && parts[0] == SExp::Var(SELF.into()) =>
+                    {
+                        Some(parts[1].clone())
+                    }
+                    _ => None,
+                };
+                let produced = self.call(callee, args, expected.as_ref(), env);
+                self.settle(claim, witnesses, hypotheses, produced, origin, env);
+            }
             _ => {
                 let produced = self.expr(e, env);
                 self.settle(claim, witnesses, hypotheses, produced, origin, env);
@@ -488,7 +502,7 @@ impl<'a> Walk<'a> {
                 Some(SExp::App("~".into(), vec![a]))
             }
             Expr::BinOp(op, l, r) => self.binop(*op, l, r, env),
-            Expr::Call(callee, args) => self.call(callee, args, env),
+            Expr::Call(callee, args) => self.call(callee, args, None, env),
             Expr::Index(subject, at) => self.subscript(subject, at, env),
             Expr::IfThenElse(c, t, f) => self.conditional(c, t, f, env),
             Expr::Case(scrutinee, arms) => self.case(scrutinee, arms, env),
@@ -587,7 +601,13 @@ impl<'a> Walk<'a> {
 
     /// A call: instantiate the callee's promise from the arguments, owe
     /// what it demands, and keep what it gives back.
-    fn call(&mut self, callee: &Expr, args: &[Expr], env: &mut IndexEnv) -> Option<SExp> {
+    fn call(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        expected: Option<&SExp>,
+        env: &mut IndexEnv,
+    ) -> Option<SExp> {
         let supplied: Vec<Arg> = args
             .iter()
             .map(|a| {
@@ -661,7 +681,8 @@ impl<'a> Walk<'a> {
         // ...and where they *do* choose the code, they also choose what
         // it produces, which is the whole content of naming an instance.
         let sig = declared.at_instance(&ty_args);
-        let facts = sig.at_call(&statics, &supplied, &env.fresh_supply());
+        let facts =
+            sig.at_call_against(&statics, &supplied, expected, &env.fresh_supply());
         for goal in facts.demands.clone() {
             self.demand(
                 goal,

@@ -212,6 +212,22 @@ impl Signature {
     /// `args` is one entry per argument: `None` where the walk could not
     /// say what the argument's index is.
     pub fn at_call(&self, statics: &[SExp], args: &[Arg], fresh: &Fresh) -> CallFacts {
+        self.at_call_against(statics, args, None, fresh)
+    }
+
+    /// Instantiate a call whose surrounding context may require one result.
+    ///
+    /// `fun {n:nat} choose(): int n` has no dynamic argument from which to
+    /// infer `n`, but in `val x: int 3 = choose()` the expected result does.
+    /// Matching it before obligations are produced turns the call into
+    /// `choose{3}()` while retaining the obligation that `3` is a natural.
+    pub fn at_call_against(
+        &self,
+        statics: &[SExp],
+        args: &[Arg],
+        expected: Option<&SExp>,
+        fresh: &Fresh,
+    ) -> CallFacts {
         let vars = self.universal_vars();
         let mut m = Match::default();
         let mut asked: Vec<SExp> = Vec::new();
@@ -255,6 +271,20 @@ impl Signature {
                         m.against(pattern, size, &vars);
                     }
                 },
+            }
+        }
+        if let Some(expected) = expected {
+            if let Some(SExp::App(op, parts)) = claim_of(&self.ret) {
+                if op == "==" && parts.len() == 2 && parts[0] == SExp::Var(SELF.into()) {
+                    let open: Vec<String> = vars
+                        .iter()
+                        .filter(|v| m.get(v).is_none())
+                        .cloned()
+                        .collect();
+                    if parts[1].vars().iter().any(|v| open.contains(v)) {
+                        m.against(&parts[1], expected, &open);
+                    }
+                }
             }
         }
         let undetermined: Vec<String> = vars

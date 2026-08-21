@@ -73,6 +73,30 @@ fn a_prelude_signature_can_refuse_a_program() {
 }
 
 #[test]
+fn an_expected_result_determines_an_implicit_static_argument() {
+    // There is no dynamic argument from which to infer `n`.  The promised
+    // result determines it instead, before the callee's `nat` obligation is
+    // checked: this call is the instance `choose{3}()`.
+    let errs = check(
+        "extern fun choose {n:nat} (): int n \
+         fun three (): int 3 = choose()",
+    );
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn an_expected_result_cannot_infer_an_instance_outside_its_sort() {
+    // Bidirectional inference determines `n = ~1`, but it must not erase
+    // the callee's `{n:nat}` requirement.  The chosen instance is invalid.
+    let errs = check(
+        "extern fun choose {n:nat} (): int n \
+         fun negative (): int (~1) = choose()",
+    );
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].contains("call to `choose`"), "{}", errs[0]);
+}
+
+#[test]
 fn a_compile_time_constant_is_a_number_the_checker_knows() {
     // `#define N 1024` is not a variable: every mention of `N` *is*
     // 1024, decided before the program runs.  A checker that treated it
