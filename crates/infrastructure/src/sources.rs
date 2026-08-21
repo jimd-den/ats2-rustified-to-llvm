@@ -23,7 +23,9 @@
 
 use std::path::{Path, PathBuf};
 
-use ats2_application::ports::{SourceLoaderPort, Unit};
+use ats2_application::ports::{
+    SourceLoaderPort, SourcePathResolution, SourcePathResolverPort, Unit,
+};
 
 /// The directories inside the ATS distribution that this compiler
 /// answers with its own prelude instead of by reading them.
@@ -31,24 +33,24 @@ use ats2_application::ports::{SourceLoaderPort, Unit};
 /// Real ATS resolves these against `$PATSHOME`.  Here they are simply
 /// recognised and declined: the declarations they would have provided
 /// are already in [`crate::prelude`].
-const DISTRIBUTION: [&str; 5] = [
+const DISTRIBUTION: [&str; 7] = [
     "prelude/",
     "libats/",
+    "libatsdoc/",
     "libc/",
     "share/",
     "contrib/",
+    "utils/",
 ];
 
-/// The `{$NAME}` path macros the ATS build defines, mapped to the part of
-/// the distribution they point at.
-///
-/// `staload "{$EXTSOLVE}/SATS/ilist.sats"` is how a program asks for
-/// something in `contrib/ATS-extsolve` without spelling its own path.  The
-/// macros are expanded before the ordinary path resolution runs, so the
-/// result feeds the same rules any other path does — one that lands in the
-/// distribution is declined for the prelude to answer, and the rest are
-/// looked for like any user file.
-const PATH_MACROS: [(&str, &str); 17] = [
+/// Postiats package defaults, relative to `$PATSHOME`.
+const PATH_MACROS: &[(&str, &str)] = &[
+    ("$PATSHOME", "."),
+    ("$PATSPRE", "prelude"),
+    ("$PATSLIBATS", "libats"),
+    ("$PATSLIBATSLIBC", "libats/libc"),
+    ("$LIBATSCC", "contrib/libatscc"),
+    ("$LIBATSML", "libats/ML"),
     ("$LIBATSCC2JS", "contrib/libatscc2js"),
     ("$LIBATSCC2PY3", "contrib/libatscc2py3"),
     ("$LIBATSCC2ERL", "contrib/libatscc2erl"),
@@ -60,6 +62,17 @@ const PATH_MACROS: [(&str, &str); 17] = [
     ("$ATSCNTRB", "contrib/atscntrb"),
     ("$CATSPARSEMIT", "contrib/CATS-parsemit"),
     ("$EXTSOLVE", "contrib/ATS-extsolve"),
+    ("$PATSOLVE", "contrib/ATS-extsolve"),
+    ("$SMT_LIBZ3", "contrib/atscntrb/atscntrb-smt-libz3"),
+    ("$HX_CSTREAM", "contrib/atscntrb/atscntrb-hx-cstream"),
+    ("$CSTREAM", "contrib/atscntrb/atscntrb-hx-cstream"),
+    ("$ATEXTING", "utils/atexting"),
+    ("$LIBCAIRO", "contrib/atscntrb/atscntrb-hx-libcairo"),
+    ("$LIBATSHWXI", "contrib/libats-hwxi"),
+    ("$HIREDIS", "contrib/atscntrb/atscntrb-hx-hiredis"),
+    ("$SDL2", "contrib/atscntrb/atscntrb-hx-sdl2"),
+    ("$OPENSSL", "contrib/atscntrb/atscntrb-hx-openssl"),
+    ("$HX_INTINF", "contrib/atscntrb/atscntrb-hx-intinf"),
     // The `atscntrb` add-ons and the testing library, all of which live
     // inside the distribution.
     ("$MYTESTING", "contrib/atscntrb/atscntrb-hx-mytesting"),
@@ -70,6 +83,81 @@ const PATH_MACROS: [(&str, &str); 17] = [
     ("$PATSCONTRIB", "contrib"),
 ];
 
+/// Resolves path macros according to a Postiats installation.
+pub struct PostiatsPaths {
+    root: Option<PathBuf>,
+}
+
+impl PostiatsPaths {
+    fn builtin() -> Self {
+        Self { root: None }
+    }
+
+    /// Resolve package defaults relative to this Postiats distribution.
+    pub fn at(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: Some(root.into()),
+        }
+    }
+
+    fn macro_value(&self, name: &str) -> Option<PathBuf> {
+        let environment = name.strip_prefix('$').unwrap_or(name);
+        if let Some(value) = std::env::var_os(environment) {
+            return Some(PathBuf::from(value));
+        }
+        PATH_MACROS
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .map(|(_, relative)| match &self.root {
+                Some(root) => root.join(relative),
+                None => PathBuf::from(relative),
+            })
+    }
+}
+
+impl SourcePathResolverPort for PostiatsPaths {
+    fn resolve(&self, requested: &str, _from: &Path) -> Result<SourcePathResolution, String> {
+        // ATS permits a backslash-newline inside a quoted path. The lexer has
+        // already erased the newline by this point, leaving `\ `; remove the
+        // continuation and its indentation before interpreting the path.
+        let mut normalized = String::with_capacity(requested.len());
+        let mut chars = requested.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\\' && chars.peek().is_some_and(|next| next.is_whitespace()) {
+                while chars.peek().is_some_and(|next| next.is_whitespace()) {
+                    chars.next();
+                }
+            } else {
+                normalized.push(ch);
+            }
+        }
+
+        let (name, suffix) = if let Some(rest) = normalized.strip_prefix("{$") {
+            let Some(close) = rest.find('}') else {
+                return Err(format!("unterminated path macro in `{requested}`"));
+            };
+            (&rest[..close], &rest[close + 1..])
+        } else if let Some(rest) = normalized.strip_prefix('$') {
+            let end = rest
+                .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .unwrap_or(rest.len());
+            (&rest[..end], &rest[end..])
+        } else {
+            return Ok(SourcePathResolution::Path(PathBuf::from(normalized)));
+        };
+        let name = format!("${}", name.trim_start_matches('$'));
+        let Some(base) = self.macro_value(&name) else {
+            return Ok(if self.root.is_some() {
+                SourcePathResolution::External
+            } else {
+                SourcePathResolution::Path(PathBuf::from(normalized))
+            });
+        };
+        let suffix = suffix.trim_start_matches('/');
+        Ok(SourcePathResolution::Distribution(base.join(suffix)))
+    }
+}
+
 /// Reads `staload`ed units from the file system.
 pub struct FileSources {
     /// The file being compiled.  Its directory is where a `staload` in
@@ -78,6 +166,7 @@ pub struct FileSources {
     /// Extra directories to try, in order, when a path is not found
     /// beside the file that asked for it — the `-I` of this compiler.
     search: Vec<PathBuf>,
+    paths: Box<dyn SourcePathResolverPort>,
 }
 
 impl FileSources {
@@ -86,6 +175,7 @@ impl FileSources {
         Self {
             origin: origin.into(),
             search: Vec::new(),
+            paths: Box::new(PostiatsPaths::builtin()),
         }
     }
 
@@ -95,9 +185,27 @@ impl FileSources {
         self
     }
 
+    /// Read distribution units from `root` instead of answering them solely
+    /// from the built-in prelude.
+    pub fn including_distribution(mut self, root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        self.search.push(root.clone());
+        self.paths = Box::new(PostiatsPaths::at(root));
+        self
+    }
+
+    /// Resolve ATS path expressions with the supplied environment adapter.
+    pub fn resolving_with(mut self, paths: impl SourcePathResolverPort + 'static) -> Self {
+        self.paths = Box::new(paths);
+        self
+    }
+
     /// Every place `requested` might be, in the order to try them:
     /// beside the file that asked, then down the search path.
-    fn candidates(&self, requested: &str, from: &Path) -> Vec<PathBuf> {
+    fn candidates(&self, requested: &Path, from: &Path) -> Vec<PathBuf> {
+        if requested.is_absolute() {
+            return vec![requested.to_path_buf()];
+        }
         let beside = from.parent().unwrap_or(Path::new("."));
         std::iter::once(beside.to_path_buf())
             .chain(self.search.iter().cloned())
@@ -112,29 +220,18 @@ fn is_distribution(requested: &str) -> bool {
     DISTRIBUTION.iter().any(|d| requested.starts_with(d))
 }
 
-/// Substitute the known `{$NAME}` path macros in a staload path.
-///
-/// A macro this compiler does not know is left exactly as it was written,
-/// so an unresolvable path still reports where it looked rather than
-/// pretending to have found a file.
-fn expand_macros(path: &str) -> String {
-    let mut out = path.to_string();
-    for (name, dir) in PATH_MACROS {
-        out = out.replace(&format!("{{{name}}}"), dir);
-    }
-    out
-}
-
 impl SourceLoaderPort for FileSources {
     fn origin(&self) -> PathBuf {
         self.origin.clone()
     }
 
     fn load(&self, requested: &str, from: &Path) -> Result<Option<Unit>, String> {
-        // The `{$NAME}` build macros are expanded first, so a path that
-        // names the distribution through one of them is resolved and
-        // declined exactly as if it had spelled the directory itself.
-        let requested = expand_macros(requested);
+        let resolution = self.paths.resolve(requested, from)?;
+        let (requested, distribution) = match resolution {
+            SourcePathResolution::Path(path) => (path, false),
+            SourcePathResolution::Distribution(path) => (path, true),
+            SourcePathResolution::External => return Ok(None),
+        };
         let tried = self.candidates(&requested, from);
         for path in &tried {
             match std::fs::read_to_string(path) {
@@ -157,11 +254,15 @@ impl SourceLoaderPort for FileSources {
         }
         // Not there — and whether that is a problem depends entirely on
         // who was supposed to provide it.
-        if is_distribution(&requested) {
+        // A distribution path may be logical rather than physical. Corpus
+        // mode reads the real file when one exists, but a miss still falls
+        // back to the built-in prelude instead of becoming a user-path error.
+        if distribution || requested.to_str().is_some_and(is_distribution) {
             return Ok(None);
         }
         Err(format!(
-            "`staload \"{requested}\"` names no file; looked in {}",
+            "`staload \"{}\"` names no file; looked in {}",
+            requested.display(),
             tried
                 .iter()
                 .filter_map(|p| p.parent())
@@ -214,8 +315,23 @@ mod tests {
         let s = Sandbox::new("libc");
         let main = s.write("main.dats", "");
         let loader = FileSources::at(&main);
-        let result = loader.load("libc/SATS/stdio.sats", &main).expect("no error");
+        let result = loader
+            .load("libc/SATS/stdio.sats", &main)
+            .expect("no error");
         assert!(result.is_none(), "a distribution path should be declined");
+    }
+
+    #[test]
+    fn corpus_mode_reads_a_real_distribution_unit() {
+        let s = Sandbox::new("distribution");
+        let main = s.write("examples/main.dats", "");
+        s.write("libats/SATS/thing.sats", "fun thing(): int");
+        let loader = FileSources::at(&main).including_distribution(&s.0);
+        let unit = loader
+            .load("libats/SATS/thing.sats", &main)
+            .expect("no error")
+            .expect("distribution source is loaded");
+        assert_eq!(unit.source, "fun thing(): int");
     }
 
     #[test]
@@ -231,7 +347,10 @@ mod tests {
         let result = loader
             .load("{$EXTSOLVE}/SATS/ilist.sats", &main)
             .expect("no error");
-        assert!(result.is_none(), "a distribution macro path should be declined");
+        assert!(
+            result.is_none(),
+            "a distribution macro path should be declined"
+        );
 
         // A macro this compiler does not know is left as it was written,
         // and still says where it looked when it cannot find a file.
@@ -239,6 +358,50 @@ mod tests {
             .load("{$UNKNOWN_LIB}/SATS/x.sats", &main)
             .expect_err("an unknown macro is not silently dropped");
         assert!(err.contains("names no file"), "got: {err}");
+    }
+
+    #[test]
+    fn corpus_mode_resolves_a_package_macro_to_the_real_distribution_unit() {
+        let s = Sandbox::new("package-macro");
+        let main = s.write("examples/main.dats", "");
+        s.write(
+            "contrib/ATS-extsolve/SATS/patsolve_cnstrnt.sats",
+            "fun solve(): int",
+        );
+        let loader = FileSources::at(&main).including_distribution(&s.0);
+        let unit = loader
+            .load("{$PATSOLVE}/SATS/patsolve_cnstrnt.sats", &main)
+            .expect("resolve package path")
+            .expect("read package source");
+        assert_eq!(unit.source, "fun solve(): int");
+    }
+
+    #[test]
+    fn corpus_mode_treats_an_unknown_build_macro_as_external() {
+        let s = Sandbox::new("external-macro");
+        let main = s.write("examples/main.dats", "");
+        let loader = FileSources::at(&main).including_distribution(&s.0);
+        assert_eq!(
+            loader.load("{$SITE_PACKAGE}/SATS/api.sats", &main),
+            Ok(None)
+        );
+        assert_eq!(
+            loader.load("$PATSHOMELOCS\\ /site-package/api.sats", &main),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_continued_distribution_path_is_normalized_before_searching() {
+        let s = Sandbox::new("continued-path");
+        let main = s.write("examples/main.dats", "");
+        s.write("share/atspre_staload.hats", "fun loaded(): int");
+        let loader = FileSources::at(&main).including_distribution(&s.0);
+        let unit = loader
+            .load("share\\ /atspre_staload.hats", &main)
+            .expect("resolve continued path")
+            .expect("read distribution unit");
+        assert_eq!(unit.source, "fun loaded(): int");
     }
 
     #[test]

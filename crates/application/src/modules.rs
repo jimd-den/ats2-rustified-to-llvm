@@ -30,10 +30,53 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use ats2_domain::ast::Program;
+use ats2_domain::ast::{Def, LoadKind, Program};
 use ats2_domain::errors::CompileError;
 
 use crate::ports::{ParserPort, SourceLoaderPort};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedUnit {
+    pub path: PathBuf,
+    pub program: Program,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyKind {
+    Interface,
+    Implementation,
+    Dynamic,
+    Include,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyEdge {
+    pub from: PathBuf,
+    pub to: PathBuf,
+    pub kind: DependencyKind,
+    pub alias: Option<String>,
+}
+
+/// A module-aware result plus the compatibility projection consumed by the
+/// current checker and emitter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedModules {
+    pub root: PathBuf,
+    pub units: Vec<ResolvedUnit>,
+    pub edges: Vec<DependencyEdge>,
+    pub program: Program,
+}
+
+impl ResolvedModules {
+    pub fn single(program: Program) -> Self {
+        Self {
+            root: PathBuf::new(),
+            units: Vec::new(),
+            edges: Vec::new(),
+            program,
+        }
+    }
+}
 
 /// Every unit `root` needs, followed by `root` itself, as one program.
 ///
@@ -45,17 +88,32 @@ pub fn resolve<P: ParserPort, L: SourceLoaderPort + ?Sized>(
     parser: &P,
     loader: &L,
 ) -> Result<Program, Vec<CompileError>> {
+    resolve_modules(root, parser, loader).map(|resolved| resolved.program)
+}
+
+pub fn resolve_modules<P: ParserPort, L: SourceLoaderPort + ?Sized>(
+    root: Program,
+    parser: &P,
+    loader: &L,
+) -> Result<ResolvedModules, Vec<CompileError>> {
     let origin = loader.origin();
     let mut walk = Walk {
         parser,
         loader,
         loaded: HashSet::new(),
         defs: Vec::new(),
+        units: Vec::new(),
+        edges: Vec::new(),
     };
     walk.dependencies_of(&root, &origin)?;
     let mut defs = walk.defs;
-    defs.extend(root.defs);
-    Ok(Program::new(defs))
+    defs.extend(root.defs.clone());
+    Ok(ResolvedModules {
+        root: origin,
+        units: walk.units,
+        edges: walk.edges,
+        program: Program::new(defs),
+    })
 }
 
 struct Walk<'a, P: ParserPort, L: SourceLoaderPort + ?Sized> {
@@ -65,19 +123,51 @@ struct Walk<'a, P: ParserPort, L: SourceLoaderPort + ?Sized> {
     loaded: HashSet<PathBuf>,
     /// Their definitions, in the order they were finished.
     defs: Vec<ats2_domain::ast::Def>,
+    units: Vec<ResolvedUnit>,
+    edges: Vec<DependencyEdge>,
 }
 
 impl<P: ParserPort, L: SourceLoaderPort + ?Sized> Walk<'_, P, L> {
     /// Fold in everything `program`, which lives at `at`, asked for.
     fn dependencies_of(&mut self, program: &Program, at: &Path) -> Result<(), Vec<CompileError>> {
-        for staload in program.staloads() {
+        let requested = program
+            .staloads()
+            .iter()
+            .map(|load| {
+                (
+                    load.path.as_str(),
+                    Exposure::from(load.kind),
+                    DependencyKind::from(load.kind),
+                    load.alias.clone(),
+                )
+            })
+            .chain(
+                program
+                    .includes()
+                    .iter()
+                    .map(|include| {
+                        (
+                            include.path.as_str(),
+                            Exposure::Definitions,
+                            DependencyKind::Include,
+                            None,
+                        )
+                    }),
+            );
+        for (requested, exposure, kind, alias) in requested {
             let found = self
                 .loader
-                .load(&staload.path, at)
+                .load(requested, at)
                 .map_err(|m| vec![CompileError::target(m)])?;
             // Not one of ours: a path into the ATS distribution, which
             // the built-in prelude already answers.
             let Some(unit) = found else { continue };
+            self.edges.push(DependencyEdge {
+                from: at.to_path_buf(),
+                to: unit.path.clone(),
+                kind,
+                alias,
+            });
             // Already folded in — by a diamond, or by a cycle, and the
             // walk cannot tell the two apart because it does not need
             // to.  Marked before recursing, which is what makes the
@@ -85,17 +175,68 @@ impl<P: ParserPort, L: SourceLoaderPort + ?Sized> Walk<'_, P, L> {
             if !self.loaded.insert(unit.path.clone()) {
                 continue;
             }
-            // A unit this compiler cannot read yet contributes nothing
-            // and is stepped over, not refused: its being unreadable is
-            // a gap in the reader, not a mistake in the program, and
-            // refusing it would take down every file that merely reaches
-            // for the heavy contrib libraries.  Import everything that
-            // *does* parse, and leave the rest alone.
-            let Ok(parsed) = self.parser.parse(&unit.source) else { continue };
+            // Dependency ingestion may preserve declarations before syntax
+            // this compiler cannot read yet.  If even that yields no usable
+            // program, step over the unit rather than refusing every root
+            // that reaches for a heavy contrib library.
+            let Ok(parsed) = self.parser.parse_dependency(&unit.source) else {
+                continue;
+            };
             self.dependencies_of(&parsed, &unit.path)?;
-            self.defs.extend(parsed.defs);
+            self.defs.extend(
+                parsed
+                    .defs
+                    .iter()
+                    .filter(|definition| exposure.keeps(definition))
+                    .cloned(),
+            );
+            self.units.push(ResolvedUnit {
+                path: unit.path,
+                program: parsed,
+            });
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Exposure {
+    Interface,
+    Definitions,
+}
+
+impl From<LoadKind> for Exposure {
+    fn from(kind: LoadKind) -> Self {
+        match kind {
+            LoadKind::Interface => Exposure::Interface,
+            LoadKind::Implementation | LoadKind::Dynamic => Exposure::Definitions,
+        }
+    }
+}
+
+impl From<LoadKind> for DependencyKind {
+    fn from(kind: LoadKind) -> Self {
+        match kind {
+            LoadKind::Interface => DependencyKind::Interface,
+            LoadKind::Implementation => DependencyKind::Implementation,
+            LoadKind::Dynamic => DependencyKind::Dynamic,
+        }
+    }
+}
+
+impl Exposure {
+    fn keeps(self, definition: &Def) -> bool {
+        match self {
+            Exposure::Definitions => true,
+            Exposure::Interface => matches!(
+                definition,
+                Def::Datatype(_)
+                    | Def::Exception(_, _)
+                    | Def::Extern(_)
+                    | Def::Overload { .. }
+                    | Def::Const(_)
+            ),
+        }
     }
 }
 
@@ -177,6 +318,7 @@ mod tests {
                 Some(("staload", path)) => staloads.push(ats2_domain::ast::Staload {
                     path: path.to_string(),
                     alias: None,
+                    kind: ats2_domain::ast::LoadKind::Implementation,
                 }),
                 Some(("fun", name)) => defs.push(Def::Fun(ats2_domain::ast::FunDef {
                     name: name.to_string(),
@@ -228,6 +370,63 @@ mod tests {
     }
 
     #[test]
+    fn an_included_unit_contributes_its_definitions() {
+        let loader = Files::new("main.dats", &[("part.dats", "fun included")]);
+        let root = Program::new(vec![Def::Fun(ats2_domain::ast::FunDef {
+            name: "main".into(),
+            ..fun_shape()
+        })])
+        .including(vec![ats2_domain::ast::Include {
+            path: "part.dats".into(),
+        }]);
+        let program = resolve(root, &RealEnough, &loader).expect("resolve include");
+        assert_eq!(names(&program), ["included", "main"]);
+    }
+
+    #[test]
+    fn resolution_retains_units_and_dependency_edges() {
+        let loader = Files::new("main.dats", &[("part.dats", "fun included")]);
+        let root = Program::new(vec![Def::Fun(ats2_domain::ast::FunDef {
+            name: "main".into(),
+            ..fun_shape()
+        })])
+        .including(vec![ats2_domain::ast::Include {
+            path: "part.dats".into(),
+        }]);
+
+        let resolved = resolve_modules(root, &RealEnough, &loader).expect("resolve graph");
+        assert_eq!(resolved.root, PathBuf::from("main.dats"));
+        assert_eq!(resolved.units.len(), 1);
+        assert_eq!(resolved.units[0].path, PathBuf::from("part.dats"));
+        assert_eq!(resolved.edges.len(), 1);
+        assert_eq!(resolved.edges[0].from, PathBuf::from("main.dats"));
+        assert_eq!(resolved.edges[0].to, PathBuf::from("part.dats"));
+        assert_eq!(resolved.edges[0].kind, DependencyKind::Include);
+    }
+
+    #[test]
+    fn an_interface_exposes_signatures_but_not_runtime_bodies() {
+        let declaration = Def::Extern(ats2_domain::ast::FunDecl {
+            name: "declared".into(),
+            linear: false,
+            proof: false,
+            ty_params: Vec::new(),
+            universals: Vec::new(),
+            existentials: Vec::new(),
+            params: Vec::new(),
+            ret: ats2_domain::ast::Ty::Name("int".into()),
+        });
+        let body = Def::Fun(ats2_domain::ast::FunDef {
+            name: "private_body".into(),
+            ..fun_shape()
+        });
+
+        assert!(Exposure::Interface.keeps(&declaration));
+        assert!(!Exposure::Interface.keeps(&body));
+        assert!(Exposure::Definitions.keeps(&body));
+    }
+
+    #[test]
     fn a_dependency_that_cannot_parse_is_stepped_over_not_fatal() {
         // A program may reach for a unit whose syntax this compiler
         // cannot read yet.  That unit's declarations cannot be imported,
@@ -243,8 +442,14 @@ mod tests {
         )
         .expect("resolve succeeds even when a dependency is unreadable");
         let names = names(&p);
-        assert!(names.contains(&"good".into()), "good is imported, got {names:?}");
-        assert!(names.contains(&"main".into()), "main survives, got {names:?}");
+        assert!(
+            names.contains(&"good".into()),
+            "good is imported, got {names:?}"
+        );
+        assert!(
+            names.contains(&"main".into()),
+            "main survives, got {names:?}"
+        );
     }
 
     #[test]

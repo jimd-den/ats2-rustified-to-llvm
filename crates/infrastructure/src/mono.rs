@@ -289,10 +289,20 @@ impl MonoCtx {
     /// mention of a parameterized datatype into the instance it names.
     fn rewrite_ty(&mut self, ty: &Ty, subst: &Subst) -> Ty {
         let ty = substitute(ty, subst);
+        self.rewrite_substituted_ty(&ty)
+    }
+
+    /// Rewrite a type after simultaneous substitution has already happened.
+    ///
+    /// A replacement is atomic with respect to the substitution that produced
+    /// it. Reapplying that substitution inside the replacement turns
+    /// `{a ↦ (a, b)}` into an infinite `(a, b)` nesting rather than the one
+    /// replacement simultaneous substitution means.
+    fn rewrite_substituted_ty(&mut self, ty: &Ty) -> Ty {
         match &ty {
             Ty::Proof(p, v) => Ty::Proof(
-                Box::new(self.rewrite_ty(p, subst)),
-                Box::new(self.rewrite_ty(v, subst)),
+                Box::new(self.rewrite_substituted_ty(p)),
+                Box::new(self.rewrite_substituted_ty(v)),
             ),
             // `stream(t)` / `stream_vt(t)` — a *suspended* `stream_con(t)`.
             // The suspension is a representation this compiler supplies
@@ -302,12 +312,18 @@ impl MonoCtx {
             Ty::App(name, args)
                 if matches!(name.as_str(), "stream" | "stream_vt" | "lazy" | "llazy") =>
             {
-                let args: Vec<Ty> = args.iter().map(|a| self.rewrite_ty(a, subst)).collect();
+                let args: Vec<Ty> = args
+                    .iter()
+                    .map(|a| self.rewrite_substituted_ty(a))
+                    .collect();
                 let con = self.request_datatype("stream_con", &args);
                 Ty::App(LAZY.into(), vec![Ty::Name(con)])
             }
             Ty::App(name, args) if self.datatypes.contains_key(name) => {
-                let args: Vec<Ty> = args.iter().map(|a| self.rewrite_ty(a, subst)).collect();
+                let args: Vec<Ty> = args
+                    .iter()
+                    .map(|a| self.rewrite_substituted_ty(a))
+                    .collect();
                 Ty::Name(self.request_datatype(name, &args))
             }
             // A parameterized datatype named with no arguments at all
@@ -315,23 +331,30 @@ impl MonoCtx {
             // with a type error that names it.
             Ty::App(name, args) => Ty::App(
                 name.clone(),
-                args.iter().map(|a| self.rewrite_ty(a, subst)).collect(),
+                args.iter()
+                    .map(|a| self.rewrite_substituted_ty(a))
+                    .collect(),
             ),
-            Ty::Tuple(items) => {
-                Ty::Tuple(items.iter().map(|i| self.rewrite_ty(i, subst)).collect())
-            }
+            Ty::Tuple(items) => Ty::Tuple(
+                items
+                    .iter()
+                    .map(|i| self.rewrite_substituted_ty(i))
+                    .collect(),
+            ),
             Ty::Fun(ps, r) => Ty::Fun(
-                ps.iter().map(|p| self.rewrite_ty(p, subst)).collect(),
-                Box::new(self.rewrite_ty(r, subst)),
+                ps.iter().map(|p| self.rewrite_substituted_ty(p)).collect(),
+                Box::new(self.rewrite_substituted_ty(r)),
             ),
-            Ty::Index(base, idx) => Ty::Index(Box::new(self.rewrite_ty(base, subst)), idx.clone()),
+            Ty::Index(base, idx) => {
+                Ty::Index(Box::new(self.rewrite_substituted_ty(base)), idx.clone())
+            }
             Ty::Record(fields) => Ty::Record(
                 fields
                     .iter()
-                    .map(|(n, t)| (n.clone(), self.rewrite_ty(t, subst)))
+                    .map(|(n, t)| (n.clone(), self.rewrite_substituted_ty(t)))
                     .collect(),
             ),
-            Ty::Name(_) => ty,
+            Ty::Name(_) => ty.clone(),
         }
     }
 
@@ -561,10 +584,18 @@ impl MonoCtx {
                     .map(|a| self.rewrite(a, subst))
                     .collect::<Result<_, _>>()?,
             ),
-            Expr::ExtVal { ty, name, args, via_ptr } => Expr::ExtVal {
+            Expr::ExtVal {
+                ty,
+                name,
+                args,
+                via_ptr,
+            } => Expr::ExtVal {
                 ty: ty.clone(),
                 name: name.clone(),
-                args: args.iter().map(|a| self.rewrite(a, subst)).collect::<Result<_, _>>()?,
+                args: args
+                    .iter()
+                    .map(|a| self.rewrite(a, subst))
+                    .collect::<Result<_, _>>()?,
                 via_ptr: *via_ptr,
             },
             Expr::MacroCall(name, args) => Expr::MacroCall(
@@ -714,5 +745,50 @@ fn type_key(ty: &Ty) -> String {
         // Two instances that differ only in a static index share one
         // machine representation, so they share one instance.
         Ty::Index(base, _) => type_key(base),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_substitution_is_not_reapplied_inside_its_replacement() {
+        let mut datatypes = HashMap::new();
+        datatypes.insert(
+            "stream_con".into(),
+            DatatypeDef {
+                linear: false,
+                name: "stream_con".into(),
+                ty_params: vec!["a".into()],
+                ctors: Vec::new(),
+            },
+        );
+        let mut ctx = MonoCtx {
+            templates: HashMap::new(),
+            datatypes,
+            queued: HashSet::new(),
+            work: VecDeque::new(),
+            dqueued: HashSet::new(),
+            dwork: VecDeque::new(),
+            out: Vec::new(),
+        };
+        let replacement = Ty::Tuple(vec![Ty::Name("a".into()), Ty::Name("b".into())]);
+        let subst = HashMap::from([("a".into(), replacement.clone())]);
+
+        let rewritten = ctx.rewrite_ty(
+            &Ty::App("stream".into(), vec![Ty::Name("a".into())]),
+            &subst,
+        );
+
+        assert_eq!(
+            rewritten,
+            Ty::App(LAZY.into(), vec![Ty::Name("stream_con$tup_a_b".into())])
+        );
+        assert_eq!(
+            ctx.dwork.pop_front(),
+            Some(("stream_con".into(), vec![replacement]))
+        );
+        assert!(ctx.dwork.is_empty());
     }
 }

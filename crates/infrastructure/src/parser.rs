@@ -1,6 +1,6 @@
 use ats2_domain::ast::{
-    BinOp, ConstDef, Ctor, DatatypeDef, Def, Expr, FunDecl, FunDef, ImplementDef, LetBind, Param,
-    Pattern, Program, Staload, Ty, ValDef,
+    BinOp, ConstDef, Ctor, DatatypeDef, Def, Expr, FunDecl, FunDef, ImplementDef, Include, LetBind,
+    Param, Pattern, Program, Staload, Ty, ValDef,
 };
 use ats2_domain::errors::CompileError;
 use ats2_domain::statics::{Quant, SExp, Sort};
@@ -22,6 +22,14 @@ impl Parser {
         Self::parse_tokens(&tokens)
     }
 
+    /// Parse a dependency while retaining complete declarations before the
+    /// first unsupported top-level form.  Lexing remains strict because no
+    /// trustworthy token prefix exists when tokenization itself fails.
+    pub fn parse_dependency(source: &str) -> Result<Program, Vec<CompileError>> {
+        let tokens = Lexer::lex(source)?;
+        Self::parse_dependency_tokens(&tokens)
+    }
+
     /// Parse a token stream (e.g. one produced by the lexer in tests).
     pub fn parse_tokens(tokens: &[Token]) -> Result<Program, Vec<CompileError>> {
         if tokens.is_empty() {
@@ -31,23 +39,19 @@ impl Parser {
                 "empty token stream (missing EOF)",
             )]);
         }
-        let mut ctx = ParseCtx {
-            tokens,
-            pos: 0,
-            macros: HashMap::new(),
-            typedefs: HashMap::new(),
-            pending: Vec::new(),
-            staloads: Vec::new(),
-            gensym: 0,
-            type_vars: Vec::new(),
-            macro_funs: HashMap::new(),
-            macro_depth: 0,
-            cons_name: "cons".into(),
-            renames: HashMap::new(),
-            typedef_families: HashMap::new(),
-            props: HashSet::new(),
-        };
+        let mut ctx = ParseCtx::new(tokens);
         ctx.parse_program()
+    }
+
+    fn parse_dependency_tokens(tokens: &[Token]) -> Result<Program, Vec<CompileError>> {
+        if tokens.is_empty() {
+            let span = Span::new(Pos::new(1, 1, 0), Pos::new(1, 1, 0));
+            return Err(vec![CompileError::parse(
+                span,
+                "empty token stream (missing EOF)",
+            )]);
+        }
+        Ok(ParseCtx::new(tokens).parse_available_program())
     }
 }
 
@@ -120,6 +124,16 @@ fn is_skippable_directive(word: &str) -> bool {
             | "withvtype"
             | "reassume"
     )
+}
+
+fn load_kind(path: &str, dynamic: bool, anonymous: bool) -> ats2_domain::ast::LoadKind {
+    if dynamic {
+        ats2_domain::ast::LoadKind::Dynamic
+    } else if anonymous || !path.ends_with(".sats") {
+        ats2_domain::ast::LoadKind::Implementation
+    } else {
+        ats2_domain::ast::LoadKind::Interface
+    }
 }
 
 /// Whether a name is a variance annotation rather than a type former.
@@ -196,7 +210,12 @@ fn splice_macro_args(expr: &Expr, params: &[String], args: &[Expr]) -> Expr {
         E::BinOp(op, l, r) => E::BinOp(*op, Box::new(sub(l)), Box::new(sub(r))),
         E::TupleLit(items) => E::TupleLit(items.iter().map(sub).collect()),
         E::Call(c, items) => E::Call(Box::new(sub(c)), items.iter().map(sub).collect()),
-        E::ExtVal { ty, name, args, via_ptr } => E::ExtVal {
+        E::ExtVal {
+            ty,
+            name,
+            args,
+            via_ptr,
+        } => E::ExtVal {
             ty: ty.clone(),
             name: name.clone(),
             args: args.iter().map(sub).collect(),
@@ -477,6 +496,8 @@ struct ParseCtx<'a> {
     /// other units this one needs, and answering them is somebody
     /// else's job — the parser reads one file and has no filesystem.
     staloads: Vec<Staload>,
+    /// Every `#include` this file wrote, in source order.
+    includes: Vec<Include>,
     /// A counter for names the parser invents, so a desugaring can bind
     /// a temporary without any chance of shadowing the source's own.
     gensym: usize,
@@ -495,6 +516,12 @@ struct ParseCtx<'a> {
     /// proposition collapses to the bare name `FACT`, which every
     /// derivation proves equally well.
     props: HashSet<String>,
+    /// Runtime datatype names declared in this unit.
+    ///
+    /// A signature may write `(tree, int)` with types alone and no parameter
+    /// names, so datatype declarations participate in the same name lookup as
+    /// aliases and built-ins.
+    datatypes: HashSet<String>,
     /// `#define cons stream_vt_cons` — one name standing for another.
     ///
     /// Distinct from `macros`, which maps a name to an *expression*: a
@@ -531,7 +558,28 @@ struct ParseCtx<'a> {
     macro_depth: usize,
 }
 
-impl ParseCtx<'_> {
+impl<'a> ParseCtx<'a> {
+    fn new(tokens: &'a [Token]) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            macros: HashMap::new(),
+            typedefs: HashMap::new(),
+            pending: Vec::new(),
+            staloads: Vec::new(),
+            includes: Vec::new(),
+            gensym: 0,
+            type_vars: Vec::new(),
+            macro_funs: HashMap::new(),
+            macro_depth: 0,
+            cons_name: "cons".into(),
+            renames: HashMap::new(),
+            typedef_families: HashMap::new(),
+            props: HashSet::new(),
+            datatypes: HashSet::new(),
+        }
+    }
+
     // --- cursor primitives -----------------------------------------
 
     fn peek(&self) -> &Token {
@@ -583,9 +631,45 @@ impl ParseCtx<'_> {
         while !self.at(&TokenKind::Eof) {
             self.parse_toplevel(&mut defs).map_err(|e| vec![e])?;
         }
+        Ok(self.finish_program(defs))
+    }
+
+    fn parse_available_program(&mut self) -> Program {
+        self.precollect_type_aliases();
+        let mut defs = Vec::new();
+        while !self.at(&TokenKind::Eof) {
+            let start = self.pos;
+            if self.parse_toplevel(&mut defs).is_err() {
+                self.recover_after_toplevel_error(start);
+            }
+        }
+        self.finish_program(defs)
+    }
+
+    /// Resume dependency parsing at the next source-level line.
+    ///
+    /// A failed top-level reader may have consumed tokens from the following
+    /// declaration while trying to complete the unsupported one. Recovery
+    /// therefore starts from the declaration's original position, not from
+    /// the parser's current cursor. Root parsing never calls this: a source
+    /// being compiled remains strict, while dependencies expose every usable
+    /// declaration they contain.
+    fn recover_after_toplevel_error(&mut self, failed_at: usize) {
+        let failed_line = self.tokens[failed_at].span.start.line;
+        self.pos = (failed_at + 1..self.tokens.len())
+            .find(|&i| {
+                let start = self.tokens[i].span.start;
+                start.line > failed_line && start.column == 1
+            })
+            .unwrap_or(self.tokens.len() - 1);
+    }
+
+    fn finish_program(&mut self, mut defs: Vec<Def>) -> Program {
         // Declarations found inside bodies join the program's own.
         defs.extend(std::mem::take(&mut self.pending));
-        Ok(Program::new(defs).asking_for(std::mem::take(&mut self.staloads)))
+        Program::new(defs)
+            .asking_for(std::mem::take(&mut self.staloads))
+            .including(std::mem::take(&mut self.includes))
     }
 
     /// Find every type alias in the file before parsing any of it.
@@ -662,6 +746,7 @@ impl ParseCtx<'_> {
             // `vtypedef` names a *linear* type.  Linearity is a
             // question for a type checker, and the naming works exactly
             // as `typedef`'s does, so the two share a path.
+            TokenKind::Ident(w) if w == "where" => self.parse_where_type_alias(),
             TokenKind::Ident(w) if w == "typedef" || w == "vtypedef" => {
                 if !self.parse_typedef() {
                     self.skip_directive();
@@ -676,18 +761,18 @@ impl ParseCtx<'_> {
             // only place that can.
             TokenKind::Ident(w) if w == "datavtype" => {
                 self.advance(); // `datavtype`
-                // `datavtype` — a datatype whose values are *resources*.
+                                // `datavtype` — a datatype whose values are *resources*.
                 out.push(self.parse_datatype_body(true)?);
                 Ok(())
             }
             TokenKind::Val => {
                 self.advance(); // `val`
-                // `val rec a = ... and b = ...` — a chain of bindings
-                // that may mention each other, which is how mutually
-                // recursive lazy values are written.  The recursion is
-                // in the *values*: each initializer runs in source
-                // order, and one that only *mentions* its siblings (as
-                // a `$delay` body does) needs nothing from them yet.
+                                // `val rec a = ... and b = ...` — a chain of bindings
+                                // that may mention each other, which is how mutually
+                                // recursive lazy values are written.  The recursion is
+                                // in the *values*: each initializer runs in source
+                                // order, and one that only *mentions* its siblings (as
+                                // a `$delay` body does) needs nothing from them yet.
                 let rec_form = matches!(&self.peek().kind, TokenKind::Ident(w) if w == "rec");
                 if rec_form {
                     self.advance(); // `rec`
@@ -817,6 +902,12 @@ impl ParseCtx<'_> {
                         return Ok(());
                     }
                 }
+                if self.at(&TokenKind::Val) {
+                    if let Ok(decl) = self.parse_extern_val_decl() {
+                        out.push(Def::Extern(decl));
+                        return Ok(());
+                    }
+                }
                 // The declaration did not parse, so it goes back to being
                 // ignored.  Skipping must step over the `fun` it owns,
                 // or the scan would stop on it and try to read the
@@ -856,7 +947,7 @@ impl ParseCtx<'_> {
             // compiler does not implement; these two speak to where the
             // rest of the program is, which is a question it can answer.
             TokenKind::Ident(name) if name == "staload" || name == "dynload" => {
-                if let Some(s) = self.read_staload() {
+                if let Some(s) = self.read_staload(name == "dynload") {
                     self.staloads.push(s);
                 }
                 self.skip_directive();
@@ -949,10 +1040,19 @@ impl ParseCtx<'_> {
         // dependency every bit as much as the unpragmatic form's is, so
         // it is written down here; the rest of the line is still skipped.
         if word == "staload" || word == "dynload" {
-            if let Some(s) = self.read_staload_after_keyword() {
+            if let Some(s) = self.read_staload_after_keyword(word == "dynload") {
                 self.staloads.push(s);
             }
             self.skip_directive();
+            return Ok(());
+        }
+        if word == "include" {
+            if let TokenKind::StrLit(path) = self.peek().kind.clone() {
+                self.includes.push(Include { path });
+                self.advance();
+            } else {
+                self.skip_directive();
+            }
             return Ok(());
         }
         if word != "define" {
@@ -1026,15 +1126,19 @@ impl ParseCtx<'_> {
     /// `staload` has spellings this compiler has never met, and the
     /// established answer to one of those is to skip the line, not to
     /// refuse the file.
-    fn read_staload(&self) -> Option<Staload> {
+    fn read_staload(&self, dynamic: bool) -> Option<Staload> {
         let mut at = self.pos + 1;
         let mut alias = None;
+        let mut anonymous = false;
         // `H =` or `_ =`, if either is there.
         if matches!(self.nth(at + 1), Some(TokenKind::Eq)) {
             alias = match self.nth(at) {
                 Some(TokenKind::Ident(name)) => Some(name.clone()),
                 // `_` names nothing, which is the whole point of it.
-                Some(TokenKind::Underscore) => None,
+                Some(TokenKind::Underscore) => {
+                    anonymous = true;
+                    None
+                }
                 _ => return None,
             };
             at += 2;
@@ -1043,6 +1147,7 @@ impl ParseCtx<'_> {
             Some(TokenKind::StrLit(path)) => Some(Staload {
                 path: path.clone(),
                 alias,
+                kind: load_kind(path, dynamic, anonymous),
             }),
             _ => None,
         }
@@ -1055,13 +1160,17 @@ impl ParseCtx<'_> {
     /// offset of the first token that can begin the path or alias.
     ///
     /// `#staload H = "path"` / `#staload "path"` / `#dynload "path"`.
-    fn read_staload_after_keyword(&self) -> Option<Staload> {
+    fn read_staload_after_keyword(&self, dynamic: bool) -> Option<Staload> {
         let mut at = self.pos;
         let mut alias = None;
+        let mut anonymous = false;
         if matches!(self.nth(at + 1), Some(TokenKind::Eq)) {
             alias = match self.nth(at) {
                 Some(TokenKind::Ident(name)) => Some(name.clone()),
-                Some(TokenKind::Underscore) => None,
+                Some(TokenKind::Underscore) => {
+                    anonymous = true;
+                    None
+                }
                 _ => return None,
             };
             at += 2;
@@ -1070,6 +1179,7 @@ impl ParseCtx<'_> {
             Some(TokenKind::StrLit(path)) => Some(Staload {
                 path: path.clone(),
                 alias,
+                kind: load_kind(path, dynamic, anonymous),
             }),
             _ => None,
         }
@@ -1148,6 +1258,7 @@ impl ParseCtx<'_> {
     /// field written `bintree a` applies the datatype to `a`.
     fn parse_datatype_body(&mut self, linear: bool) -> Result<Def, CompileError> {
         let name = self.expect_ident("expected a datatype name")?;
+        self.datatypes.insert(name.clone());
         let ty_params = self.parse_optional_type_params()?;
         let scope = self.push_type_vars(&ty_params);
         let def = (|| {
@@ -1305,14 +1416,23 @@ impl ParseCtx<'_> {
         // parser cares about; what differs is who reads the result.
         let proof = self.at_proof_keyword();
         self.advance(); // `fun` / `fn` / `praxi` / `prfun`
-        // `fun{a:t@ype} f (...)` — the template parameters precede the
-        // name.  They are the *sorts* a template abstracts over, so
-        // unlike the other static annotations they are kept.
-        let ty_params = self.parse_template_params();
+                        // `fun{a:t@ype} f (...)` — the template parameters precede the
+                        // name.  They are the *sorts* a template abstracts over, so
+                        // unlike the other static annotations they are kept.
+        let mut ty_params = self.parse_template_params();
         let name = self.expect_ident("expected a function name")?;
         // `{n:nat}` / `{a:t@ype}` — the dependent half of the signature,
         // and `.<n>.` — the half that says it terminates.
         let (universals, metric) = self.parse_quantifiers_and_metric();
+        for (name, _) in universals
+            .iter()
+            .flat_map(|quantifier| &quantifier.vars)
+            .filter(|(_, sort)| *sort == Sort::Type)
+        {
+            if !ty_params.contains(name) {
+                ty_params.push(name.clone());
+            }
+        }
         // The template's parameters are in scope for its own signature
         // and body, so `bintree a` in either place applies `bintree`.
         let scope = self.push_type_vars(&ty_params);
@@ -1426,7 +1546,10 @@ impl ParseCtx<'_> {
     /// binding (an external name), as opposed to a real body.
     fn is_string_binding(&self) -> bool {
         self.at(&TokenKind::Eq)
-            && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::StrLit(_)))
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                Some(TokenKind::StrLit(_))
+            )
     }
 
     fn at_external_binding(&self) -> bool {
@@ -1604,12 +1727,21 @@ impl ParseCtx<'_> {
         // emitter never sees it.
         let proof = self.at_proof_keyword();
         self.advance(); // `fun` / `fn` / `praxi` / `prfun`
-        let ty_params = self.parse_template_params();
+        let mut ty_params = self.parse_template_params();
         let name = self.expect_ident("expected a function name")?;
         // `{n:nat}` — a declaration's quantifiers say exactly what a
         // definition's do, and skipping them here left the corpus's
         // `extern fun`s promising nothing at all.
         let universals = self.parse_quantifiers();
+        for (name, _) in universals
+            .iter()
+            .flat_map(|quantifier| &quantifier.vars)
+            .filter(|(_, sort)| *sort == Sort::Type)
+        {
+            if !ty_params.contains(name) {
+                ty_params.push(name.clone());
+            }
+        }
         // As with a `fun`, the template's parameters are in scope for
         // the signature being declared.
         let scope = self.push_type_vars(&ty_params);
@@ -1661,39 +1793,69 @@ impl ParseCtx<'_> {
         })
     }
 
-/// A curried function type, split back into a parameter list and a
-/// return type.
-///
-/// `int -> int` declares one parameter of `int` returning `int`.  A
-/// colon-form signature (`fun abs_int0 : int -<fun> int`) writes the
-/// whole function as one type, and an `implement` that fills it in gives
-/// the parameter a name; the two have to agree on how many there are.
-fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
-    let mut params = Vec::new();
-    let mut cur = ty;
-    loop {
-        match cur {
-            Ty::Fun(args, ret) => {
-                for a in args {
-                    params.push(Param {
-                        name: "_".into(),
-                        ty: a,
-                        borrowed: false,
-                    });
+    /// `extern val f: (a, b) -> c` is ATS's value-level spelling of a
+    /// function declaration. The implementation still uses
+    /// `implement f (x, y) = ...`, so normalize it to the same `FunDecl`
+    /// consumed by elaboration as `extern fun f (x: a, y: b): c`.
+    fn parse_extern_val_decl(&mut self) -> Result<FunDecl, CompileError> {
+        self.advance(); // `val`
+        let name = self.expect_ident("expected an external value name")?;
+        self.expect(
+            &TokenKind::Colon,
+            "expected `:` after the external value name",
+        )?;
+        self.skip_effect_annotation();
+        let whole = self.parse_type()?;
+        self.skip_static_annotations();
+        let (params, ret) = Self::split_curried(whole);
+        if params.is_empty() {
+            return Err(self.error_here("external value is not a function"));
+        }
+        Ok(FunDecl {
+            name,
+            linear: false,
+            proof: false,
+            ty_params: Vec::new(),
+            universals: Vec::new(),
+            existentials: Vec::new(),
+            params,
+            ret,
+        })
+    }
+
+    /// A curried function type, split back into a parameter list and a
+    /// return type.
+    ///
+    /// `int -> int` declares one parameter of `int` returning `int`.  A
+    /// colon-form signature (`fun abs_int0 : int -<fun> int`) writes the
+    /// whole function as one type, and an `implement` that fills it in gives
+    /// the parameter a name; the two have to agree on how many there are.
+    fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
+        let mut params = Vec::new();
+        let mut cur = ty;
+        loop {
+            match cur {
+                Ty::Fun(args, ret) => {
+                    for a in args {
+                        params.push(Param {
+                            name: "_".into(),
+                            ty: a,
+                            borrowed: false,
+                        });
+                    }
+                    cur = *ret;
                 }
-                cur = *ret;
+                other => return (params, other),
             }
-            other => return (params, other),
         }
     }
-}
 
     fn parse_implement_def(&mut self) -> Result<Def, CompileError> {
         self.advance(); // `implement`
-        // `implement(a) f<a> (x) = ...` — ATS lets a template's
-        // parameters be written in parentheses in front of the name as
-        // readily as in braces.  Nothing else can follow `implement`
-        // with a `(`, so the two spellings never compete.
+                        // `implement(a) f<a> (x) = ...` — ATS lets a template's
+                        // parameters be written in parentheses in front of the name as
+                        // readily as in braces.  Nothing else can follow `implement`
+                        // with a `(`, so the two spellings never compete.
         let mut ty_params = Vec::new();
         if self.at(&TokenKind::LParen) {
             self.advance();
@@ -2068,10 +2230,44 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
             self.pos = save;
             return None;
         };
-        let vars: Vec<(String, Sort)> = names
+        let mut vars: Vec<(String, Sort)> = names
             .into_iter()
             .map(|n| (n, Sort::from_name(&sort)))
             .collect();
+        // `{a:t0p;b:vt0p}` — several binder groups may share one pair of
+        // braces, separated by semicolons. Semicolons after `|` still join
+        // guard conjuncts and are handled below.
+        while self.at(&TokenKind::Semicolon) {
+            self.advance();
+            let mut names = Vec::new();
+            loop {
+                let TokenKind::Ident(name) = self.peek().kind.clone() else {
+                    self.pos = save;
+                    return None;
+                };
+                self.advance();
+                names.push(name);
+                if self.at(&TokenKind::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            if !self.at(&TokenKind::Colon) {
+                self.pos = save;
+                return None;
+            }
+            self.advance();
+            let Some(sort) = self.parse_sort_name() else {
+                self.pos = save;
+                return None;
+            };
+            vars.extend(
+                names
+                    .into_iter()
+                    .map(|name| (name, Sort::from_name(&sort))),
+            );
+        }
         // `{i,j:nat | i <= j+1; i+j == n-1}` — ATS writes a conjunction
         // of claims with semicolons, and this is how every loop
         // invariant in the corpus is spelled.  Reading only the first
@@ -2570,6 +2766,7 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
             || self.type_vars.iter().any(|t| t == name)
             || self.typedefs.contains_key(name)
             || self.typedef_families.contains_key(name)
+            || self.datatypes.contains(name)
     }
 
     fn parse_one_param_list(&mut self, allow_untyped: bool) -> Result<Vec<Param>, CompileError> {
@@ -2853,6 +3050,8 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
             // changing it, so — like `&` and `!` — they are transparent.
             if is_variance_annotation(&name) && args.len() == 1 {
                 args.into_iter().next().expect("one argument")
+            } else if let Some(expanded) = crate::prelude::expand_type_alias(&name, &args) {
+                expanded
             } else if self.typedef_families.contains_key(&name) {
                 // A parameterized alias means its body with the
                 // arguments substituted in.  Expanding here, as the name
@@ -3543,15 +3742,9 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
             TokenKind::Ident(name) if name == "$extval" || name == "$extfcall" => {
                 let via_ptr = name == "$extfcall";
                 self.advance(); // the name
-                self.expect(
-                    &TokenKind::LParen,
-                    "expected `(` after the external name",
-                )?;
+                self.expect(&TokenKind::LParen, "expected `(` after the external name")?;
                 let ty = self.parse_type()?;
-                self.expect(
-                    &TokenKind::Comma,
-                    "expected `,` after the external type",
-                )?;
+                self.expect(&TokenKind::Comma, "expected `,` after the external type")?;
                 let span = self.peek().span;
                 let TokenKind::StrLit(raw) = self.peek().kind.clone() else {
                     return Err(self.error_here("expected the C name as a string literal"));
@@ -3570,10 +3763,7 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
                         }
                     }
                 }
-                self.expect(
-                    &TokenKind::RParen,
-                    "expected `)` after the external call",
-                )?;
+                self.expect(&TokenKind::RParen, "expected `)` after the external call")?;
                 Ok(Expr::ExtVal {
                     ty,
                     name,
@@ -4031,9 +4221,10 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
                     Def::Extern(_) => {}
                     // Anything else cannot come from a function
                     // definition, so it is not a shape this run can hold.
-                    _ => return Err(self.error_here(
-                        "expected a function definition in the recursive group",
-                    )),
+                    _ => {
+                        return Err(self
+                            .error_here("expected a function definition in the recursive group"));
+                    }
                 }
                 continue;
             }
@@ -4316,6 +4507,20 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
         true
     }
 
+    /// `where xs = List0(x)` following a datatype declaration.
+    ///
+    /// ATS scopes this alias over the declaration group. The flattened
+    /// compiler namespace retains it as an ordinary type alias so subsequent
+    /// signatures still see the intended type.
+    fn parse_where_type_alias(&mut self) -> Result<(), CompileError> {
+        self.advance(); // `where`
+        let name = self.expect_ident("expected a type name after `where`")?;
+        self.expect(&TokenKind::Eq, "expected `=` in the `where` type alias")?;
+        let ty = self.parse_type()?;
+        self.typedefs.insert(name, ty);
+        Ok(())
+    }
+
     /// `abstype point` with no `= t`.  An abstract type whose
     /// representation is not given is opaque: its values are boxed.  It
     /// is registered as the unnamed type, so the emitter lowers any use
@@ -4376,7 +4581,8 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
         // `typedef key = string and itm = symbol` chains several aliases;
         // the `and` is the chain, not a function's mutual-recursion word.
         loop {
-            let Some(TokenKind::Ident(name)) = self.tokens.get(self.pos).map(|t| t.kind.clone()) else {
+            let Some(TokenKind::Ident(name)) = self.tokens.get(self.pos).map(|t| t.kind.clone())
+            else {
                 self.pos = start;
                 return false;
             };
@@ -4439,7 +4645,6 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
         }
     }
 
-
     /// Whether the cursor rests on `abst @ ype` — the abstract linear
     /// type form, which the lexer cuts apart at the `@` into three
     /// tokens.  Rejoining them reads like `abstype`, the boxed form;
@@ -4456,10 +4661,16 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
         if !is_prefix {
             return false;
         }
-        if !matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::At)) {
+        if !matches!(
+            self.tokens.get(self.pos + 1).map(|t| &t.kind),
+            Some(TokenKind::At)
+        ) {
             return false;
         }
-        matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind), Some(TokenKind::Ident(_)))
+        matches!(
+            self.tokens.get(self.pos + 2).map(|t| &t.kind),
+            Some(TokenKind::Ident(_))
+        )
     }
 
     /// Read `abst @ ype name = type` as a type alias.  The three keyword
@@ -4479,7 +4690,6 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
         }
         true
     }
-
 
     /// `macdef name = expr` — bind a name to an expression.
     ///
@@ -4589,7 +4799,10 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
                         }
                     }
                     if self
-                        .expect(&TokenKind::RParen, "expected `)` after the exception fields")
+                        .expect(
+                            &TokenKind::RParen,
+                            "expected `)` after the exception fields",
+                        )
                         .is_err()
                     {
                         return Vec::new();
@@ -4947,8 +5160,7 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
                     && matches!(
                         self.tokens.get(self.pos + 1).map(|t| &t.kind),
                         Some(TokenKind::Ident(_))
-                    )
-                {
+                    ) {
                     self.advance(); // `.`
                     self.expect_ident("expected a constructor name")?
                 } else {
@@ -4992,7 +5204,7 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
     /// `while (cond) body`.
     fn parse_while(&mut self) -> Result<Expr, CompileError> {
         self.advance(); // `while`
-        // `while*` introduces loop invariants for the type checker.
+                        // `while*` introduces loop invariants for the type checker.
         self.skip_static_annotations();
         self.expect(&TokenKind::LParen, "expected `(` after `while`")?;
         let cond = self.parse_expr(0)?;
@@ -5035,9 +5247,9 @@ fn split_curried(ty: Ty) -> (Vec<Param>, Ty) {
     /// and dropped.
     fn parse_lam(&mut self) -> Result<Expr, CompileError> {
         self.advance(); // `lam` / `llam`
-        // `lam x => e`: a single parameter may drop its parentheses, and
-        // an annotation is optional throughout — a lambda always sits in
-        // a context that says what it is, so inference can finish the job.
+                        // `lam x => e`: a single parameter may drop its parentheses, and
+                        // an annotation is optional throughout — a lambda always sits in
+                        // a context that says what it is, so inference can finish the job.
         let params = if self.at(&TokenKind::LParen) {
             self.parse_params_maybe_untyped(true)?
         } else {
@@ -5269,6 +5481,40 @@ mod tests {
         assert_eq!(err.message(), "expected a definition");
     }
 
+    #[test]
+    fn dependency_parsing_keeps_declarations_before_an_unsupported_form() {
+        let source = "extern fun declared(): int\nimplement";
+        assert!(Parser::parse(source).is_err(), "root parsing stays strict");
+
+        let program = Parser::parse_dependency(source).expect("dependency parse");
+        assert_eq!(program.defs().len(), 1);
+        let Def::Extern(declaration) = &program.defs()[0] else {
+            panic!("expected the available declaration")
+        };
+        assert_eq!(declaration.name, "declared");
+    }
+
+    #[test]
+    fn dependency_parsing_recovers_declarations_after_an_unsupported_form() {
+        let source = "\
+extern fun before(): int
+implement
+extern fun after(): int
+";
+        assert!(Parser::parse(source).is_err(), "root parsing stays strict");
+
+        let program = Parser::parse_dependency(source).expect("dependency parse");
+        let names: Vec<&str> = program
+            .defs()
+            .iter()
+            .filter_map(|def| match def {
+                Def::Extern(declaration) => Some(declaration.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["before", "after"]);
+    }
+
     // --- datatypes -------------------------------------------------
 
     #[test]
@@ -5357,11 +5603,58 @@ mod tests {
     // --- `staload`, recorded rather than forgotten -----------------
 
     #[test]
+    fn an_include_records_a_source_dependency() {
+        let p = Parser::parse("#include \"parts/body.dats\"\nfun f(): int = 1").expect("parse");
+        assert_eq!(p.includes().len(), 1);
+        assert_eq!(p.includes()[0].path, "parts/body.dats");
+        assert_eq!(p.defs().len(), 1);
+    }
+
+    #[test]
+    fn an_include_inside_local_stops_before_in() {
+        let p =
+            Parser::parse("local\n#include \"parts/body.dats\"\nin\nfun public(): int = 1\nend")
+                .expect("parse");
+        assert_eq!(p.includes()[0].path, "parts/body.dats");
+        assert_eq!(p.defs().len(), 1);
+    }
+
+    #[test]
+    fn a_datatype_where_alias_is_available_to_following_signatures() {
+        let p = Parser::parse(
+            "datatype tree = Leaf | Node of treelst\n\
+             where treelst = List0(tree)\n\
+             fun children(x: tree): treelst",
+        )
+        .expect("parse");
+        let Def::Extern(children) = &p.defs()[1] else {
+            panic!("expected the following signature");
+        };
+        assert_eq!(
+            children.ret,
+            Ty::App("list0".into(), vec![Ty::Name("tree".into())])
+        );
+    }
+
+    #[test]
+    fn a_declared_datatype_may_be_a_bare_signature_parameter() {
+        let p = Parser::parse("datatype token = Tok\nfun consume(token): void").expect("parse");
+        let Def::Extern(consume) = &p.defs()[1] else {
+            panic!("expected the signature");
+        };
+        assert_eq!(consume.params[0].ty, Ty::Name("token".into()));
+    }
+
+    #[test]
     fn a_staload_says_which_file_it_wants() {
         let p = Parser::parse("staload \"helper.sats\"\nfun f(): int = 1").expect("parse");
         assert_eq!(p.staloads().len(), 1, "{:?}", p.staloads());
         assert_eq!(p.staloads()[0].path, "helper.sats");
         assert_eq!(p.staloads()[0].alias, None);
+        assert_eq!(
+            p.staloads()[0].kind,
+            ats2_domain::ast::LoadKind::Interface
+        );
         // Recording it must not stop the rest of the file parsing.
         assert_eq!(p.defs().len(), 1);
     }
@@ -5388,6 +5681,10 @@ mod tests {
             assert_eq!(p.staloads().len(), 1, "{src:?} -> {:?}", p.staloads());
             assert_eq!(p.staloads()[0].path, "x.dats", "{src:?}");
             assert_eq!(p.staloads()[0].alias, None, "{src:?}");
+            assert_eq!(
+                p.staloads()[0].kind,
+                ats2_domain::ast::LoadKind::Implementation
+            );
         }
     }
 
@@ -5396,6 +5693,7 @@ mod tests {
         let p = Parser::parse("dynload \"x.dats\"\nfun f(): int = 1").expect("parse");
         assert_eq!(p.staloads().len(), 1, "{:?}", p.staloads());
         assert_eq!(p.staloads()[0].path, "x.dats");
+        assert_eq!(p.staloads()[0].kind, ats2_domain::ast::LoadKind::Dynamic);
     }
 
     #[test]
@@ -5491,10 +5789,9 @@ mod tests {
         // constructor whose index variables are declared in braces before
         // its name.  The quantifier is static, so it is skipped and the
         // constructor read, with its fields.
-        let p = Parser::parse(
-            "datatype btree(a) = BTleaf | {n:nat} BTnode (a, n) of (int(n), a)\n",
-        )
-        .expect("parse");
+        let p =
+            Parser::parse("datatype btree(a) = BTleaf | {n:nat} BTnode (a, n) of (int(n), a)\n")
+                .expect("parse");
         let Def::Datatype(d) = &p.defs()[0] else {
             panic!("got {:?}", &p.defs()[0])
         };
@@ -5529,10 +5826,8 @@ mod tests {
         // parameter by its type alone, with no variable name.  A bare
         // `int` here is a parameter of type int, not an unannotated
         // variable.
-        let p = Parser::parse(
-            "extern fun list0_remove_at_exn (list0(a), int): list0(a)\n",
-        )
-        .expect("parse");
+        let p = Parser::parse("extern fun list0_remove_at_exn (list0(a), int): list0(a)\n")
+            .expect("parse");
         let Def::Extern(d) = &p.defs()[0] else {
             panic!("expected an extern")
         };
@@ -5752,15 +6047,12 @@ mod tests {
         // `x % 3` — the `%` that opens an inline-C block when it is
         // followed by `{` is the modulo operator when used as a binary
         // infix, sharing `mod`'s precedence.
-        let Expr::BinOp(BinOp::Mod, a, b) =
-            body_of("fun f(x: int): int = x % 3")
-        else {
+        let Expr::BinOp(BinOp::Mod, a, b) = body_of("fun f(x: int): int = x % 3") else {
             panic!("expected a modulo")
         };
         assert_eq!(*a, Expr::Var("x".into()));
         assert_eq!(*b, int(3));
     }
-
 
     // --- expressions: structure -----------------------------------
 
@@ -5951,11 +6243,10 @@ mod tests {
             "extern fun weird {n:nat} (x: &int >> int n): void = \"ext#weird\" fun g(): int = 1",
         )
         .expect("parse");
-        assert!(
-            p.defs()
-                .iter()
-                .any(|d| matches!(d, Def::Fun(f) if f.name == "g"))
-        );
+        assert!(p
+            .defs()
+            .iter()
+            .any(|d| matches!(d, Def::Fun(f) if f.name == "g")));
     }
 
     // --- case and patterns -----------------------------------------
@@ -7049,11 +7340,10 @@ mod tests {
     #[test]
     fn a_dataprop_that_does_not_parse_is_skipped_not_fatal() {
         let p = Parser::parse("dataprop WEIRD = | ??? \n fun f(): int = 1").expect("parse");
-        assert!(
-            p.defs()
-                .iter()
-                .any(|d| matches!(d, Def::Fun(f) if f.name == "f"))
-        );
+        assert!(p
+            .defs()
+            .iter()
+            .any(|d| matches!(d, Def::Fun(f) if f.name == "f")));
     }
 
     #[test]
@@ -7072,11 +7362,10 @@ mod tests {
         let p =
             Parser::parse("praxi weird {a:t@ype} (!list(a) >> list(a)): void\nfun f(): int = 1")
                 .expect("parse");
-        assert!(
-            p.defs()
-                .iter()
-                .any(|d| matches!(d, Def::Fun(f) if f.name == "f"))
-        );
+        assert!(p
+            .defs()
+            .iter()
+            .any(|d| matches!(d, Def::Fun(f) if f.name == "f")));
     }
 
     #[test]
@@ -7296,7 +7585,10 @@ mod tests {
         // parentheses, is kept for the emitter to box and the `try` to
         // read back.
         let p = Parser::parse("exception Found of int").expect("parse");
-        assert_eq!(p.defs()[0], Def::Exception("Found".into(), vec![Ty::Name("int".into())]));
+        assert_eq!(
+            p.defs()[0],
+            Def::Exception("Found".into(), vec![Ty::Name("int".into())])
+        );
         let p = Parser::parse("exception Found of (int, double)").expect("parse");
         assert_eq!(
             p.defs()[0],
@@ -7475,7 +7767,6 @@ mod tests {
         assert_eq!(f.params[1].ty, Ty::Name("int".into()));
     }
 
-
     #[test]
     fn a_fun_with_no_body_is_a_declaration() {
         // A `.sats` file states a signature with `fun f (x: int): int`
@@ -7523,6 +7814,62 @@ mod tests {
     }
 
     #[test]
+    fn an_extern_val_with_a_function_type_is_a_function_declaration() {
+        let p = Parser::parse("extern val fact: (int) -> int\n").expect("parse");
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!("expected an extern declaration")
+        };
+        assert_eq!(d.name, "fact");
+        assert_eq!(d.params.len(), 1);
+        assert_eq!(d.params[0].ty, Ty::Name("int".into()));
+        assert_eq!(d.ret, Ty::Name("int".into()));
+    }
+
+    #[test]
+    fn a_template_declaration_accepts_a_type_only_parameter() {
+        let p = Parser::parse(
+            "fun cloref1_app {a:t0p;b:vt0p} (f: cfun1(a, b), a): b = \"mac#%\"\n",
+        )
+        .expect("parse");
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!("expected an extern declaration")
+        };
+        assert_eq!(d.name, "cloref1_app");
+        assert_eq!(d.params.len(), 2);
+        assert_eq!(d.params[1].ty, Ty::Name("a".into()));
+    }
+
+    #[test]
+    fn the_prelude_fprint_type_alias_expands_to_two_parameters() {
+        let p = Parser::parse("fun fprint_form : fprint_type(form)\n").expect("parse");
+        let Def::Extern(d) = &p.defs()[0] else {
+            panic!("expected an extern declaration")
+        };
+        assert_eq!(d.params.len(), 2);
+        assert_eq!(d.params[0].ty, Ty::Name("FILEref".into()));
+        assert_eq!(d.params[1].ty, Ty::Name("form".into()));
+        assert_eq!(d.ret, Ty::Name("void".into()));
+    }
+
+    #[test]
+    fn ambient_library_function_type_aliases_expand() {
+        let p = Parser::parse(
+            "fun emit_value : emit_type(value)\nfun jsonize_value : jsonize_ftype(value)\n",
+        )
+        .expect("parse");
+        let Def::Extern(emit) = &p.defs()[0] else {
+            panic!("expected an emit declaration")
+        };
+        let Def::Extern(jsonize) = &p.defs()[1] else {
+            panic!("expected a jsonize declaration")
+        };
+        assert_eq!(emit.params.len(), 2);
+        assert_eq!(emit.ret, Ty::Name("void".into()));
+        assert_eq!(jsonize.params.len(), 1);
+        assert_eq!(jsonize.ret, Ty::Name("jsonval".into()));
+    }
+
+    #[test]
     fn a_type_qualified_by_a_staload_alias_drops_the_alias() {
         // `$STDLIB.FILEref` names a type in the module a `staload` bound
         // to `$STDLIB`.  This compiler keeps one flat namespace, so the
@@ -7541,8 +7888,7 @@ mod tests {
         // a `staload` bound to `$C`.  The qualifier is dropped and the
         // constructor stands alone, as it does in an expression and a
         // type.
-        let a =
-            arms("implement main0() = case c of | $C.Red() => 0 | $C.Green() => 1");
+        let a = arms("implement main0() = case c of | $C.Red() => 0 | $C.Green() => 1");
         assert_eq!(a.len(), 2);
         assert_eq!(a[0].0, Pattern::Ctor("Red".into(), vec![]));
         assert_eq!(a[1].0, Pattern::Ctor("Green".into(), vec![]));
@@ -7572,7 +7918,10 @@ mod tests {
             panic!("expected a fun")
         };
         assert_eq!(f.ret, Ty::Name("int".into()));
-        assert!(!f.existentials.is_empty(), "an existential type was recorded");
+        assert!(
+            !f.existentials.is_empty(),
+            "an existential type was recorded"
+        );
     }
 
     #[test]
@@ -8211,7 +8560,12 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
         // function nobody declared.
         let body = impl_body("implement main0 () = $extval(int, \"strlen\", \"hi\")");
         match body {
-            Expr::ExtVal { ty, name, args, via_ptr } => {
+            Expr::ExtVal {
+                ty,
+                name,
+                args,
+                via_ptr,
+            } => {
                 assert_eq!(ty, Ty::Name("int".into()));
                 assert_eq!(name, "strlen");
                 assert_eq!(args, vec![Expr::StrLit("hi".into())]);
@@ -8227,7 +8581,12 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
         // function: there is nothing to call, only a value to read.
         let body = impl_body("implement main0 () = $extval(int, \"EOF\")");
         match body {
-            Expr::ExtVal { ty, name, args, via_ptr } => {
+            Expr::ExtVal {
+                ty,
+                name,
+                args,
+                via_ptr,
+            } => {
                 assert_eq!(ty, Ty::Name("int".into()));
                 assert_eq!(name, "EOF");
                 assert!(args.is_empty());
@@ -8243,7 +8602,12 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
         // address is a function pointer rather than a named function.
         let body = impl_body("implement main0 () = $extfcall(int, \"atoi\", \"7\")");
         match body {
-            Expr::ExtVal { ty, name, args, via_ptr } => {
+            Expr::ExtVal {
+                ty,
+                name,
+                args,
+                via_ptr,
+            } => {
                 assert_eq!(ty, Ty::Name("int".into()));
                 assert_eq!(name, "atoi");
                 assert_eq!(args, vec![Expr::StrLit("7".into())]);
@@ -8284,16 +8648,13 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
 
     #[test]
     fn a_top_level_fnx_is_a_function_definition() {
-        let program = Parser::parse(
-            "fnx loop (n: int): int = if n = 0 then 0 else loop (n - 1)",
-        )
-        .expect("parse");
+        let program = Parser::parse("fnx loop (n: int): int = if n = 0 then 0 else loop (n - 1)")
+            .expect("parse");
         let Def::Fun(f) = &program.defs()[0] else {
             panic!("expected a fun def");
         };
         assert_eq!(f.name, "loop");
     }
-
 
     #[test]
     fn a_pointer_field_read_is_a_deref_then_a_field() {
@@ -8332,7 +8693,6 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
         }
     }
 
-
     #[test]
     fn a_proof_implementation_parses_even_if_its_body_is_skipped() {
         // `primplmnt` fills in the body of an `extern prfun`.  This
@@ -8351,7 +8711,6 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
         assert!(p.defs().is_empty());
     }
 
-
     #[test]
     fn a_typedef_chained_with_and_is_not_a_function() {
         // `typedef key = string and itm = symbol` declares two aliases; the
@@ -8361,7 +8720,6 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
         let p = Parser::parse("typedef key = string and itm = symbol").expect("parse");
         assert!(p.defs().is_empty(), "typedefs fold into a table, not defs");
     }
-
 
     #[test]
     fn a_constructor_with_a_juxtaposed_wildcard_is_a_pattern() {
@@ -8380,5 +8738,4 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
             other => panic!("expected a case, got {other:?}"),
         }
     }
-
 }

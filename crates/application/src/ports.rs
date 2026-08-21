@@ -35,6 +35,18 @@ use ats2_domain::errors::CompileError;
 pub trait ParserPort {
     fn parse(&self, source: &str) -> Result<Program, Vec<CompileError>>;
 
+    /// Parse a unit reached through `staload` or `#include`.
+    ///
+    /// Root source remains fail-fast through [`Self::parse`].  A concrete
+    /// parser may recover the declarations available before unsupported
+    /// dependency syntax, because rejecting an otherwise valid root merely
+    /// for reaching a larger ATS library would turn a compiler gap into a
+    /// source error.  Strict parsing is the safe default for adapters that
+    /// do not implement that recovery policy.
+    fn parse_dependency(&self, source: &str) -> Result<Program, Vec<CompileError>> {
+        self.parse(source)
+    }
+
     /// The declarations every program is entitled to assume: `list0`,
     /// `string_length`, `succ`, and the rest of the prelude.
     ///
@@ -58,6 +70,28 @@ pub struct Unit {
     /// against.
     pub path: PathBuf,
     pub source: String,
+}
+
+/// What an ATS source-path expression means after consulting its build
+/// environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourcePathResolution {
+    /// A path owned by the program being compiled.
+    Path(PathBuf),
+    /// A path into the ATS installation or one of its installed packages.
+    Distribution(PathBuf),
+    /// A build-system package that is not available in this environment.
+    External,
+}
+
+/// Resolves ATS path macros without reading source files.
+///
+/// `{$PATSHOME}`, `{$LIBATSCC}`, and package-specific names are build
+/// environment concerns rather than filesystem search rules. Keeping that
+/// translation behind its own port lets a source loader focus solely on where
+/// to search and how to read a resolved path.
+pub trait SourcePathResolverPort {
+    fn resolve(&self, requested: &str, from: &Path) -> Result<SourcePathResolution, String>;
 }
 
 /// Finds the source a `staload` named.

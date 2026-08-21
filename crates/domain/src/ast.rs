@@ -32,6 +32,13 @@ pub struct Program {
     /// the resource walk and the emitter each to grow an arm for a node
     /// none of them can ever meet, which is three chances to forget one.
     pub staloads: Vec<Staload>,
+    /// Files textually included by `#include`.
+    ///
+    /// Includes and staloads differ at the ATS namespace level, but both
+    /// contribute declarations and definitions before checking or emission.
+    /// Keeping them distinct here preserves that semantic distinction while
+    /// allowing the application layer to resolve both through one source port.
+    pub includes: Vec<Include>,
 }
 
 impl Program {
@@ -39,12 +46,18 @@ impl Program {
         Self {
             defs,
             staloads: Vec::new(),
+            includes: Vec::new(),
         }
     }
 
     /// The same unit, with the units it asked for recorded.
     pub fn asking_for(mut self, staloads: Vec<Staload>) -> Self {
         self.staloads = staloads;
+        self
+    }
+
+    pub fn including(mut self, includes: Vec<Include>) -> Self {
+        self.includes = includes;
         self
     }
 
@@ -57,21 +70,29 @@ impl Program {
     pub fn staloads(&self) -> &[Staload] {
         &self.staloads
     }
+
+    pub fn includes(&self) -> &[Include] {
+        &self.includes
+    }
+}
+
+/// A source file named by `#include`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Include {
+    pub path: String,
 }
 
 /// One `staload` — a unit naming another it needs.
 ///
-/// The four spellings ATS has all say the same thing to this compiler:
+/// The spelling determines how the dependency participates in compilation:
 ///
-/// * `staload "x.sats"` — bring it in.
-/// * `staload H = "x.sats"` — bring it in, reachable as `$H.name`.
+/// * `staload "x.sats"` — import its interface.
+/// * `staload H = "x.sats"` — import its interface as `$H`.
 /// * `staload _ = "x.dats"` — bring it in for its definitions.
-/// * `dynload "x.dats"` — the same, said differently.
+/// * `dynload "x.dats"` — arrange for its runtime initialization.
 ///
-/// The distinctions ATS draws between them are about namespaces, and
-/// this compiler has one namespace, so what survives is the path.  The
-/// alias survives with it because `$H.name` is written in source and
-/// something has to know that `H` was a module rather than a value.
+/// Keeping this distinction here prevents module resolution from flattening
+/// every reachable body into the root namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Staload {
     /// The path exactly as written, quotes removed.
@@ -79,6 +100,16 @@ pub struct Staload {
     /// `H` in `staload H = "..."`.  `None` for the plain and `_`
     /// spellings, which introduce no name.
     pub alias: Option<String>,
+    /// Why the unit is loaded. Interfaces contribute declarations; an
+    /// anonymous or dynamic load also contributes runtime definitions.
+    pub kind: LoadKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadKind {
+    Interface,
+    Implementation,
+    Dynamic,
 }
 
 /// A top-level definition: a datatype, a function, or an implementation.

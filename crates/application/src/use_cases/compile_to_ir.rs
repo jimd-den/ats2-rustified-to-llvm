@@ -66,10 +66,14 @@ impl<P: ParserPort, E: LlvmEmitterPort> CompileToIrUseCase<P, E> {
         // declaration in another file is a declaration this one is
         // entitled to rest on — and below the parser, because finding
         // files is not a parser's business.
-        let program = match &self.modules {
-            Some(loader) => crate::modules::resolve(program, &self.parser, loader.as_ref())?,
-            None => program,
+        let modules = match &self.modules {
+            Some(loader) => {
+                crate::modules::resolve_modules(program, &self.parser, loader.as_ref())?
+            }
+            None => crate::modules::ResolvedModules::single(program),
         };
+        let prelude = self.parser.prelude();
+        let program = crate::elaboration::elaborate(modules, &prelude)?.into_program();
         // The dependent half of the program is checked here, between
         // parsing and emission: it is the last point at which the static
         // language still exists.  Emission erases it, by design.
@@ -77,7 +81,6 @@ impl<P: ParserPort, E: LlvmEmitterPort> CompileToIrUseCase<P, E> {
         // whose they are.  Neither says anything about the other, so
         // both run and the reader sees everything wrong at once rather
         // than one thing per attempt.
-        let prelude = self.parser.prelude();
         let mut violations = crate::checking::check_program(&program, &prelude, self.strictness);
         violations.extend(crate::linearity::check_linearity(&program, &prelude));
         if !violations.is_empty() {

@@ -85,10 +85,14 @@ impl<P: ParserPort, E: LlvmEmitterPort, T: ToolchainPort, O: OutputPort>
         // declaration in another file is a declaration this one is
         // entitled to rest on — and below the parser, because finding
         // files is not a parser's business.
-        let program = match &self.modules {
-            Some(loader) => crate::modules::resolve(program, &self.parser, loader.as_ref())?,
-            None => program,
+        let modules = match &self.modules {
+            Some(loader) => {
+                crate::modules::resolve_modules(program, &self.parser, loader.as_ref())?
+            }
+            None => crate::modules::ResolvedModules::single(program),
         };
+        let prelude = self.parser.prelude();
+        let program = crate::elaboration::elaborate(modules, &prelude)?.into_program();
         // See `compile_to_ir`: the static language is checked before it
         // is erased, and both entry points must check, or the guarantee
         // depends on which one was used.
@@ -96,7 +100,6 @@ impl<P: ParserPort, E: LlvmEmitterPort, T: ToolchainPort, O: OutputPort>
         // whose they are.  Neither says anything about the other, so
         // both run and the reader sees everything wrong at once rather
         // than one thing per attempt.
-        let prelude = self.parser.prelude();
         let mut violations = crate::checking::check_program(&program, &prelude, self.strictness);
         violations.extend(crate::linearity::check_linearity(&program, &prelude));
         if !violations.is_empty() {

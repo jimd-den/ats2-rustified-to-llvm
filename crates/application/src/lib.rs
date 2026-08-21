@@ -10,6 +10,7 @@
 
 pub mod checking;
 pub mod constraints;
+pub mod elaboration;
 pub mod linearity;
 pub mod modules;
 pub mod ports;

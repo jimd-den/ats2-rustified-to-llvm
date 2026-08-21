@@ -722,6 +722,27 @@ pub fn canonical_type(name: &str) -> Option<(&'static str, usize)> {
     }
 }
 
+/// Expand a parameterized type alias supplied by the Postiats prelude.
+///
+/// These aliases are declared in distribution headers rather than in each
+/// source unit that uses them. Keeping their expansion here gives the parser
+/// the same ambient type vocabulary as the prelude declarations.
+pub fn expand_type_alias(name: &str, args: &[ats2_domain::ast::Ty]) -> Option<ats2_domain::ast::Ty> {
+    use ats2_domain::ast::Ty;
+
+    match (name, args) {
+        ("fprint_type" | "emit_type", [value]) => Some(Ty::Fun(
+            vec![Ty::Name("FILEref".into()), value.clone()],
+            Box::new(Ty::Name("void".into())),
+        )),
+        ("jsonize_ftype", [value]) => Some(Ty::Fun(
+            vec![value.clone()],
+            Box::new(Ty::Name("jsonval".into())),
+        )),
+        _ => None,
+    }
+}
+
 /// Whether a call hands its argument straight back, unchanged.
 ///
 /// These are the casts and re-viewings ATS writes between types that

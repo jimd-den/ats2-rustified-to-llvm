@@ -1551,7 +1551,6 @@ end:
 /// threaded through the arena rather than freed — the same bargain the
 /// heap runtime makes.
 
-
 /// The width of one slot in a datatype value.  Every field occupies one,
 /// whatever its type, so field `i` sits at the same offset regardless of
 /// which constructor built the value.
@@ -3111,7 +3110,9 @@ impl LlvmIrEmitter {
     ) -> Result<FnValue, CompileError> {
         module.needs_exn = true;
         module.externs.insert("declare i32 @setjmp(ptr)");
-        module.externs.insert("declare void @longjmp(ptr, i32) noreturn");
+        module
+            .externs
+            .insert("declare void @longjmp(ptr, i32) noreturn");
         let name = match value {
             Expr::Var(n) => n.clone(),
             Expr::Call(head, _) => match head.as_ref() {
@@ -3201,7 +3202,9 @@ impl LlvmIrEmitter {
         }
         module.needs_exn = true;
         module.externs.insert("declare i32 @setjmp(ptr)");
-        module.externs.insert("declare void @longjmp(ptr, i32) noreturn");
+        module
+            .externs
+            .insert("declare void @longjmp(ptr, i32) noreturn");
 
         let id = fb.fresh_block_id();
         let merge = format!("try.done.{id}");
@@ -3269,10 +3272,7 @@ impl LlvmIrEmitter {
             };
             match pat {
                 Pattern::Ctor(xname, fieldpats) => {
-                    let Some(info) = registry
-                        .ctors
-                        .get(xname.as_str())
-                        .and_then(|c| c.get(0))
+                    let Some(info) = registry.ctors.get(xname.as_str()).and_then(|c| c.get(0))
                     else {
                         continue;
                     };
@@ -3306,7 +3306,13 @@ impl LlvmIrEmitter {
                     let saved = fb.env.clone();
                     let reg = fb.fresh_temp();
                     fb.line(format!("{reg} = load i64, ptr {exn}"));
-                    fb.env.insert(vname.clone(), FnValue { reg, ty: LlvmType::I64 });
+                    fb.env.insert(
+                        vname.clone(),
+                        FnValue {
+                            reg,
+                            ty: LlvmType::I64,
+                        },
+                    );
                     let hv = self.emit_expr_expecting(handler, expected, fb, registry, module)?;
                     if hv.ty != LlvmType::Never {
                         let pred = fb.cur_block.clone();
@@ -3366,7 +3372,10 @@ impl LlvmIrEmitter {
         }
         let ty = first.ty;
         if ty == LlvmType::Void {
-            return Ok(FnValue { reg: String::new(), ty });
+            return Ok(FnValue {
+                reg: String::new(),
+                ty,
+            });
         }
         let incoming: Vec<String> = results
             .iter()

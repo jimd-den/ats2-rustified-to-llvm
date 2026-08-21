@@ -53,8 +53,8 @@ impl Sort {
             "pos" => Sort::Pos,
             "bool" => Sort::Bool,
             "addr" => Sort::Addr,
-            "t@ype" | "type" | "t0ype" | "vt@ype" | "vtype" | "viewtype" | "prop" | "view"
-            | "tkind" => Sort::Type,
+            "t@ype" | "type" | "t0ype" | "t0p" | "vt@ype" | "vtype" | "vt0p" | "viewtype"
+            | "prop" | "view" | "tkind" => Sort::Type,
             other => Sort::Named(other.to_string()),
         }
     }

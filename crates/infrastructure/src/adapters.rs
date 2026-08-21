@@ -20,6 +20,10 @@ impl ParserPort for Parser {
         Parser::parse(source)
     }
 
+    fn parse_dependency(&self, source: &str) -> Result<Program, Vec<CompileError>> {
+        Parser::parse_dependency(source)
+    }
+
     /// The prelude, read by the same parser as user code.
     ///
     /// A prelude that does not parse is a bug in this crate rather than
@@ -58,6 +62,15 @@ mod tests {
     fn the_parser_honors_the_parser_port() {
         let parser: &dyn ParserPort = &Parser;
         let program = parser.parse("fun f(): int = 1").expect("parse");
+        assert_eq!(program.defs().len(), 1);
+    }
+
+    #[test]
+    fn the_parser_port_recovers_available_dependency_declarations() {
+        let parser: &dyn ParserPort = &Parser;
+        let program = parser
+            .parse_dependency("extern fun declared(): int\nimplement")
+            .expect("dependency parse");
         assert_eq!(program.defs().len(), 1);
     }
 
