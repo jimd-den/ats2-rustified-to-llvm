@@ -9,6 +9,38 @@ use ats2_domain::statics::*;
 use ats2_domain::tokens::*;
 use std::collections::{HashMap, HashSet};
 
+fn lower_top_pattern(pat: Pattern, target: Expr, out: &mut Vec<Def>, gensym: &mut usize) {
+    match pat {
+        Pattern::Var(name) => {
+            out.push(Def::Val(ValDef {
+                name,
+                ty: None,
+                value: target,
+            }));
+        }
+        Pattern::Tuple(items) => {
+            for (idx, item) in items.into_iter().enumerate() {
+                let sub = Expr::Field(Box::new(target.clone()), format!("{idx}"));
+                lower_top_pattern(item, sub, out, gensym);
+            }
+        }
+        Pattern::Wildcard | Pattern::Int(_) | Pattern::Char(_) | Pattern::Bool(_) | Pattern::Str(_) => {}
+        _ => {
+            *gensym += 1;
+            let stmt_name = format!("{TOPLEVEL_STATEMENT}{}", gensym);
+            let exit = Expr::Call(Box::new(Expr::Var("exit".into())), vec![Expr::IntLit(1)]);
+            let case_expr = Expr::Case(
+                Box::new(target),
+                vec![(pat, Expr::Unit), (Pattern::Wildcard, exit)],
+            );
+            out.push(Def::Val(ValDef {
+                name: stmt_name,
+                ty: None,
+                value: case_expr,
+            }));
+        }
+    }
+}
 
 impl<'a> ParseCtx<'a> {
     pub(crate) fn parse_program(&mut self) -> Result<Program, Vec<CompileError>> {
@@ -153,21 +185,13 @@ impl<'a> ParseCtx<'a> {
             // so are erased before emission, so it parses exactly as
             // `datatype` does — but *that* it is one is recorded, since
             // nothing about the bits says so and the declaration is the
-            // only place that can.
             TokenKind::Ident(w) if w == "datavtype" => {
                 self.advance(); // `datavtype`
-                                // `datavtype` — a datatype whose values are *resources*.
                 out.push(self.parse_datatype_body(true)?);
                 Ok(())
             }
             TokenKind::Val => {
                 self.advance(); // `val`
-                                // `val rec a = ... and b = ...` — a chain of bindings
-                                // that may mention each other, which is how mutually
-                                // recursive lazy values are written.  The recursion is
-                                // in the *values*: each initializer runs in source
-                                // order, and one that only *mentions* its siblings (as
-                                // a `$delay` body does) needs nothing from them yet.
                 let rec_form = matches!(&self.peek().kind, TokenKind::Ident(w) if w == "rec");
                 if rec_form {
                     self.advance(); // `rec`
@@ -175,11 +199,6 @@ impl<'a> ParseCtx<'a> {
                 loop {
                     match self.parse_val_bind(false)? {
                         BindKind::Simple(bind) => {
-                            // `val () = println! (...)` — a top-level
-                            // *statement*.  It binds nothing, but it is
-                            // the whole point of the line, so it is kept
-                            // under a name no source can write and run
-                            // for its effect alone.
                             let name = bind.name.unwrap_or_else(|| {
                                 self.gensym += 1;
                                 format!("{TOPLEVEL_STATEMENT}{}", self.gensym)
@@ -190,31 +209,25 @@ impl<'a> ParseCtx<'a> {
                                 value: bind.value,
                             }));
                         }
-                        // A pattern at the top level has no remainder to
-                        // scope over, so it cannot be lowered here.
-                        BindKind::Pattern(..) => {
-                            return Err(self.error_here(
-                                "a pattern binding is not supported at the top level",
-                            ));
+                        BindKind::Pattern(pat, expr) => {
+                            self.gensym += 1;
+                            let tmp_name = format!("__ats2_tmp_{}", self.gensym);
+                            out.push(Def::Val(ValDef {
+                                name: tmp_name.clone(),
+                                ty: None,
+                                value: expr,
+                            }));
+                            lower_top_pattern(pat, Expr::Var(tmp_name), out, &mut self.gensym);
                         }
                     }
                     if rec_form && matches!(&self.peek().kind, TokenKind::Ident(w) if w == "and") {
-                        self.advance(); // `and`
+                        self.advance();
                     } else {
                         break;
                     }
                 }
                 Ok(())
             }
-            // `var x: int = 0` outside any body — "statically
-            // allocated", in ATS's words.
-            //
-            // A top-level `var` differs from a top-level `val` in
-            // exactly one way: its storage has an address that outlives
-            // every call, and code takes that address (`addr@ x`) and
-            // writes through it.  A one-cell reference *is* that, so the
-            // declaration becomes one, and `addr@` then has something
-            // to return.
             TokenKind::Var => {
                 self.advance(); // `var`
                 let BindKind::Simple(bind) = self.parse_val_bind(true)? else {
@@ -224,16 +237,11 @@ impl<'a> ParseCtx<'a> {
                 };
                 if let Some(name) = bind.name {
                     let value = Expr::Call(Box::new(Expr::Var("ref".into())), vec![bind.value]);
-                    // An annotated `var x: int = e` is a `ref(int)`, so the
-                    // annotation survives the rewrite instead of being
-                    // thrown away and rediscovered from the initializer.
                     let ty = bind.ty.map(|t| Ty::App("ref".into(), vec![t]));
                     out.push(Def::Val(ValDef { name, ty, value }));
                 }
                 Ok(())
             }
-            // `extern fun f (...): t` states a signature the definition
-            // will fill in later.  Foreign declarations carry syntax the
             // subset does not model, so a declaration that does not parse
             // goes back to being skipped rather than becoming an error.
             // `static fun f (...): t = "sta#f"` declares a function the
@@ -356,16 +364,38 @@ impl<'a> ParseCtx<'a> {
             // directive on that list speaks to a part of ATS this
             // compiler does not implement; these two speak to where the
             // rest of the program is, which is a question it can answer.
+            TokenKind::RBrace => {
+                self.advance();
+                Ok(())
+            }
             TokenKind::Ident(name) if name == "staload" || name == "dynload" => {
+                let mut at = self.pos + 1;
+                let mut alias = None;
+                if let Some(TokenKind::Ident(a)) = self.tokens.get(at).map(|t| &t.kind) {
+                    if a != "_" {
+                        alias = Some(a.clone());
+                    }
+                    at += 1;
+                    if matches!(self.tokens.get(at).map(|t| &t.kind), Some(TokenKind::Eq)) {
+                        at += 1;
+                    }
+                }
+                if matches!(self.tokens.get(at).map(|t| &t.kind), Some(TokenKind::LBrace)) {
+                    self.pos = at + 1;
+                    while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                        self.parse_toplevel(out)?;
+                    }
+                    if self.at(&TokenKind::RBrace) {
+                        self.advance();
+                    }
+                    return Ok(());
+                }
                 if let Some(s) = self.read_staload(name == "dynload") {
                     self.staloads.push(s);
                 }
                 self.skip_directive();
                 Ok(())
             }
-            // `exception X of (t1, t2)` — a constructor of the built-in
-            // `exn` type.  It is not skipped like the other static
-            // declarations: a program that raises and catches needs to
             // know the constructors, so they are kept.
             TokenKind::Ident(w) if w == "exception" => {
                 out.extend(self.parse_exception());

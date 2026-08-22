@@ -23,6 +23,23 @@ use ats2_domain::tokens::*;
         i.body.clone()
     }
 
+    #[test]
+    fn parses_braced_staload_module_scopes() {
+        let src = "staload F = {\n  typedef MyInt = int\n  fun add1(x: MyInt): MyInt = x + 1\n}\n";
+        let p = Parser::parse(src).expect("parse braced staload");
+        assert_eq!(p.defs().len(), 1);
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        assert_eq!(f.name, "add1");
+    }
+
+    #[test]
+    fn parses_toplevel_pattern_destructuring() {
+        let src = "val (a, b) = (1, 2)\nfun sum(): int = a + b\n";
+        let p = Parser::parse(src).expect("parse toplevel pattern");
+        assert!(p.defs().len() >= 2);
+    }
+
+
     fn expect_err(source: &str) -> CompileError {
         Parser::parse(source)
             .expect_err("should fail")
