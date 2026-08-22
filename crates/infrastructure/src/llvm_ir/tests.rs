@@ -15,6 +15,15 @@ fn emit(source: &str) -> Result<String, CompileError> {
     }
 
     fn emit_err(source: &str) -> CompileError {
+
+    #[test]
+    fn ambient_runtime_functions_can_be_implemented_and_called() {
+        let ir = emit("implement atsruntime_handle_uncaughtexn(exn) = ()
+fun test_call(): void = patsolve_cnstrnt__dynload()").expect("emit");
+        assert!(ir.contains("define void @atsruntime_handle_uncaughtexn(ptr %exn)"), "got:\n{ir}");
+        assert!(ir.contains("declare void @patsolve_cnstrnt__dynload()"), "got:\n{ir}");
+    }
+
         emit(source).expect_err("should fail")
     }
 

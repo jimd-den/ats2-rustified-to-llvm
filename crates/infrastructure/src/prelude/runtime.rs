@@ -550,4 +550,26 @@ fun fileref_get_lines_stringlst (f: FILEref): list0(string) =
       then list0_nil()
       else list0_cons(line, fileref_get_lines_stringlst(f))
   end
+
+// --- standard ambient runtime & utility declarations ---
+
+extern fun abs (x: int): int
+extern fun gcd (x: int, y: int): int
+extern fun eq_int_int (x: int, y: int): bool
+extern fun strptr2string (s: ptr): string
+extern fun strptr2ptr (s: ptr): ptr
+extern fun cloptr_free (p: ptr): void
+extern fun print_real0 (x: double): void
+extern fun fprint_string (f: FILEref, s: string): void
+extern fun fprint_int (f: FILEref, x: int): void
+extern fun fileref_open_opt (path: string, mode: string): option0(FILEref)
+extern fun fileref_isnot_eof (f: FILEref): bool
+extern fun patsolve_cnstrnt__dynload (): void
+extern fun atsruntime_handle_uncaughtexn (exn: ptr): void
+extern fun myhashtbl_search (tbl: ptr, k: int): int
+extern fun the_s2rtdatmap_set (m: ptr, k: ptr, v: ptr): void
+extern fun the_redisContext_set (ctx: ptr): void
+extern fun fst<a:t@ype><b:t@ype> (t: (a, b)): a
+extern fun snd<a:t@ype><b:t@ype> (t: (a, b)): b
+
 "#;

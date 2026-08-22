@@ -439,10 +439,6 @@ pub(crate) fn registry_of(program: &Program) -> Result<Registry, CompileError> {
                 registry.holes.insert(im.name.clone(), im.clone());
             }
             Def::Implement(im) if im.name != "main0" && im.name != "main" => {
-                // Any other name must have been declared: an `implement`
-                // fills in a signature stated elsewhere, and without the
-                // declaration there is nothing to say what its untyped
-                // parameters are.
                 let Some(sig) = registry.fns.get(&im.name).cloned() else {
                     return Err(CompileError::emit(format!(
                         "`{}` is implemented but never declared; add an `extern fun` for it",
