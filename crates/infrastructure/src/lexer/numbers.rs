@@ -10,6 +10,13 @@ impl<'a> Scanner<'a> {
         }
         let digits_begin = self.pos;
         self.consume_digits(is_hex);
+        let digits_end = self.pos;
+
+        if is_hex && self.pos == digits_begin {
+            self.error(self.span_from(start), "hex literal needs digits after `0x`");
+            return;
+        }
+
         // `1.5` is a float; `xs.0` is a projection, so the `.` only joins
         // the number when a digit follows it.
         let mut is_float = false;
@@ -18,52 +25,76 @@ impl<'a> Scanner<'a> {
             self.bump();
             self.consume_digits(false);
         }
-        let text = &self.src[start.offset..self.pos];
-        if is_hex && self.pos == digits_begin {
-            self.error(self.span_from(start), "hex literal needs digits after `0x`");
-            return;
+
+        // Scientific notation: `1e-3`, `2.0e5`
+        if !is_hex && matches!(self.peek(), Some('e') | Some('E')) {
+            let next_ch = self.peek2();
+            if matches!(next_ch, Some('+') | Some('-')) || next_ch.is_some_and(|c| c.is_ascii_digit()) {
+                is_float = true;
+                self.bump(); // eat 'e'/'E'
+                if matches!(self.peek(), Some('+') | Some('-')) {
+                    self.bump();
+                }
+                self.consume_digits(false);
+            }
         }
+
+        // Float suffix: `1.0f`, `1f`, `1.0d`
+        let float_num_end = self.pos;
+        let is_float_suffix = !is_hex && matches!(self.peek(), Some('f') | Some('F') | Some('d') | Some('D'));
+        if is_float_suffix {
+            is_float = true;
+            self.bump();
+        }
+
         if is_float {
-            let text = text.to_string();
-            return match text.parse::<f64>() {
+            let float_str = &self.src[start.offset..float_num_end];
+            return match float_str.parse::<f64>() {
                 Ok(v) => self.push(TokenKind::FloatLit(FloatBits::new(v)), start),
                 Err(_) => self.error(
                     self.span_from(start),
-                    format!("`{text}` is not a valid number"),
+                    format!("`{float_str}` is not a valid number"),
                 ),
             };
         }
-        // A width/signedness suffix (`0ull`, `10L`, `3u`) says nothing to a
-        // subset with a single integer width, so it is consumed and dropped.
-        let text = text.to_string();
-        let suffix_begin = self.pos;
+
+        // Integer width/signedness suffixes (`0ull`, `10L`, `3u`, `0x10ULL`)
         while let Some(c) = self.peek() {
-            if matches!(c, 'u' | 'U' | 'l' | 'L') {
+            if matches!(c, 'u' | 'U' | 'l' | 'L' | 'z' | 'Z' | 't' | 'T') {
                 self.bump();
             } else {
                 break;
             }
         }
-        let _ = suffix_begin;
+
+        let full_text = &self.src[start.offset..self.pos];
         if let Some(c) = self.peek() {
             if c.is_ascii_alphanumeric() || c == '_' {
                 self.error(
                     self.span_from(start),
-                    format!("invalid integer literal `{text}`"),
+                    format!("invalid integer literal `{full_text}`"),
                 );
                 return;
             }
         }
-        let value = if is_hex {
-            i64::from_str_radix(&text[2..], 16)
+
+        let raw_digits = if is_hex {
+            &self.src[digits_begin..digits_end]
         } else {
-            text.parse::<i64>()
+            &self.src[start.offset..digits_end]
         };
+
+        let value = if is_hex {
+            i64::from_str_radix(raw_digits, 16)
+        } else {
+            raw_digits.parse::<i64>()
+        };
+
         match value {
             Ok(v) => self.push(TokenKind::IntLit(v), start),
             Err(_) => self.error(
                 self.span_from(start),
-                format!("integer literal `{text}` is out of range"),
+                format!("integer literal `{full_text}` is out of range"),
             ),
         }
     }
@@ -84,6 +115,8 @@ impl<'a> Scanner<'a> {
         }
     }
 }
+
+/// Build a float literal's stored form.
 pub fn float_bits(value: f64) -> FloatBits {
     FloatBits::new(value)
 }

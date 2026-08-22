@@ -164,6 +164,20 @@ use ats2_domain::tokens::{FloatBits, Pos, Span, TokenKind};
     }
 
     #[test]
+    fn lexes_numbers_with_suffixes_and_scientific_notation() {
+        let k = kinds("1L 0u 100ull 0x10ULL 1f 1.5f 1e-3 2.0e5");
+        assert_eq!(k[0], TokenKind::IntLit(1));
+        assert_eq!(k[1], TokenKind::IntLit(0));
+        assert_eq!(k[2], TokenKind::IntLit(100));
+        assert_eq!(k[3], TokenKind::IntLit(16));
+        assert_eq!(k[4], TokenKind::FloatLit(float_bits(1.0)));
+        assert_eq!(k[5], TokenKind::FloatLit(float_bits(1.5)));
+        assert_eq!(k[6], TokenKind::FloatLit(float_bits(0.001)));
+        assert_eq!(k[7], TokenKind::FloatLit(float_bits(200000.0)));
+    }
+
+
+    #[test]
     fn integer_overflow_is_a_lex_error() {
         let errs = Lexer::lex("99999999999999999999999999").expect_err("should fail");
         assert_eq!(errs[0].kind(), ErrorKind::Lex);
