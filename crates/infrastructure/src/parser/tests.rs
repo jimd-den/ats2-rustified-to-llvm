@@ -3495,6 +3495,13 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
 
     #[test]
     fn parses_extvar_and_overload_directives() {
+
+    #[test]
+    fn parses_overload_with_module_paths() {
+        let p = Parser::parse("overload print with $T.print_intinf\noverload fprint with $UN.fprint_symbol\noverload iseqz with $INT.iseqz_int of 10\nfun f(): int = 1").expect("parse");
+        assert_eq!(p.defs().len(), 4);
+    }
+
         let p = Parser::parse(r#"
             extvar "foo" = 10
             overload print with print_string

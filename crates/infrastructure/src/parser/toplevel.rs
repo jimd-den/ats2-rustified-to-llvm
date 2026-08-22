@@ -1894,25 +1894,38 @@ impl<'a> ParseCtx<'a> {
             return None;
         }
         self.advance();
-        let TokenKind::Ident(func) = self.peek().kind.clone() else {
+        // Optional dollar prefix e.g. `$T.print_intinf` or `$UN.fprint`
+        if self.at(&TokenKind::Dollar) {
+            self.advance();
+        }
+        let func = if let TokenKind::Ident(mod_or_fn) = self.peek().kind.clone() {
+            self.advance();
+            if self.at(&TokenKind::Dot) {
+                self.advance();
+                if let TokenKind::Ident(f) = self.peek().kind.clone() {
+                    self.advance();
+                    f
+                } else {
+                    mod_or_fn
+                }
+            } else {
+                mod_or_fn
+            }
+        } else {
             self.pos = save;
             self.skip_directive();
             return None;
         };
-        self.advance();
         // `overload * with list0_cross of 10` — the `of <n>` names a
-        // precedence level for the overloaded operator.  It is only a
-        // hint to the type checker's disambiguation, so it is read and
-        // dropped.
+        // precedence level for the overloaded operator.
         if self.at(&TokenKind::Of) {
-            // `of 10` — the precedence level, a single number.
             self.advance();
             if matches!(self.peek().kind, TokenKind::IntLit(_)) {
                 self.advance();
             }
         }
         Some(Def::Overload {
-            op: op.to_string(),
+            op,
             func,
         })
     }
