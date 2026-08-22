@@ -13,6 +13,8 @@ dependencies = [
 name = "ats2-cli"
 version = "0.1.0"
 dependencies = [
+ "ats2-application",
+ "ats2-domain",
  "ats2-infrastructure",
 ]
 

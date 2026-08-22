@@ -7,6 +7,7 @@
 //! out; no domain file ever learns where it came from.
 
 pub mod adapters;
+pub mod advisor;
 pub mod cli;
 pub mod diagnostics;
 pub mod infer;
@@ -17,5 +18,6 @@ pub mod llvm_ir;
 pub mod mono;
 pub mod parser;
 pub mod prelude;
+pub mod runner;
 pub mod sources;
 pub mod toolchain;

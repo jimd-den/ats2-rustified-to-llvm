@@ -7,8 +7,6 @@
 //! failures into domain errors, and returns domain values.  There is no
 //! I/O here and no policy about files — the use cases only know that
 //! sources, programs, and IR texts flow through the seams the ports
-//! declare.
-
 pub mod compile_executable;
 pub mod compile_to_ir;
 pub mod parse;
@@ -17,7 +15,7 @@ pub mod repl_session;
 pub use compile_executable::CompileExecutableUseCase;
 pub use compile_to_ir::CompileToIrUseCase;
 pub use parse::ParseUseCase;
-pub use repl_session::{ReplSession, ReplUpdate};
+pub use repl_session::{ReplResponse, ReplSession, ReplUpdate};
 
 /// Test doubles shared by every use-case test module.
 ///
@@ -118,6 +116,22 @@ pub(crate) mod fakes {
                 Err("clang failed".into())
             } else {
                 Ok(())
+            }
+        }
+    }
+
+    pub struct FakeRunner {
+        pub events: Rc<RefCell<Vec<String>>>,
+        pub output: String,
+        pub fail: Option<String>,
+    }
+
+    impl crate::ports::RunnerPort for FakeRunner {
+        fn run_ir(&self, ir: &str) -> Result<crate::ports::ExecutionResult, String> {
+            self.events.borrow_mut().push(format!("run_ir:{ir}"));
+            match &self.fail {
+                Some(err) => Err(err.clone()),
+                None => Ok(crate::ports::ExecutionResult::success(self.output.clone())),
             }
         }
     }

@@ -10,6 +10,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const EXE: &str = env!("CARGO_BIN_EXE_ats2llvm");
+const REPL_EXE: &str = env!("CARGO_BIN_EXE_ats2repl");
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -98,3 +99,64 @@ fn builds_and_runs_a_real_binary() {
     let _ = std::fs::remove_file(&ir);
     let _ = std::fs::remove_file(&bin);
 }
+
+#[test]
+fn repl_handles_interactive_session_with_functions_and_expressions() {
+    use std::io::Write;
+    let mut child = Command::new(REPL_EXE)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn ats2repl");
+
+    {
+        let stdin = child.stdin.as_mut().expect("open stdin");
+        stdin.write_all(b":help\n").expect("write :help");
+        stdin
+            .write_all(b"fun fact(n: int): int = if n <= 0 then 1 else n * fact(n - 1)\n")
+            .expect("write fact def");
+        stdin.write_all(b"fact(5)\n").expect("write fact(5)");
+        stdin.write_all(b":source\n").expect("write :source");
+        stdin.write_all(b":quit\n").expect("write :quit");
+    }
+
+    let output = child.wait_with_output().expect("wait for repl");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ats2repl commands:"), "got stdout:\n{stdout}");
+    assert!(
+        stdout.contains("[defined: +1 definition, 1 total]"),
+        "got stdout:\n{stdout}"
+    );
+    assert!(stdout.contains("120"), "got stdout:\n{stdout}");
+    assert!(stdout.contains("fun fact"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn repl_recovers_from_syntax_errors_transactionally() {
+    use std::io::Write;
+    let mut child = Command::new(REPL_EXE)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn ats2repl");
+
+    {
+        let stdin = child.stdin.as_mut().expect("open stdin");
+        stdin.write_all(b"val x = 10\n").expect("write val x");
+        stdin.write_all(b"fun bad_syntax(\n").expect("write bad syntax");
+        stdin.write_all(b"\n").expect("end continuation");
+        stdin.write_all(b"x + 5\n").expect("write x + 5");
+        stdin.write_all(b":quit\n").expect("write :quit");
+    }
+
+    let output = child.wait_with_output().expect("wait for repl");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[defined: +1 definition, 1 total]"),
+        "got stdout:\n{stdout}"
+    );
+    assert!(stdout.contains("15"), "got stdout:\n{stdout}");
+}
+

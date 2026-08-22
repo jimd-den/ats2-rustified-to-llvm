@@ -150,6 +150,46 @@ pub trait DiagnosticsPort {
     fn info(&self, message: &str);
 }
 
+/// The outcome of executing an emitted program or expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub success: bool,
+}
+
+impl ExecutionResult {
+    pub fn success(stdout: impl Into<String>) -> Self {
+        Self {
+            stdout: stdout.into(),
+            stderr: String::new(),
+            exit_code: 0,
+            success: true,
+        }
+    }
+}
+
+/// Executes LLVM IR or compiled binaries and captures the outcome.
+pub trait RunnerPort {
+    fn run_ir(&self, ir: &str) -> Result<ExecutionResult, String>;
+}
+
+/// Context provided to an external programming mentor or advisor.
+#[derive(Debug, Clone)]
+pub struct AdvisorContext<'a> {
+    pub session_source: &'a str,
+    pub last_submission: &'a str,
+    pub last_errors: &'a [CompileError],
+    pub user_query: Option<&'a str>,
+}
+
+/// Provides conceptual critiques, counterexamples, and Socratic guidance
+/// to help the user understand types and errors without writing code for them.
+pub trait AdvisorPort {
+    fn advise(&self, context: &AdvisorContext) -> Result<String, String>;
+}
+
 #[cfg(test)]
 mod contract_tests {
     //! The port contract, pinned by tests and in-memory fakes.
@@ -401,5 +441,76 @@ mod contract_tests {
         port.info("wrote out.ll");
         assert_eq!(*diag.error_count.borrow(), 1);
         assert_eq!(diag.messages.borrow().as_slice(), ["wrote out.ll"]);
+    }
+
+    // --- runner port contract --------------------------------------
+
+    struct FakeRunner {
+        runs: RefCell<Vec<String>>,
+        result: Result<super::ExecutionResult, String>,
+    }
+
+    impl super::RunnerPort for FakeRunner {
+        fn run_ir(&self, ir: &str) -> Result<super::ExecutionResult, String> {
+            self.runs.borrow_mut().push(ir.to_string());
+            self.result.clone()
+        }
+    }
+
+    #[test]
+    fn runner_port_executes_ir_and_reports_output() {
+        let runner = FakeRunner {
+            runs: RefCell::new(vec![]),
+            result: Ok(super::ExecutionResult::success("42\n")),
+        };
+        let port: &dyn super::RunnerPort = &runner;
+        let res = port.run_ir("define i32 @main()").expect("run");
+        assert_eq!(res.stdout, "42\n");
+        assert!(res.success);
+        assert_eq!(*runner.runs.borrow(), ["define i32 @main()"]);
+    }
+
+    #[test]
+    fn runner_port_reports_execution_errors_as_strings() {
+        let runner = FakeRunner {
+            runs: RefCell::new(vec![]),
+            result: Err("lli failed: syntax error in IR".into()),
+        };
+        let port: &dyn super::RunnerPort = &runner;
+        let err = port.run_ir("bad ir").unwrap_err();
+        assert!(err.contains("syntax error"));
+    }
+
+    // --- advisor port contract -------------------------------------
+
+    struct FakeAdvisor {
+        calls: RefCell<usize>,
+        advice: String,
+    }
+
+    impl super::AdvisorPort for FakeAdvisor {
+        fn advise(&self, context: &super::AdvisorContext) -> Result<String, String> {
+            *self.calls.borrow_mut() += 1;
+            assert!(!context.last_submission.is_empty());
+            Ok(self.advice.clone())
+        }
+    }
+
+    #[test]
+    fn advisor_port_provides_coaching_feedback() {
+        let advisor = FakeAdvisor {
+            calls: RefCell::new(0),
+            advice: "Consider adding a guard constraint to ensure non-negativity.".into(),
+        };
+        let port: &dyn super::AdvisorPort = &advisor;
+        let ctx = super::AdvisorContext {
+            session_source: "",
+            last_submission: "fun sub(n: int, m: int): int = n - m",
+            last_errors: &[],
+            user_query: Some("why is this rejected?"),
+        };
+        let res = port.advise(&ctx).expect("advise");
+        assert!(res.contains("guard constraint"));
+        assert_eq!(*advisor.calls.borrow(), 1);
     }
 }

@@ -9,5 +9,11 @@ license.workspace = true
 name = "ats2llvm"
 path = "src/main.rs"
 
+[[bin]]
+name = "ats2repl"
+path = "src/repl.rs"
+
 [dependencies]
 ats2-infrastructure = { path = "../infrastructure" }
+ats2-application = { path = "../application" }
+ats2-domain = { path = "../domain" }

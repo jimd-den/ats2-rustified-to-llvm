@@ -95,9 +95,40 @@ impl LlvmIrEmitter {
                 }
                 // The storage is declared here; the value is computed in
                 // `main`, in the order the program wrote them.
-                Def::Val(v) if v.name.starts_with(crate::parser::TOPLEVEL_STATEMENT) => {}
+                Def::Val(v) if v.name.starts_with(crate::parser::TOPLEVEL_STATEMENT) => {
+                    let has_main = program.defs.iter().any(|d| match d {
+                        Def::Implement(im) => im.name == "main0" || im.name == "main",
+                        _ => false,
+                    });
+                    if !has_main {
+                        let mut fb = FnBuilder::new();
+                        LlvmIrEmitter.emit_expr(&v.value, &mut fb, &registry, &mut module)?;
+                    }
+                }
                 Def::Val(v) => {
                     let ty = registry.globals[&v.name];
+                    let has_main = program.defs.iter().any(|d| match d {
+                        Def::Implement(im) => im.name == "main0" || im.name == "main",
+                        _ => false,
+                    });
+                    if !has_main {
+                        let mut fb = FnBuilder::new();
+                        let val = LlvmIrEmitter.emit_expr_expecting(
+                            &v.value,
+                            Some(ty),
+                            &mut fb,
+                            &registry,
+                            &mut module,
+                        )?;
+                        if val.ty != ty {
+                            return Err(CompileError::emit(format!(
+                                "`{}` is declared as {} but its value is {}",
+                                v.name,
+                                llvm_ty_str(ty),
+                                llvm_ty_str(val.ty)
+                            )));
+                        }
+                    }
                     module.globals.push(format!(
                         "@{} = internal global {} {}",
                         sanitize(&v.name),
@@ -1840,11 +1871,17 @@ fn emit_function(
     let value =
         LlvmIrEmitter.emit_expr_expecting(&f.body, Some(sig.ret), &mut fb, registry, module)?;
     if value.ty != sig.ret && sig.ret != LlvmType::Void && value.ty != LlvmType::Never {
+        let help = if sig.ret == LlvmType::I8Ptr {
+            format!(" (did you forget the return type annotation `: <type>` before `=` in `fun {}(...): <type> = ...`?)", f.name)
+        } else {
+            String::new()
+        };
         return Err(CompileError::emit(format!(
-            "function `{}` body has type {}, annotation says {}",
+            "function `{}` body has type {}, annotation says {}{}",
             f.name,
             llvm_ty_str(value.ty),
-            llvm_ty_str(sig.ret)
+            llvm_ty_str(sig.ret),
+            help
         )));
     }
     let params: Vec<String> = f
