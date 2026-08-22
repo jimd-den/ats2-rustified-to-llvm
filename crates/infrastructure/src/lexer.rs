@@ -540,11 +540,12 @@ impl<'a> Scanner<'a> {
                     }
                     '\\' => b'\\',
                     '\'' => b'\'',
-                    '"' => b'"',
+                    '\"' => b'\"',
                     'a' => 7,
                     'b' => 8,
                     'f' => 12,
                     'v' => 11,
+                    punct @ ('(' | ')' | '[' | ']' | '{' | '}' | '$' | '#' | '%' | ' ' | ':' | ',' | '.') => punct as u8,
                     other => {
                         self.error(
                             self.span_from(start),
@@ -578,8 +579,6 @@ impl<'a> Scanner<'a> {
     }
 }
 
-/// Build a float literal's stored form.  A small helper so callers need
-/// not reach into the token vocabulary for it.
 pub fn float_bits(value: f64) -> FloatBits {
     FloatBits::new(value)
 }

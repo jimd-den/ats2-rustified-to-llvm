@@ -10,6 +10,7 @@
 //! and maps the outcome to a process exit code.
 //!
 //! Exit codes: 0 = success, 1 = compile/target failure, 2 = usage error.
+use crate::adapters::*;
 
 use std::path::PathBuf;
 
@@ -22,7 +23,7 @@ use crate::llvm_ir::LlvmIrEmitter;
 use crate::parser::Parser;
 use crate::sources::FileSources;
 use crate::toolchain::ClangToolchain;
-use ats2_application::ports::{DiagnosticsPort, OutputPort};
+use ats2_application::ports::{DiagnosticsPort, LlvmEmitterPort, OutputPort, ParserPort};
 
 /// The parsed command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
