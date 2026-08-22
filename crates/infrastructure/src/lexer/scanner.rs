@@ -163,18 +163,40 @@ impl<'a> Scanner<'a> {
                 self.bump();
                 self.push(TokenKind::ColonEq, start);
             }
-            // `'{` and `@{` open a record.  Recognised here because the
-            // brace alone means something else entirely.
+            // `'{` and `@{` open a record.
             '\'' | '@' if self.peek2() == Some('{') => {
                 self.bump();
                 self.bump();
                 self.push(TokenKind::RecordOpen, start);
             }
+            // `'(` opens a tuple.
+            '\'' if self.peek2() == Some('(') => {
+                self.bump();
+                self.bump();
+                self.push(TokenKind::LParen, start);
+            }
+            // `'[` opens an array/bracket.
+            '\'' if self.peek2() == Some('[') => {
+                self.bump();
+                self.bump();
+                self.push(TokenKind::LBracket, start);
+            }
+            // `'$`
+            '\'' if self.peek2() == Some('$') => {
+                self.bump();
+            }
+            '\'' if !self.at_char_literal() => {
+                self.bump();
+                if let Some(c) = self.peek() {
+                    if c.is_ascii_alphabetic() || c == '_' {
+                        self.scan_identifier(start);
+                    }
+                }
+            }
             '\'' => self.scan_char(start),
             _ => self.scan_simple(c, start),
         }
     }
-
     /// Every one-character token, mapped from its character.  Unknown
     /// characters are reported as lex errors.
     fn scan_simple(&mut self, c: char, start: Pos) {

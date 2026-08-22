@@ -37,6 +37,23 @@ use ats2_domain::tokens::{FloatBits, Pos, Span, TokenKind};
     }
 
     #[test]
+
+    #[test]
+    fn lexes_tick_tuples_and_bracket_forms() {
+        let k = kinds("'(0, 1) '[4, 5]");
+        assert_eq!(k[0], TokenKind::LParen);
+        assert_eq!(k[1], TokenKind::IntLit(0));
+        assert_eq!(k[2], TokenKind::Comma);
+        assert_eq!(k[3], TokenKind::IntLit(1));
+        assert_eq!(k[4], TokenKind::RParen);
+
+        assert_eq!(k[5], TokenKind::LBracket);
+        assert_eq!(k[6], TokenKind::IntLit(4));
+        assert_eq!(k[7], TokenKind::Comma);
+        assert_eq!(k[8], TokenKind::IntLit(5));
+        assert_eq!(k[9], TokenKind::RBracket);
+    }
+
     fn lexes_a_record_opener_as_one_token() {
         // `'{` opens a boxed record and `@{` a flat one.  Neither is a
         // quote followed by a brace: a brace alone opens a *block*, and
