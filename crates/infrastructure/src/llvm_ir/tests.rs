@@ -18,6 +18,14 @@ fn emit(source: &str) -> Result<String, CompileError> {
 
     #[test]
     fn ambient_runtime_functions_can_be_implemented_and_called() {
+
+    #[test]
+    fn auto_declares_foreign_c_and_erases_proof_calls() {
+        let ir = emit("fun test(): void = let val () = lemma_matrixref_param() val () = patsolve_parsing__dynload() in () end").expect("emit");
+        assert!(ir.contains("declare void @patsolve_parsing__dynload()"), "got:\n{ir}");
+        assert!(!ir.contains("lemma_matrixref_param"), "got:\n{ir}");
+    }
+
         let ir = emit("implement atsruntime_handle_uncaughtexn(exn) = ()
 fun test_call(): void = patsolve_cnstrnt__dynload()").expect("emit");
         assert!(ir.contains("define void @atsruntime_handle_uncaughtexn(ptr %exn)"), "got:\n{ir}");

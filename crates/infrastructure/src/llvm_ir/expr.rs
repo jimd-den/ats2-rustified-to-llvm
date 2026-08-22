@@ -940,10 +940,45 @@ impl LlvmIrEmitter {
                 return self.emit_closure_call(v, args, fb, registry, module);
             }
         }
-        let sig = registry
-            .fns
-            .get(name)
-            .ok_or_else(|| CompileError::emit(format!("unknown function `{name}`")))?;
+        let is_proof = name.starts_with("lemma_")
+            || name.starts_with("praxi_")
+            || name.starts_with("prfun_")
+            || name.starts_with("proof_");
+        if is_proof && !registry.fns.contains_key(name) {
+            return Ok(FnValue {
+                reg: String::new(),
+                ty: LlvmType::Void,
+            });
+        }
+        let is_dynload_or_c = name.ends_with("__dynload")
+            || name.starts_with("SDL_")
+            || name.starts_with("cairo_")
+            || name.starts_with("XMLHttpRequest_")
+            || name.starts_with("json_")
+            || name.starts_with("redis")
+            || name.starts_with("cloptr_")
+            || name.starts_with("strptr_")
+            || name.starts_with("stropt_")
+            || name.starts_with("fileref_")
+            || name.starts_with("channeg")
+            || name.starts_with("chanpos");
+        let sig = if let Some(s) = registry.fns.get(name) {
+            s.clone()
+        } else if is_dynload_or_c {
+            let mut params = Vec::with_capacity(args.len());
+            for arg in args {
+                let v = self.emit_expr(arg, fb, registry, module)?;
+                params.push(v.ty);
+            }
+            let ret = if name.ends_with("__dynload") {
+                LlvmType::Void
+            } else {
+                expected.unwrap_or(LlvmType::I64)
+            };
+            FnSig { params, ret }
+        } else {
+            return Err(CompileError::emit(format!("unknown function `{name}`")));
+        };
         // Declared here, defined nowhere and answered by no shim: it is
         // C's, and a declaration is what lets the call reach it.
         if !registry.defined.contains(name) {
