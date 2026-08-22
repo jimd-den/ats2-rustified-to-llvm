@@ -3442,3 +3442,11 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
             other => panic!("expected a case, got {other:?}"),
         }
     }
+
+    #[test]
+    fn toplevel_semicolons_and_chained_defines_are_tolerated() {
+        let src = "#define S0 0\n#define B1 1; #define B2 2\ntypedef T = int;\nfun foo(): int = 42;\n";
+        let p = Parser::parse(src).expect("parse succeeds despite semicolons");
+        assert_eq!(p.defs().len(), 4);
+    }
+

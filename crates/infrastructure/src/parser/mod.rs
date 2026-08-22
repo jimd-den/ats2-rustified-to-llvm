@@ -737,6 +737,10 @@ impl<'a> ParseCtx<'a> {
     /// (`local ... in ... end`).
     fn parse_toplevel(&mut self, out: &mut Vec<Def>) -> Result<(), CompileError> {
         match self.peek().kind.clone() {
+            TokenKind::Semicolon => {
+                self.advance();
+                Ok(())
+            }
             // `#include`, `#define`, `#print`, ...
             TokenKind::Hash => self.parse_hash_directive(out),
             TokenKind::Local => self.parse_local(out),
