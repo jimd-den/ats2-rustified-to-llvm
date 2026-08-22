@@ -1,6 +1,9 @@
 use super::*;
+use ats2_domain::ast::*;
+use ats2_domain::errors::CompileError;
+use ats2_domain::statics::*;
+use ats2_domain::tokens::*;
 
-    use super::*;
 
     // --- helpers ----------------------------------------------------
 
