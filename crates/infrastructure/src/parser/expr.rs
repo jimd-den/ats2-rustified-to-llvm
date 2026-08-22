@@ -227,13 +227,17 @@ impl<'a> ParseCtx<'a> {
                     .get(self.pos + 1)
                     .is_some_and(|t| t.kind == TokenKind::LBracket)
             {
-                // `A.[i]` — ATS's array subscript.  The dot is what tells
-                // it apart from `xs[i]`, which indexes `argv`.
+                // `A.[i]` or `A.[]` — ATS's array subscript / cell dereference.
                 self.advance();
                 self.advance();
-                let index = self.parse_expr(0)?;
-                self.expect(&TokenKind::RBracket, "expected `]` after the index")?;
-                expr = Expr::Index(Box::new(expr), Box::new(index));
+                if self.at(&TokenKind::RBracket) {
+                    self.advance();
+                    expr = Expr::Index(Box::new(expr), Box::new(Expr::IntLit(0)));
+                } else {
+                    let index = self.parse_expr(0)?;
+                    self.expect(&TokenKind::RBracket, "expected `]` after the index")?;
+                    expr = Expr::Index(Box::new(expr), Box::new(index));
+                }
             } else if self.at(&TokenKind::Dot)
                 && matches!(
                     self.tokens.get(self.pos + 1).map(|t| &t.kind),
@@ -271,9 +275,14 @@ impl<'a> ParseCtx<'a> {
                 expr = Expr::Field(Box::new(Expr::Deref(Box::new(expr))), field);
             } else if self.at(&TokenKind::LBracket) {
                 self.advance();
-                let index = self.parse_expr(0)?;
-                self.expect(&TokenKind::RBracket, "expected `]` after the index")?;
-                expr = Expr::Index(Box::new(expr), Box::new(index));
+                if self.at(&TokenKind::RBracket) {
+                    self.advance();
+                    expr = Expr::Index(Box::new(expr), Box::new(Expr::IntLit(0)));
+                } else {
+                    let index = self.parse_expr(0)?;
+                    self.expect(&TokenKind::RBracket, "expected `]` after the index")?;
+                    expr = Expr::Index(Box::new(expr), Box::new(index));
+                }
             } else if matches!(expr, Expr::Var(_) | Expr::Inst(..))
                 && self.starts_a_juxtaposed_argument()
             {

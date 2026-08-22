@@ -3498,6 +3498,13 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
 
     #[test]
     fn parses_overload_with_module_paths() {
+
+    #[test]
+    fn parses_empty_bracket_dereference_and_assignment() {
+        let p = Parser::parse("fun f(res: ref(int)): int = let val () = res[] := res[] + 1 in res[] end").expect("parse");
+        assert_eq!(p.defs().len(), 1);
+    }
+
         let p = Parser::parse("overload print with $T.print_intinf\noverload fprint with $UN.fprint_symbol\noverload iseqz with $INT.iseqz_int of 10\nfun f(): int = 1").expect("parse");
         assert_eq!(p.defs().len(), 4);
     }
