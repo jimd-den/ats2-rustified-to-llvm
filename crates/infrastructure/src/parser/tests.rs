@@ -3455,6 +3455,13 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
     }
 
     #[test]
+    fn parses_pattern_guards_with_when() {
+        let src = "fun classify(x: int): int =\n  case+ x of\n  | n when n > 0 => 1\n  | n when n < 0 => ~1\n  | _ => 0\n";
+        let p = Parser::parse(src).expect("parse pattern guards");
+        assert_eq!(p.defs().len(), 1);
+    }
+
+    #[test]
     fn toplevel_semicolons_and_chained_defines_are_tolerated() {
         let src = "#define S0 0\n#define B1 1; #define B2 2\ntypedef T = int;\nfun foo(): int = 42;\n";
         let p = Parser::parse(src).expect("parse succeeds despite semicolons");

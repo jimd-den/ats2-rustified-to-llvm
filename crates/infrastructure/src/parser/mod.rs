@@ -5188,22 +5188,34 @@ impl<'a> ParseCtx<'a> {
         if self.at(&TokenKind::Pipe) {
             self.advance();
         }
-        let mut arms = Vec::new();
+        let mut raw_arms: Vec<(Pattern, Option<Expr>, Expr)> = Vec::new();
         loop {
             let pattern = self.parse_pattern()?;
-            // `| p when guard => e` — a guard we cannot evaluate yet.
-            if self.at(&TokenKind::When) {
-                return Err(self.error_here("pattern guards (`when`) are not supported yet"));
-            }
+            let guard = if self.at(&TokenKind::When) {
+                self.advance();
+                Some(self.parse_expr(0)?)
+            } else {
+                None
+            };
             self.expect(&TokenKind::FatArrow, "expected `=>` after the pattern")?;
             let body = self.parse_expr(0)?;
-            arms.push((pattern, body));
+            raw_arms.push((pattern, guard, body));
             if self.at(&TokenKind::Pipe) {
                 self.advance();
             } else {
                 break;
             }
         }
+        let arms = raw_arms
+            .into_iter()
+            .map(|(pat, guard, body)| {
+                let body = match guard {
+                    Some(g) => Expr::IfThenElse(Box::new(g), Box::new(body), Box::new(Expr::Unit)),
+                    None => body,
+                };
+                (pat, body)
+            })
+            .collect();
         Ok(Expr::Case(Box::new(scrutinee), arms))
     }
 
