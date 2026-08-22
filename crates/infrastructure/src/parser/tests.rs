@@ -3161,6 +3161,17 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
     // --- strings ---------------------------------------------------
 
     #[test]
+    fn decodes_extended_escapes_and_line_continuations() {
+        let p = Parser::parse("fun f(): string = \"line1\\\nline2\"").expect("line continuation parse");
+        let Def::Fun(f) = &p.defs()[0] else { panic!() };
+        assert_eq!(f.body, Expr::StrLit("line1line2".into()));
+
+        let p2 = Parser::parse("fun f(): string = \"\\a\\b\\f\\v\\(\"").expect("extended escapes");
+        let Def::Fun(f2) = &p2.defs()[0] else { panic!() };
+        assert_eq!(f2.body, Expr::StrLit("\x07\x08\x0c\x0b(".into()));
+    }
+
+    #[test]
     fn decodes_string_escapes_at_parse_time() {
         let p = Parser::parse("fun f(): string = \"a\\nb\"").expect("parse");
         let Def::Fun(f) = &p.defs()[0] else { panic!() };

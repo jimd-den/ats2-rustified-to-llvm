@@ -5534,13 +5534,45 @@ fn decode_string(raw: &str, span: Span) -> Result<String, CompileError> {
             return Err(CompileError::parse(span, "dangling escape sequence"));
         };
         match esc {
+            '\n' => {}
             'n' => out.push('\n'),
             't' => out.push('\t'),
             'r' => out.push('\r'),
-            '0' => out.push('\0'),
-            '\\' => out.push('\\'),
-            '"' => out.push('"'),
-            '\'' => out.push('\''),
+            'a' => out.push('\x07'),
+            'b' => out.push('\x08'),
+            'f' => out.push('\x0c'),
+            'v' => out.push('\x0b'),
+            '0'..='7' => {
+                let mut v = esc as u32 - '0' as u32;
+                for _ in 0..2 {
+                    if let Some(d @ '0'..='7') = chars.clone().next() {
+                        chars.next();
+                        v = v * 8 + (d as u32 - '0' as u32);
+                    } else {
+                        break;
+                    }
+                }
+                out.push(std::char::from_u32(v).unwrap_or('\0'));
+            }
+            'x' => {
+                let mut hex = String::new();
+                for _ in 0..2 {
+                    if let Some(h) = chars.clone().next() {
+                        if h.is_ascii_hexdigit() {
+                            chars.next();
+                            hex.push(h);
+                        }
+                    }
+                }
+                if let Ok(b) = u8::from_str_radix(&hex, 16) {
+                    out.push(b as char);
+                } else {
+                    return Err(CompileError::parse(span, "invalid hex escape sequence"));
+                }
+            }
+            '\\' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '$' | '#' | '%' | ' ' => {
+                out.push(esc);
+            }
             other => {
                 return Err(CompileError::parse(
                     span,
