@@ -9,6 +9,8 @@ pub(crate) fn is_skippable_directive(word: &str) -> bool {
         word,
         "staload"
             | "dynload"
+            | "dynstaload"
+            | "staload_"
             | "typedef"
             | "abstype"
             | "abstract"
@@ -22,11 +24,14 @@ pub(crate) fn is_skippable_directive(word: &str) -> bool {
             | "assume"
             | "overload"
             | "macdef"
+            | "macro"
+            | "syntax"
             | "extern"
             | "static"
             | "praxi"
             | "prfun"
             | "prval"
+            | "prvar"
             | "dataprop"
             | "dataview"
             | "datasort"
@@ -64,6 +69,11 @@ pub(crate) fn is_skippable_directive(word: &str) -> bool {
             | "withviewtype"
             | "withvtype"
             | "reassume"
+            | "extvar"
+            | "extcode"
+            | "extern_val"
+            | "sif"
+            | "sexp"
     )
 }
 

@@ -243,6 +243,7 @@ impl<'a> Scanner<'a> {
     }
 
     /// Skip whitespace, line comments, and (nested) block comments.
+    /// Skip whitespace, line comments, and (nested) block comments.
     fn skip_trivia(&mut self) {
         loop {
             match self.peek() {
@@ -250,6 +251,10 @@ impl<'a> Scanner<'a> {
                     self.bump();
                 }
                 Some('/') if self.peek2() == Some('/') => self.skip_line_comment(),
+                Some('/') if self.peek2() == Some('*') => {
+                    let start = self.pos();
+                    self.skip_c_block_comment(start);
+                }
                 Some('(') if self.peek2() == Some('*') => {
                     let start = self.pos();
                     self.skip_block_comment(start);
@@ -259,7 +264,23 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// Consume everything up to (not including) the end of the line.
+    /// Consume a C-style `/* ... */` comment.
+    fn skip_c_block_comment(&mut self, start: Pos) {
+        self.bump();
+        self.bump(); // eat "/*"
+        while let Some(c) = self.peek() {
+            if c == '*' && self.peek2() == Some('/') {
+                self.bump();
+                self.bump();
+                return;
+            }
+            self.bump();
+        }
+        self.error(
+            self.span_from(start),
+            "unterminated `/*` comment (missing `*/`)",
+        );
+    }
     fn skip_line_comment(&mut self) {
         while let Some(c) = self.peek() {
             if c == '\n' {

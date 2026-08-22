@@ -3487,4 +3487,31 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
         let p = Parser::parse(src).expect("parse succeeds despite semicolons");
         assert_eq!(p.defs().len(), 4);
     }
+    #[test]
+    fn parses_c_style_block_comments() {
+        let p = Parser::parse("/* a C-style block comment */ fun f(): int = 1").expect("parse");
+        assert_eq!(p.defs().len(), 1);
+    }
+
+    #[test]
+    fn parses_extvar_and_overload_directives() {
+        let p = Parser::parse(r#"
+            extvar "foo" = 10
+            overload print with print_string
+            overload [] with array_get
+            infixl 30 +
+            fun f(): int = 1
+        "#).expect("parse");
+        assert_eq!(p.defs().len(), 2);
+    }
+
+    #[test]
+    fn parses_val_dash_and_prval_destructuring() {
+        let p = Parser::parse(r#"
+            val- None_vt() = opt
+            prval () = ()
+            fun f(): int = 1
+        "#).expect("parse");
+        assert!(p.defs().len() >= 1);
+    }
 

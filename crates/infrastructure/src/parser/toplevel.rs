@@ -174,6 +174,41 @@ impl<'a> ParseCtx<'a> {
             // question for a type checker, and the naming works exactly
             // as `typedef`'s does, so the two share a path.
             TokenKind::Ident(w) if w == "where" => self.parse_where_type_alias(),
+            TokenKind::Ident(w) if w == "prval" || w == "prvar" || w.starts_with("val-") || w.starts_with("val+") || w.starts_with("prval-") || w.starts_with("prval+") => {
+                self.advance();
+                if let Ok(bind) = self.parse_val_bind(false) {
+                    match bind {
+                        BindKind::Simple(bind) => {
+                            let name = bind.name.unwrap_or_else(|| {
+                                self.gensym += 1;
+                                format!("{TOPLEVEL_STATEMENT}{}", self.gensym)
+                            });
+                            out.push(Def::Val(ValDef {
+                                name,
+                                ty: bind.ty,
+                                value: bind.value,
+                            }));
+                        }
+                        BindKind::Pattern(pat, expr) => {
+                            self.gensym += 1;
+                            let tmp_name = format!("__ats2_tmp_{}", self.gensym);
+                            out.push(Def::Val(ValDef {
+                                name: tmp_name.clone(),
+                                ty: None,
+                                value: expr,
+                            }));
+                            lower_top_pattern(pat, Expr::Var(tmp_name), out, &mut self.gensym);
+                        }
+                    }
+                } else {
+                    self.skip_directive();
+                }
+                Ok(())
+            }
+            TokenKind::Ident(w) if w == "extvar" || w == "extcode" || w == "sif" => {
+                self.skip_directive();
+                Ok(())
+            }
             TokenKind::Ident(w) if w == "typedef" || w == "vtypedef" => {
                 if !self.parse_typedef() {
                     self.skip_directive();
@@ -1825,16 +1860,25 @@ impl<'a> ParseCtx<'a> {
         let save = self.pos;
         self.advance(); // `overload`
         let op = match self.peek().kind.clone() {
-            TokenKind::Star => "*",
-            TokenKind::Slash => "/",
-            TokenKind::Plus => "+",
-            TokenKind::Minus => "-",
-            TokenKind::Lt => "<",
-            TokenKind::Gt => ">",
-            TokenKind::Le => "<=",
-            TokenKind::Ge => ">=",
-            TokenKind::Eq => "=",
-            TokenKind::Ne => "<>",
+            TokenKind::Star => "*".to_string(),
+            TokenKind::Slash => "/".to_string(),
+            TokenKind::Plus => "+".to_string(),
+            TokenKind::Minus => "-".to_string(),
+            TokenKind::Lt => "<".to_string(),
+            TokenKind::Gt => ">".to_string(),
+            TokenKind::Le => "<=".to_string(),
+            TokenKind::Ge => ">=".to_string(),
+            TokenKind::Eq => "=".to_string(),
+            TokenKind::Ne => "<>".to_string(),
+            TokenKind::Ident(n) => n,
+            TokenKind::LBracket => {
+                self.advance();
+                if self.at(&TokenKind::RBracket) {
+                    self.advance();
+                }
+                self.skip_directive();
+                return None;
+            }
             _ => {
                 self.pos = save;
                 self.skip_directive();
