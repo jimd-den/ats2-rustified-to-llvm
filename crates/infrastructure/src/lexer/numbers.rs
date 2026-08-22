@@ -58,23 +58,12 @@ impl<'a> Scanner<'a> {
             };
         }
 
-        // Integer width/signedness suffixes (`0ull`, `10L`, `3u`, `0x10ULL`)
+        // Integer width/signedness/size suffixes (`0ull`, `10L`, `3u`, `0x10ULL`, `0sz`, `0SZ`, `0t`, `0i`)
         while let Some(c) = self.peek() {
-            if matches!(c, 'u' | 'U' | 'l' | 'L' | 'z' | 'Z' | 't' | 'T') {
+            if matches!(c, 'u' | 'U' | 'l' | 'L' | 'z' | 'Z' | 't' | 'T' | 's' | 'S' | 'i' | 'I') {
                 self.bump();
             } else {
                 break;
-            }
-        }
-
-        let full_text = &self.src[start.offset..self.pos];
-        if let Some(c) = self.peek() {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                self.error(
-                    self.span_from(start),
-                    format!("invalid integer literal `{full_text}`"),
-                );
-                return;
             }
         }
 
@@ -83,6 +72,25 @@ impl<'a> Scanner<'a> {
         } else {
             &self.src[start.offset..digits_end]
         };
+
+        if let Some(c) = self.peek() {
+            if c.is_ascii_alphabetic() && c != '_' {
+                let rest = &self.src[self.pos..];
+                let is_keyword_prefix = rest.starts_with("then")
+                    || rest.starts_with("else")
+                    || rest.starts_with("end")
+                    || rest.starts_with("in")
+                    || rest.starts_with("and")
+                    || rest.starts_with("mod");
+                if !is_keyword_prefix {
+                    self.error(
+                        self.span_from(start),
+                        format!("invalid integer literal `{raw_digits}`"),
+                    );
+                    return;
+                }
+            }
+        }
 
         let value = if is_hex {
             i64::from_str_radix(raw_digits, 16)
@@ -94,7 +102,7 @@ impl<'a> Scanner<'a> {
             Ok(v) => self.push(TokenKind::IntLit(v), start),
             Err(_) => self.error(
                 self.span_from(start),
-                format!("integer literal `{full_text}` is out of range"),
+                format!("integer literal `{raw_digits}` is out of range"),
             ),
         }
     }
