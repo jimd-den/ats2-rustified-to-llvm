@@ -21,6 +21,14 @@ fn emit(source: &str) -> Result<String, CompileError> {
 
     #[test]
     fn auto_declares_foreign_c_and_erases_proof_calls() {
+
+    #[test]
+    fn test_format_and_extracted_shims_pipeline() {
+        let ir = emit("implement main0() = let val () = println!(\"hello %s\", \"world\") val arr = arrayptr_make_elt<int>(10, 0) in () end").expect("emit");
+        assert!(ir.contains("@printf"), "got:\n{ir}");
+        assert!(ir.contains("@calloc"), "got:\n{ir}");
+    }
+
         let ir = emit("fun test(): void = let val () = lemma_matrixref_param() val () = patsolve_parsing__dynload() in () end").expect("emit");
         assert!(ir.contains("declare void @patsolve_parsing__dynload()"), "got:\n{ir}");
         assert!(!ir.contains("lemma_matrixref_param"), "got:\n{ir}");
