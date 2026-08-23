@@ -971,6 +971,7 @@ impl LlvmIrEmitter {
             || name.starts_with("channeg")
             || name.starts_with("chanpos")
             || name.starts_with("mpz_")
+            || name.starts_with("dirent_")
             || matches!(
                 name.as_str(),
                 "getenv"
@@ -980,12 +981,16 @@ impl LlvmIrEmitter {
                     | "fileno"
                     | "fnmatch"
                     | "fgetc"
+                    | "feof"
                     | "fprintf"
+                    | "alloca"
+                    | "mfree_libc"
                     | "sin"
                     | "cos"
                     | "sqrt"
                     | "malloc_usable_size"
                     | "alert"
+                    | "xmlString2string"
             );
         let sig = if let Some(s) = registry.fns.get(name) {
             s.clone()

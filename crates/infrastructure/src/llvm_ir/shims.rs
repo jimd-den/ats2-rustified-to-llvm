@@ -1603,7 +1603,59 @@ impl LlvmIrEmitter {
                     ty: LlvmType::I1,
                 }))
             }
-            "g0int2string" | "int2string" => {
+            "ref_addback" | "ref_vt_addback" => {
+                let [r] = args else {
+                    return Err(CompileError::emit("`ref_addback` takes one reference"));
+                };
+                let v = self.emit_expr(r, fb, registry, module)?;
+                Ok(Some(v))
+            }
+            "fprint_char" => {
+                let [out, c] = args else {
+                    return Err(CompileError::emit("`fprint_char` takes a stream and a character"));
+                };
+                let stream = self.emit_stream_argument(name, out, fb, registry, module)?;
+                let v = self.emit_expr(c, fb, registry, module)?;
+                self.require(v.ty, LlvmType::I8, "`fprint_char`")?;
+                let widened = fb.fresh_temp();
+                fb.line(format!("{widened} = sext i8 {} to i32", v.reg));
+                self.emit_printf(stream, "%c", &[format!("i32 {widened}")], fb, module);
+                Ok(Some(FnValue {
+                    reg: String::new(),
+                    ty: LlvmType::Void,
+                }))
+            }
+            "fprint" | "fprint_val" | "fprint_int" | "fprint_string" | "fprint_bool" | "fprint_double" => {
+                let [out, x] = args else {
+                    return Err(CompileError::emit(format!("`{name}` takes two arguments")));
+                };
+                let stream = self.emit_stream_argument(name, out, fb, registry, module)?;
+                self.emit_format(
+                    &stream,
+                    std::slice::from_ref(x),
+                    false,
+                    fb,
+                    registry,
+                    module,
+                )?;
+                Ok(Some(FnValue {
+                    reg: String::new(),
+                    ty: LlvmType::Void,
+                }))
+            }
+            "char2i" => {
+                let [c] = args else {
+                    return Err(CompileError::emit("`char2i` takes one character"));
+                };
+                let v = self.emit_expr(c, fb, registry, module)?;
+                let reg = fb.fresh_temp();
+                fb.line(format!("{reg} = sext i8 {} to i64", v.reg));
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I64,
+                }))
+            }
+            "tostring" | "g0int2string" | "int2string" => {
                 let [n] = args else {
                     return Err(CompileError::emit("`g0int2string` takes one integer"));
                 };
