@@ -522,6 +522,14 @@ impl<'a> ParseCtx<'a> {
         let mut ambiguous = Vec::new();
         if !self.at(&TokenKind::RParen) {
             loop {
+                if self.at(&TokenKind::Pipe) {
+                    self.advance();
+                    params.clear();
+                    ambiguous.clear();
+                    if self.at(&TokenKind::RParen) {
+                        break;
+                    }
+                }
                 // `fun f (string, int): int` — a *declaration* may give
                 // the types alone, because a signature has no body to
                 // name them for.  A generated name keeps the parameter
@@ -529,10 +537,19 @@ impl<'a> ParseCtx<'a> {
                     && self.tokens.get(self.pos + 1).is_some_and(|t| {
                         matches!(
                             t.kind,
-                            TokenKind::Colon | TokenKind::Comma | TokenKind::RParen
+                            TokenKind::Colon | TokenKind::Comma | TokenKind::RParen | TokenKind::Pipe
                         )
                     });
                 if !named {
+                    if self.at(&TokenKind::Pipe) {
+                        self.advance();
+                        params.clear();
+                        ambiguous.clear();
+                        if self.at(&TokenKind::RParen) {
+                            break;
+                        }
+                        continue;
+                    }
                     let borrowed = self.at_borrow_marker();
                     let ty = self.parse_type()?;
                     self.gensym += 1;
@@ -543,6 +560,15 @@ impl<'a> ParseCtx<'a> {
                     });
                     if self.at(&TokenKind::Comma) {
                         self.advance();
+                        continue;
+                    }
+                    if self.at(&TokenKind::Pipe) {
+                        self.advance();
+                        params.clear();
+                        ambiguous.clear();
+                        if self.at(&TokenKind::RParen) {
+                            break;
+                        }
                         continue;
                     }
                     break;
@@ -592,6 +618,13 @@ impl<'a> ParseCtx<'a> {
                 params.push(Param { borrowed, name, ty });
                 if self.at(&TokenKind::Comma) {
                     self.advance();
+                } else if self.at(&TokenKind::Pipe) {
+                    self.advance();
+                    params.clear();
+                    ambiguous.clear();
+                    if self.at(&TokenKind::RParen) {
+                        break;
+                    }
                 } else {
                     break;
                 }
@@ -706,14 +739,25 @@ impl<'a> ParseCtx<'a> {
             self.advance();
             let _after = self.parse_type()?;
         }
+        let mut inner = inner;
+        while self.at(&TokenKind::ColonColon) {
+            self.advance();
+            let rhs = self.parse_type()?;
+            inner = Ty::App("cons".into(), vec![inner, rhs]);
+        }
         Ok(inner)
     }
 
     /// `name` or `name(args)`, optionally followed by `-> rest`.
-
     pub(crate) fn parse_named_type(&mut self) -> Result<Ty, CompileError> {
         let mut name = self.expect_ident("expected a type name")?;
-        // `$STDLIB.FILEref` — a type reached through a `staload` alias.
+        if name == "$extype" || name == "$extype_struct" {
+            if let TokenKind::StrLit(c_name) = self.peek().kind.clone() {
+                self.advance();
+                let ty_name = if c_name.contains('*') { "ptr".into() } else { c_name };
+                return self.finish_arrow_type(Ty::Name(ty_name));
+            }
+        }
         // The lexer reads `$STDLIB` as one name, and the `.FILEref` is a
         // whole token after it.  This compiler keeps one flat namespace,
         // so the qualifier is dropped and the name stands on its own, as
@@ -894,9 +938,6 @@ impl<'a> ParseCtx<'a> {
                     {
                         let w = w.clone();
                         self.advance();
-                        // An alias means what it was declared to mean,
-                        // unless a type variable of that name is in
-                        // scope, which shadows it.
                         let bound = self.type_vars.iter().any(|v| *v == w);
                         ty_args.push(if bound {
                             Ty::Name(w)
@@ -906,11 +947,19 @@ impl<'a> ParseCtx<'a> {
                         continue;
                     }
                 }
+                TokenKind::Minus => {
+                    // Check for negative index like `n-i`
+                    if self.tokens.get(self.pos + 1).is_some_and(|t| matches!(t.kind, TokenKind::Ident(_) | TokenKind::IntLit(_))) {
+                        self.advance(); // skip `-`
+                        self.advance(); // skip operand
+                        continue;
+                    }
+                    break;
+                }
                 _ => break,
             }
             self.advance();
         }
-        // Juxtaposition applies the type to the type arguments: `bintree
         // a` is `bintree(a)`.  When the head was already applied
         // (`list(int) a`), the arguments extend it.
         let atom = if ty_args.is_empty() {

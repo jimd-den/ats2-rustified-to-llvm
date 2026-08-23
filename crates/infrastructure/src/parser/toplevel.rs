@@ -1580,16 +1580,16 @@ impl<'a> ParseCtx<'a> {
         };
         self.advance();
         // `abstype point (a) = ...` — a parameterised family governed by
-        // its `=`, not an opaque leaf.  A `(` here means there is more
-        // to this declaration than a bare name; hand it back.
+        // its `=`, not an opaque leaf. If followed by `(` but NO `=`, it is
+        // an opaque parameterized abstype declaration like `abstype choose(int, type)`.
         if self.at(&TokenKind::LParen) {
-            self.pos = save;
-            return false;
-        }
-        // A concrete `= t` is the ordinary abstract alias, which the
-        // `typedef` reader already took; arriving here with an `=` means
-        // this branch was reached out of turn and should not claim it.
-        if self.at(&TokenKind::Eq) {
+            let save_paren = self.pos;
+            self.skip_balanced(&TokenKind::LParen, &TokenKind::RParen);
+            if self.at(&TokenKind::Eq) {
+                self.pos = save;
+                return false;
+            }
+        } else if self.at(&TokenKind::Eq) {
             self.pos = save;
             return false;
         }
