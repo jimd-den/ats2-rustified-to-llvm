@@ -421,7 +421,14 @@ impl Signature {
         // dynamic result still has an identity and the refinement holds of
         // that identity.
         let result = match result_indices.as_slice() {
-            [only] => Some(only.clone()),
+            [only] => {
+                if !matches!(&self.ret, Ty::Index(..)) {
+                    if let Some(claim) = claim_of(&self.ret) {
+                        assumptions.push(claim.substitute(&[(SELF.to_string(), only.clone())]));
+                    }
+                }
+                Some(only.clone())
+            }
             [] => claim_of(&self.ret).map(|claim| {
                 let value = fresh.var("res");
                 assumptions.push(claim.substitute(&[(SELF.to_string(), value.clone())]));

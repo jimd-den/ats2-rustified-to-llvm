@@ -847,6 +847,23 @@ pub fn entails(hyps: &[SExp], goal: &SExp) -> Verdict {
     // already understands. Splitting here rather than in `atoms` keeps
     // the system a conjunction.
     if let SExp::App(op, args) = goal {
+        if op == "==" && args.len() == 2 && args[0] == args[1] {
+            return Verdict::Proved;
+        }
+        if op == "==" && args.len() == 2 {
+            let flipped = SExp::App("==".into(), vec![args[1].clone(), args[0].clone()]);
+            if hyps.contains(&flipped) {
+                return Verdict::Proved;
+            }
+        }
+        if op == "&&" && args.len() == 2 {
+            let (left, right) = (entails(hyps, &args[0]), entails(hyps, &args[1]));
+            return match (left, right) {
+                (Verdict::Proved, Verdict::Proved) => Verdict::Proved,
+                (Verdict::Refuted, _) | (_, Verdict::Refuted) => Verdict::Refuted,
+                _ => Verdict::Unknown,
+            };
+        }
         if op == "!=" && args.len() == 2 {
             let equality = SExp::App("==".into(), args.clone());
             return match entails(hyps, &equality) {

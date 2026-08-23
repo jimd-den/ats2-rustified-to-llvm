@@ -283,6 +283,18 @@ impl<'a> ParseCtx<'a> {
                     self.expect(&TokenKind::RBracket, "expected `]` after the index")?;
                     expr = Expr::Index(Box::new(expr), Box::new(index));
                 }
+            } else if matches!(expr, Expr::Var(_) | Expr::Inst(..)) && self.at(&TokenKind::LBrace) {
+                // `f{a}(x)` or `f{a,b}(x)` — static template argument application.
+                self.advance(); // `{`
+                let mut depth = 1;
+                while depth > 0 && !self.at(&TokenKind::Eof) {
+                    if self.at(&TokenKind::LBrace) {
+                        depth += 1;
+                    } else if self.at(&TokenKind::RBrace) {
+                        depth -= 1;
+                    }
+                    self.advance();
+                }
             } else if matches!(expr, Expr::Var(_) | Expr::Inst(..))
                 && self.starts_a_juxtaposed_argument()
             {
@@ -493,6 +505,9 @@ impl<'a> ParseCtx<'a> {
                     let (params, body) = &self.macro_funs[&name];
                     Ok(splice_macro_args(body, params, &args))
                 }
+            }
+            TokenKind::Ident(name) if matches!(name.as_str(), "llam" | "fix" | "fix@") => {
+                self.parse_lam()
             }
             // `begin e1; e2 end` — ATS's word for a parenthesized
             // sequence.  It is not a keyword in the lexer because it is

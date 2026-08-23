@@ -521,7 +521,9 @@ impl LlvmIrEmitter {
             // of it static, and all of it one machine instruction.
             "g0int_add" | "g1int_add" | "g0int_sub" | "g1int_sub" | "g0int_mul" | "g1int_mul"
             | "g0int_div" | "g1int_div" | "g0int_mod" | "g1int_mod" | "g0int_nmod"
-            | "g1int_nmod" | "g0int_ndiv" | "g1int_ndiv" => {
+            | "g1int_nmod" | "g0int_ndiv" | "g1int_ndiv" | "g0float_add" | "g1float_add"
+            | "g0float_sub" | "g1float_sub" | "g0float_mul" | "g1float_mul" | "g0float_div"
+            | "g1float_div" | "g0double_add" | "g0double_sub" | "g0double_mul" | "g0double_div" => {
                 let [a, b] = args else {
                     return Err(CompileError::emit(format!("`{name}` takes two numbers")));
                 };
@@ -533,6 +535,54 @@ impl LlvmIrEmitter {
                     _ => BinOp::Mod,
                 };
                 Ok(Some(self.emit_binop(op, a, b, fb, registry, module)?))
+            }
+            "g0int_lt" | "g1int_lt" | "g0int_lte" | "g1int_lte" | "g0int_gt" | "g1int_gt"
+            | "g0int_gte" | "g1int_gte" | "g0int_eq" | "g1int_eq" | "g0int_neq" | "g1int_neq"
+            | "g0float_lt" | "g1float_lt" | "g0float_lte" | "g1float_lte" | "g0float_gt"
+            | "g1float_gt" | "g0float_gte" | "g1float_gte" | "g0float_eq" | "g1float_eq"
+            | "g0float_neq" | "g1float_neq" | "g0double_lt" | "g0double_lte" | "g0double_gt"
+            | "g0double_gte" | "g0double_eq" | "g0double_neq" | "lt_int_int" => {
+                let [a, b] = args else {
+                    return Err(CompileError::emit(format!("`{name}` takes two values")));
+                };
+                let op = if name.ends_with("_lt") || name.ends_with("lt_int_int") {
+                    BinOp::Lt
+                } else if name.ends_with("_lte") {
+                    BinOp::Le
+                } else if name.ends_with("_gt") {
+                    BinOp::Gt
+                } else if name.ends_with("_gte") {
+                    BinOp::Ge
+                } else if name.ends_with("_eq") {
+                    BinOp::Eq
+                } else {
+                    BinOp::Ne
+                };
+                Ok(Some(self.emit_binop(op, a, b, fb, registry, module)?))
+            }
+            "print" | "println" => {
+                let [x] = args else {
+                    return Err(CompileError::emit(format!("`{name}` takes one value")));
+                };
+                self.emit_format(
+                    &Stream::Stdout,
+                    std::slice::from_ref(x),
+                    name == "println",
+                    fb,
+                    registry,
+                    module,
+                )?;
+                Ok(Some(FnValue {
+                    reg: "".into(),
+                    ty: LlvmType::Void,
+                }))
+            }
+            "g0i2i" | "g1i2i" | "cast2size" | "c2uc" => {
+                let [x] = args else {
+                    return Err(CompileError::emit(format!("`{name}` takes one value")));
+                };
+                let v = self.emit_expr(x, fb, registry, module)?;
+                Ok(Some(v))
             }
             // `list_is_nil (xs)` / `list_is_cons (xs)` — the two questions
             // a program asks a list without taking it apart.
