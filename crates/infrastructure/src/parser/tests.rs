@@ -3495,9 +3495,15 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
 
     #[test]
     fn parses_extvar_and_overload_directives() {
+        let p = Parser::parse("extvar \"foo\" = 10\noverload print with print_string\noverload [] with array_get\ninfixl 30 +\nfun f(): int = 1").expect("parse");
+        assert_eq!(p.defs().len(), 2);
+    }
 
     #[test]
     fn parses_overload_with_module_paths() {
+        let p = Parser::parse("overload print with $T.print_intinf\noverload fprint with $UN.fprint_symbol\noverload iseqz with $INT.iseqz_int of 10\nfun f(): int = 1").expect("parse");
+        assert_eq!(p.defs().len(), 4);
+    }
 
     #[test]
     fn parses_empty_bracket_dereference_and_assignment() {
@@ -3505,20 +3511,11 @@ fun f(xs: list0(int)): int = case xs of | x :: rest => 1 | _ => 0",
         assert_eq!(p.defs().len(), 1);
     }
 
-        let p = Parser::parse("overload print with $T.print_intinf\noverload fprint with $UN.fprint_symbol\noverload iseqz with $INT.iseqz_int of 10\nfun f(): int = 1").expect("parse");
-        assert_eq!(p.defs().len(), 4);
-    }
-
-        let p = Parser::parse(r#"
-            extvar "foo" = 10
-            overload print with print_string
-            overload [] with array_get
-            infixl 30 +
-            fun f(): int = 1
-        "#).expect("parse");
+    #[test]
+    fn parses_fnx_mutually_recursive_functions() {
+        let p = Parser::parse("fnx loop0(x: int): int = loop1(x, 0) and loop1(x: int, y: int): int = if x > 0 then loop1(x - 1, y + 1) else y").expect("parse");
         assert_eq!(p.defs().len(), 2);
     }
-
     #[test]
     fn parses_val_dash_and_prval_destructuring() {
         let p = Parser::parse(r#"

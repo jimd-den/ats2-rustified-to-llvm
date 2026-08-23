@@ -530,8 +530,7 @@ impl<'a> ParseCtx<'a> {
                 // `fun f (string, int): int` — a *declaration* may give
                 // the types alone, because a signature has no body to
                 // name them for.  A generated name keeps the parameter
-                // list one shape for everything downstream.
-                let named = matches!(self.peek().kind, TokenKind::Ident(_))
+                let named = (matches!(self.peek().kind, TokenKind::Ident(_)) || self.at(&TokenKind::Underscore))
                     && self.tokens.get(self.pos + 1).is_some_and(|t| {
                         matches!(
                             t.kind,
@@ -553,7 +552,13 @@ impl<'a> ParseCtx<'a> {
                     }
                     break;
                 }
-                let mut name = self.expect_ident("expected a parameter name")?;
+                let mut name = if self.at(&TokenKind::Underscore) {
+                    self.advance();
+                    self.gensym += 1;
+                    format!("arg${}", self.gensym)
+                } else {
+                    self.expect_ident("expected a parameter name")?
+                };
                 let mut borrowed = false;
                 let ty = if self.at(&TokenKind::Colon) {
                     self.advance();
