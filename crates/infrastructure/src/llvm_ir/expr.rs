@@ -943,7 +943,12 @@ impl LlvmIrEmitter {
         let is_proof = name.starts_with("lemma_")
             || name.starts_with("praxi_")
             || name.starts_with("prfun_")
-            || name.starts_with("proof_");
+            || name.starts_with("prval_")
+            || name.starts_with("prfn_")
+            || name.starts_with("proof_")
+            || name.starts_with("prop_verify")
+            || name.starts_with("ckastloc_")
+            || name.starts_with("$solver_assert");
         if is_proof && !registry.fns.contains_key(name) {
             return Ok(FnValue {
                 reg: String::new(),
@@ -954,6 +959,9 @@ impl LlvmIrEmitter {
             || name.starts_with("SDL_")
             || name.starts_with("cairo_")
             || name.starts_with("XMLHttpRequest_")
+            || name.starts_with("document_")
+            || name.starts_with("event_")
+            || name.starts_with("ev_")
             || name.starts_with("json_")
             || name.starts_with("redis")
             || name.starts_with("cloptr_")
@@ -961,7 +969,24 @@ impl LlvmIrEmitter {
             || name.starts_with("stropt_")
             || name.starts_with("fileref_")
             || name.starts_with("channeg")
-            || name.starts_with("chanpos");
+            || name.starts_with("chanpos")
+            || name.starts_with("mpz_")
+            || matches!(
+                name.as_str(),
+                "getenv"
+                    | "sleep"
+                    | "time"
+                    | "readdir"
+                    | "fileno"
+                    | "fnmatch"
+                    | "fgetc"
+                    | "fprintf"
+                    | "sin"
+                    | "cos"
+                    | "sqrt"
+                    | "malloc_usable_size"
+                    | "alert"
+            );
         let sig = if let Some(s) = registry.fns.get(name) {
             s.clone()
         } else if is_dynload_or_c {

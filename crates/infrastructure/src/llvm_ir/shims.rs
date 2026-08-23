@@ -1586,6 +1586,82 @@ impl LlvmIrEmitter {
                     ty: LlvmType::I8Ptr,
                 }))
             }
+            "char_isprint" | "isprint" => {
+                let [c] = args else {
+                    return Err(CompileError::emit("`char_isprint` takes one character"));
+                };
+                let v = self.emit_expr(c, fb, registry, module)?;
+                module.externs.insert("declare i32 @isprint(i32)");
+                let widened = fb.fresh_temp();
+                fb.line(format!("{widened} = sext i8 {} to i32", v.reg));
+                let res = fb.fresh_temp();
+                fb.line(format!("{res} = call i32 @isprint(i32 {widened})"));
+                let is_p = fb.fresh_temp();
+                fb.line(format!("{is_p} = icmp ne i32 {res}, 0"));
+                Ok(Some(FnValue {
+                    reg: is_p,
+                    ty: LlvmType::I1,
+                }))
+            }
+            "g0int2string" | "int2string" => {
+                let [n] = args else {
+                    return Err(CompileError::emit("`g0int2string` takes one integer"));
+                };
+                let v = self.emit_expr(n, fb, registry, module)?;
+                module.externs.insert("declare i32 @snprintf(ptr, i64, ptr, ...)");
+                let buf = self.emit_alloc_bytes("32", fb, module);
+                let fmt = module.add_format("%ld");
+                fb.line(format!(
+                    "call i32 (ptr, i64, ptr, ...) @snprintf(ptr {buf}, i64 32, ptr {fmt}, i64 {})",
+                    v.reg
+                ));
+                Ok(Some(FnValue {
+                    reg: buf,
+                    ty: LlvmType::I8Ptr,
+                }))
+            }
+            "compare_string_string" | "strcmp" => {
+                let [s1, s2] = args else {
+                    return Err(CompileError::emit("`compare_string_string` takes two strings"));
+                };
+                let v1 = self.emit_string_arg(s1, name, fb, registry, module)?;
+                let v2 = self.emit_string_arg(s2, name, fb, registry, module)?;
+                module.externs.insert("declare i32 @strcmp(ptr, ptr)");
+                let res = fb.fresh_temp();
+                fb.line(format!("{res} = call i32 @strcmp(ptr {v1}, ptr {v2})"));
+                let reg = fb.fresh_temp();
+                fb.line(format!("{reg} = sext i32 {res} to i64"));
+                Ok(Some(FnValue {
+                    reg,
+                    ty: LlvmType::I64,
+                }))
+            }
+            "ref_takeout" | "ref_vt_takeout" => {
+                let [r] = args else {
+                    return Err(CompileError::emit("`ref_takeout` takes one reference"));
+                };
+                let v = self.emit_expr(r, fb, registry, module)?;
+                Ok(Some(v))
+            }
+            "$effmask_all" | "$effmask_ref" | "$effmask_exn" | "$effmask_wrt" | "$effmask_ntm" => {
+                let [e] = args else {
+                    return Err(CompileError::emit(format!("`{name}` takes one expression")));
+                };
+                Ok(Some(self.emit_expr(e, fb, registry, module)?))
+            }
+            "None_vt" | "None" => {
+                Ok(Some(FnValue {
+                    reg: "null".into(),
+                    ty: LlvmType::I8Ptr,
+                }))
+            }
+            "Some_vt" | "Some" => {
+                let [val] = args else {
+                    return Err(CompileError::emit(format!("`{name}` takes one argument")));
+                };
+                let v = self.emit_expr(val, fb, registry, module)?;
+                Ok(Some(v))
+            }
             _ => Ok(None),
         }
     }
