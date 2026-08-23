@@ -355,12 +355,7 @@ impl<'a> ParseCtx<'a> {
         // `f<>` — "work it out".  The lexer reads `<>` as the not-equal
         // token, so the empty argument list arrives as one token and has
         // to be matched on its own.
-        if self.at(&TokenKind::Ne)
-            && self
-                .tokens
-                .get(self.pos + 1)
-                .is_some_and(|t| t.kind == TokenKind::LParen)
-        {
+        if self.at(&TokenKind::Ne) {
             self.advance();
             return Ok((Some(Vec::new()), static_args));
         }

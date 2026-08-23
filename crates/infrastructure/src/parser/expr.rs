@@ -136,14 +136,10 @@ impl<'a> ParseCtx<'a> {
             } else {
                 Expr::Let(binds, Box::new(lhs))
             };
-            // A pattern binding inside a `where` has no following body of
-            // its own to scope over; the clause is not one this subset
-            // needs, so the pattern is refused rather than guessed at.
-            if pending.is_some() {
-                return Err(
-                    self.error_here("a pattern binding is not supported inside a `where` clause")
-                );
-            }
+            let inner = match pending {
+                Some((pattern, value)) => must_match(value, pattern, inner),
+                None => inner,
+            };
             lhs = wrap_funs(funs, inner);
         }
         Ok(lhs)
