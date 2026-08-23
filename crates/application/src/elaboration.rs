@@ -69,10 +69,8 @@ pub fn elaborate(
         }
 
         let Some(candidates) = declarations.get(&implementation.name) else {
-            return Err(vec![CompileError::emit(format!(
-                "`{}` is implemented but never declared; add an `extern fun` for it",
-                implementation.name
-            ))]);
+            definitions.push(Def::Implement(implementation));
+            continue;
         };
         let declaration = candidates
             .iter()

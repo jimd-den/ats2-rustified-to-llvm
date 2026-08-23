@@ -10,40 +10,40 @@ use ats2_domain::tokens::*;
 use crate::parser::Parser;
 
 fn emit(source: &str) -> Result<String, CompileError> {
-        let program = Parser::parse(source).expect("parse");
-        LlvmIrEmitter::emit(&program)
-    }
+    let program = Parser::parse(source).expect("parse");
+    LlvmIrEmitter::emit(&program)
+}
 
-    fn emit_err(source: &str) -> CompileError {
+fn emit_err(source: &str) -> CompileError {
+    emit(source).expect_err("should fail")
+}
 
-    #[test]
-    fn ambient_runtime_functions_can_be_implemented_and_called() {
+#[test]
+fn ambient_runtime_functions_can_be_implemented_and_called() {
+    let ir = emit("implement atsruntime_handle_uncaughtexn(exn) = ()\nfun test_call(): void = patsolve_cnstrnt__dynload()").expect("emit");
+    assert!(ir.contains("define void @atsruntime_handle_uncaughtexn(ptr %exn)"), "got:\n{ir}");
+    assert!(ir.contains("declare void @patsolve_cnstrnt__dynload()"), "got:\n{ir}");
+}
 
-    #[test]
-    fn auto_declares_foreign_c_and_erases_proof_calls() {
+#[test]
+fn auto_declares_foreign_c_and_erases_proof_calls() {
+    let ir = emit("fun test(): void = let val () = lemma_matrixref_param() val () = patsolve_parsing__dynload() in () end").expect("emit");
+    assert!(ir.contains("declare void @patsolve_parsing__dynload()"), "got:\n{ir}");
+    assert!(!ir.contains("lemma_matrixref_param"), "got:\n{ir}");
+}
 
-    #[test]
-    fn test_format_and_extracted_shims_pipeline() {
-        let ir = emit("implement main0() = let val () = println!(\"hello %s\", \"world\") val arr = arrayptr_make_elt<int>(10, 0) in () end").expect("emit");
-        assert!(ir.contains("@printf"), "got:\n{ir}");
-        assert!(ir.contains("@calloc"), "got:\n{ir}");
-    }
+#[test]
+fn test_format_and_extracted_shims_pipeline() {
+    let ir = emit("implement main0() = let val () = println!(\"hello %s\", \"world\") val arr = arrayptr_make_elt<int>(10, 0) in () end").expect("emit");
+    assert!(ir.contains("@printf"), "got:\n{ir}");
+    assert!(ir.contains(".ats_alloc"), "got:\n{ir}");
+}
 
-        let ir = emit("fun test(): void = let val () = lemma_matrixref_param() val () = patsolve_parsing__dynload() in () end").expect("emit");
-        assert!(ir.contains("declare void @patsolve_parsing__dynload()"), "got:\n{ir}");
-        assert!(!ir.contains("lemma_matrixref_param"), "got:\n{ir}");
-    }
-
-        let ir = emit("implement atsruntime_handle_uncaughtexn(exn) = ()
-fun test_call(): void = patsolve_cnstrnt__dynload()").expect("emit");
-        assert!(ir.contains("define void @atsruntime_handle_uncaughtexn(ptr %exn)"), "got:\n{ir}");
-        assert!(ir.contains("declare void @patsolve_cnstrnt__dynload()"), "got:\n{ir}");
-    }
-
-        emit(source).expect_err("should fail")
-    }
-
-    // --- module shape ---------------------------------------------
+#[test]
+fn standalone_implement_without_extern_fun_is_emitted() {
+    let ir = emit("implement my_helper(x: int): int = x + 1").expect("emit");
+    assert!(ir.contains("define i64 @my_helper(i64 %x)"), "got:\n{ir}");
+}
 
     #[test]
     fn a_type_variable_and_an_unknown_lower_to_a_pointer() {

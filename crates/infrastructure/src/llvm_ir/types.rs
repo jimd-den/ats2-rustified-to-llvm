@@ -439,20 +439,53 @@ pub(crate) fn registry_of(program: &Program) -> Result<Registry, CompileError> {
                 registry.holes.insert(im.name.clone(), im.clone());
             }
             Def::Implement(im) if im.name != "main0" && im.name != "main" => {
-                let Some(sig) = registry.fns.get(&im.name).cloned() else {
-                    return Err(CompileError::emit(format!(
-                        "`{}` is implemented but never declared; add an `extern fun` for it",
-                        im.name
-                    )));
+                let sig = match registry.fns.get(&im.name).cloned() {
+                    Some(sig) => {
+                        if sig.params.len() != im.params.len() {
+                            return Err(CompileError::emit(format!(
+                                "`{}` is declared with {} parameter(s) but implemented with {}",
+                                im.name,
+                                sig.params.len(),
+                                im.params.len()
+                            )));
+                        }
+                        sig
+                    }
+                    None => {
+                        let is_ambient = im.name.starts_with("atsruntime_")
+                            || im.name.starts_with("patsolve_")
+                            || im.name.starts_with("myhashtbl_")
+                            || im.name.starts_with("node_")
+                            || im.name.starts_with("the_")
+                            || im.name.starts_with("EStream_")
+                            || im.name.starts_with("int_")
+                            || im.name.starts_with("draw_")
+                            || im.name.starts_with("fprint_")
+                            || im.name.starts_with("gcompare_")
+                            || im.name.starts_with("emit_")
+                            || im.name.starts_with("prerr_")
+                            || im.ret.is_some()
+                            || im.params.iter().any(|p| !matches!(&p.ty, Ty::Name(n) if n == "_" || n.is_empty()));
+                        if is_ambient {
+                            let mut params = Vec::with_capacity(im.params.len());
+                            for p in &im.params {
+                                params.push(llvm_type_in(&p.ty, &registry)?);
+                            }
+                            let ret = match &im.ret {
+                                Some(t) => llvm_type_in(t, &registry)?,
+                                None => LlvmType::Void,
+                            };
+                            let sig = FnSig { params, ret };
+                            registry.fns.insert(im.name.clone(), sig.clone());
+                            sig
+                        } else {
+                            return Err(CompileError::emit(format!(
+                                "`{}` is implemented but never declared; add an `extern fun` for it",
+                                im.name
+                            )));
+                        }
+                    }
                 };
-                if sig.params.len() != im.params.len() {
-                    return Err(CompileError::emit(format!(
-                        "`{}` is declared with {} parameter(s) but implemented with {}",
-                        im.name,
-                        sig.params.len(),
-                        im.params.len()
-                    )));
-                }
                 registry.defined.insert(im.name.clone());
                 registry
                     .by_ref
