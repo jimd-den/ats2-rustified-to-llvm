@@ -32,6 +32,8 @@ pub mod prop;
 pub mod signatures;
 pub mod unify;
 pub mod walk;
+#[cfg(test)]
+mod walk_tests;
 
 use ats2_domain::ast::Program;
 use ats2_domain::errors::CompileError;
