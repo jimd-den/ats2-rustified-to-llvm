@@ -696,10 +696,11 @@ impl<'a> ParseCtx<'a> {
                 }
                 // `(a; b; c)` — a sequence.  Each element but the last is
                 // run for its effect only, which is exactly a discard
-                // binding, so the whole thing folds into nested `let`s
-                // rather than earning an AST node of its own.
                 while self.at(&TokenKind::Semicolon) {
                     self.advance();
+                    if self.at(&TokenKind::RParen) {
+                        break;
+                    }
                     items.push(self.parse_expr(0)?);
                 }
                 self.expect(
@@ -1146,7 +1147,14 @@ impl<'a> ParseCtx<'a> {
             } else {
                 None
             };
-            self.expect(&TokenKind::FatArrow, "expected `=>` after the pattern")?;
+            if self.at(&TokenKind::FatArrow) {
+                self.advance();
+                if self.at(&TokenKind::Gt) {
+                    self.advance(); // consume trailing `>` from `=>>`
+                }
+            } else {
+                return Err(self.error_here("expected `=>` after the pattern"));
+            }
             let body = self.parse_expr(0)?;
             raw_arms.push((pattern, guard, body));
             if self.at(&TokenKind::Pipe) {
