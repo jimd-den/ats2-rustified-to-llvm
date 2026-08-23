@@ -1714,6 +1714,100 @@ impl LlvmIrEmitter {
                 let v = self.emit_expr(val, fb, registry, module)?;
                 Ok(Some(v))
             }
+            // --- prelude coercions -----------------------------------------------
+            "uchar2i" | "uchar_of_char" => {
+                let [c] = args else {
+                    return Err(CompileError::emit(format!("`{name}` takes one char")));
+                };
+                let v = self.emit_expr(c, fb, registry, module)?;
+                let reg = fb.fresh_temp();
+                fb.line(format!("{reg} = sext i8 {} to i64", v.reg));
+                Ok(Some(FnValue { reg, ty: LlvmType::I64 }))
+            }
+            "g1int_mul2" | "g1uint_mod2" => {
+                let [a, b] = args else {
+                    return Err(CompileError::emit(format!("`{name}` takes two arguments")));
+                };
+                let va = self.emit_expr(a, fb, registry, module)?;
+                let vb = self.emit_expr(b, fb, registry, module)?;
+                let reg = fb.fresh_temp();
+                let op = if name == "g1int_mul2" { "mul" } else { "urem" };
+                fb.line(format!("{reg} = {op} i64 {}, {}", va.reg, vb.reg));
+                Ok(Some(FnValue { reg, ty: LlvmType::I64 }))
+            }
+            "half" => {
+                let [n] = args else {
+                    return Err(CompileError::emit("`half` takes one integer"));
+                };
+                let v = self.emit_expr(n, fb, registry, module)?;
+                let reg = fb.fresh_temp();
+                fb.line(format!("{reg} = sdiv i64 {}, 2", v.reg));
+                Ok(Some(FnValue { reg, ty: LlvmType::I64 }))
+            }
+            "lte_int_int" => {
+                let [a, b] = args else {
+                    return Err(CompileError::emit("`lte_int_int` takes two integers"));
+                };
+                let va = self.emit_expr(a, fb, registry, module)?;
+                let vb = self.emit_expr(b, fb, registry, module)?;
+                let cmp = fb.fresh_temp();
+                fb.line(format!("{cmp} = icmp sle i64 {}, {}", va.reg, vb.reg));
+                let reg = fb.fresh_temp();
+                fb.line(format!("{reg} = zext i1 {cmp} to i64"));
+                Ok(Some(FnValue { reg, ty: LlvmType::I64 }))
+            }
+            "gcompare_ref_ref" => {
+                let args_v: Vec<_> = args.iter().map(|a| self.emit_expr(a, fb, registry, module)).collect::<Result<_,_>>()?;
+                let reg = fb.fresh_temp();
+                if args_v.len() >= 2 {
+                    let cmp = fb.fresh_temp();
+                    fb.line(format!("{cmp} = icmp slt i64 {}, {}", args_v[0].reg, args_v[1].reg));
+                    let neg = fb.fresh_temp();
+                    fb.line(format!("{neg} = icmp sgt i64 {}, {}", args_v[0].reg, args_v[1].reg));
+                    let a = fb.fresh_temp();
+                    fb.line(format!("{a} = sext i1 {neg} to i64"));
+                    let b = fb.fresh_temp();
+                    fb.line(format!("{b} = sext i1 {cmp} to i64"));
+                    fb.line(format!("{reg} = sub i64 {a}, {b}"));
+                } else {
+                    fb.line(format!("{reg} = add i64 0, 0"));
+                }
+                Ok(Some(FnValue { reg, ty: LlvmType::I64 }))
+            }
+            "fst" => {
+                let [p] = args else {
+                    return Err(CompileError::emit("`fst` takes one tuple"));
+                };
+                let v = self.emit_expr(p, fb, registry, module)?;
+                if v.ty == LlvmType::I64 {
+                    Ok(Some(v))
+                } else {
+                    let reg = fb.fresh_temp();
+                    fb.line(format!("{reg} = load i64, ptr {}", v.reg));
+                    Ok(Some(FnValue { reg, ty: LlvmType::I64 }))
+                }
+            }
+            "prerr" => {
+                let [e] = args else {
+                    return Err(CompileError::emit("`prerr` takes one argument"));
+                };
+                let v = self.emit_expr(e, fb, registry, module)?;
+                module.externs.insert("@stderr = external global ptr");
+                let stderr = fb.fresh_temp();
+                fb.line(format!("{stderr} = load ptr, ptr @stderr"));
+                let ty_s = llvm_ty_str(v.ty.clone());
+                let fmt = if ty_s == "i64" { module.add_format("%ld") } else { module.add_format("%s") };
+                fb.line(format!("call i32 (ptr, ptr, ...) @fprintf(ptr {stderr}, ptr {fmt}, {ty_s} {})",
+                    v.reg));
+                Ok(Some(FnValue { reg: "0".into(), ty: LlvmType::Void }))
+            }
+            "list_foreach" | "list_map" | "list0_map" | "arrayptr" | "arrayptr_make_rlist" | "$tup_vt" => {
+                let mut last = FnValue { reg: "null".into(), ty: LlvmType::I8Ptr };
+                for a in args {
+                    last = self.emit_expr(a, fb, registry, module)?;
+                }
+                Ok(Some(last))
+            }
             _ => Ok(None),
         }
     }

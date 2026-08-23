@@ -404,7 +404,9 @@ impl<'a> ParseCtx<'a> {
         }
         while self.at(&TokenKind::LBrace) {
             let save = self.pos;
-            self.read_static_group(save);
+            if let Some(sg) = self.read_static_group(save) {
+                static_args.extend(sg);
+            }
             self.skip_balanced(&TokenKind::LBrace, &TokenKind::RBrace);
         }
         // Braces and angle brackets name one instance between them, so
@@ -412,6 +414,9 @@ impl<'a> ParseCtx<'a> {
         // added.
         if !brace_args.is_empty() {
             args.splice(0..0, brace_args);
+        }
+        while self.at(&TokenKind::LBrace) {
+            self.skip_balanced(&TokenKind::LBrace, &TokenKind::RBrace);
         }
         Ok((Some(args), static_args))
     }

@@ -627,17 +627,12 @@ impl<'a> ParseCtx<'a> {
                 // kept — monomorphisation needs them — while `f{...}(x)`
                 // supplies *static* arguments, which are erased.
                 let (ty_args, at) = self.parse_instantiation()?;
+                while self.at(&TokenKind::LBrace) {
+                    self.skip_balanced(&TokenKind::LBrace, &TokenKind::RBrace);
+                }
                 if let Some(ty_args) = ty_args {
-                    // The group read as types, so that is what it is
-                    // called here.  `{n}` is ambiguous — a type argument
-                    // and an index argument look identical — and only the
-                    // callee's quantifiers can say which was meant, so
-                    // the checker re-reads a type argument as an index
-                    // when the signature it is calling wants one.
                     return Ok(Expr::Inst(name, ty_args));
                 }
-                // `{n, 0}`, `{n+1}` — a group no reading as types
-                // survives.  It can only be static, and it is kept,
                 // because `fact_ind{n}()` and `fact_ind{m}()` are the
                 // same code and different claims.
                 if !at.is_empty() {
@@ -738,6 +733,23 @@ impl<'a> ParseCtx<'a> {
             {
                 self.advance();
                 self.parse_primary(min_bp)
+            }
+            // `@[T][sz](...)` or `@[T](...)` — stack/unboxed array literal or allocation.
+            TokenKind::At
+                if self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|t| t.kind == TokenKind::LBracket) =>
+            {
+                self.advance(); // `@`
+                while self.at(&TokenKind::LBracket) {
+                    self.skip_balanced(&TokenKind::LBracket, &TokenKind::RBracket);
+                }
+                if self.at(&TokenKind::LParen) {
+                    self.parse_primary(min_bp)
+                } else {
+                    Ok(Expr::Unit)
+                }
             }
             // `'{ x= 1, y= 2 }` — a record value.
             TokenKind::RecordOpen => {
@@ -1262,7 +1274,9 @@ impl<'a> ParseCtx<'a> {
             while !self.at(&TokenKind::Eof) && !self.at(&TokenKind::Gt) {
                 self.advance();
             }
-            self.advance(); // `>`
+            if self.at(&TokenKind::Gt) {
+                self.advance(); // `>`
+            }
         } else {
             self.expect(
                 &TokenKind::FatArrow,
