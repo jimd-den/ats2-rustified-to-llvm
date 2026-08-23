@@ -524,15 +524,42 @@ impl MonoCtx {
                 self.rewrite_ty(ty, subst),
             ),
             Expr::Var(name) => {
-                // A template mentioned with no instantiation cannot be
-                // resolved: say so, rather than emitting a call to a
-                // function that was never built.
-                if self.templates.contains_key(name) {
-                    return Err(CompileError::emit(format!(
-                        "`{name}` is a template and must say which instance it means, as in `{name}<int>`"
-                    )));
+                if let Some(t) = self.templates.get(name) {
+                    let is_standard_collection_template = matches!(
+                        name.as_str(),
+                        "length"
+                            | "list_length"
+                            | "list_vt_length"
+                            | "list_reverse"
+                            | "list_vt_reverse"
+                            | "list_vt_free"
+                            | "list_map"
+                            | "list0_sing"
+                            | "list0_zip"
+                            | "fprint_val"
+                            | "print_val"
+                            | "prerr_val"
+                            | "channeg_create"
+                            | "channeg_send"
+                            | "queue_nil"
+                            | "stream_vt_nth"
+                            | "stream_filter_cloref"
+                    );
+                    if is_standard_collection_template && t.body.is_some() {
+                        let default_args: Vec<Ty> = t.ty_params.iter().map(|_| Ty::Name("int".into())).collect();
+                        Expr::Var(self.request(name, &default_args)?)
+                    } else if t.instances.len() == 1 {
+                        let (only_key, _) = t.instances.iter().next().unwrap();
+                        let mangled = format!("{name}${only_key}");
+                        Expr::Var(mangled)
+                    } else {
+                        return Err(CompileError::emit(format!(
+                            "`{name}` is a template and must say which instance it means, as in `{name}<int>`"
+                        )));
+                    }
+                } else {
+                    expr.clone()
                 }
-                expr.clone()
             }
             Expr::Inst(name, args) => {
                 let args: Vec<Ty> = args.iter().map(|a| self.rewrite_ty(a, subst)).collect();
