@@ -538,6 +538,16 @@ impl LlvmIrEmitter {
                 };
                 self.emit_arithmetic(instr, lv, rv, fb)
             }
+            // The shifts are integer-only: LLVM has no floating form, and
+            // ATS does not define one either.  `shl` is the same
+            // instruction whichever way the value is read; the right
+            // shift is *arithmetic* (`ashr`) because ATS's `int` is
+            // signed and a logical shift would turn a negative number
+            // positive.
+            BinOp::Shl | BinOp::Shr => {
+                let instr = if op == BinOp::Shl { "shl" } else { "ashr" };
+                self.emit_arithmetic(instr, lv, rv, fb)
+            }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 self.emit_comparison(op, lv, rv, fb)
             }

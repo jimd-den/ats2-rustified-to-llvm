@@ -1308,7 +1308,9 @@ extern fun after(): int
                     name: Some("y".into()),
                     ty: None,
                     value: Expr::BinOp(BinOp::Add, Box::new(var("x")), Box::new(int(1))),
-                    mutable: false
+                    mutable: false,
+                    destructures: None,
+                    proof_name: None,
                 }],
                 Box::new(Expr::BinOp(
                     BinOp::Mul,
@@ -2153,7 +2155,9 @@ extern fun after(): int
                     name: Some("x".into()),
                     ty: None,
                     value: int(1),
-                    mutable: false
+                    mutable: false,
+                    destructures: None,
+                    proof_name: None,
                 }],
                 Box::new(Expr::BinOp(
                     BinOp::Add,
@@ -2811,7 +2815,9 @@ fun f(): res = list0_nil()",
                     name: Some("x".into()),
                     ty: None,
                     value: int(1),
-                    mutable: false
+                    mutable: false,
+                    destructures: None,
+                    proof_name: None,
                 }],
                 Box::new(Expr::Let(
                     vec![LetBind {
@@ -2820,7 +2826,9 @@ fun f(): res = list0_nil()",
                         name: None,
                         ty: None,
                         value: Expr::Call(Box::new(var("g")), vec![]),
-                        mutable: false
+                        mutable: false,
+                        destructures: None,
+                        proof_name: None,
                     }],
                     Box::new(var("x")),
                 )),
@@ -2839,7 +2847,9 @@ fun f(): res = list0_nil()",
                     name: None,
                     ty: None,
                     value: Expr::Unit,
-                    mutable: false
+                    mutable: false,
+                    destructures: None,
+                    proof_name: None,
                 }],
                 Box::new(var("x")),
             )
@@ -2917,7 +2927,9 @@ fun f(): res = list0_nil()",
                     name: None,
                     ty: None,
                     value: Expr::Call(Box::new(var("g")), vec![]),
-                    mutable: false
+                    mutable: false,
+                    destructures: None,
+                    proof_name: None,
                 }],
                 Box::new(int(1)),
             )

@@ -11,6 +11,10 @@ use std::collections::{HashMap, HashSet};
 
 impl<'a> ParseCtx<'a> {
     pub(crate) fn parse_val_bind(&mut self, mutable: bool) -> Result<BindKind, CompileError> {
+        // A name set aside by some earlier binding's pattern is not
+        // this one's: cleared here so a `val` with no proof half
+        // cannot inherit the last one that had.
+        self.last_proof_name = None;
         // `val [r:int] (pf | r) = ...` — the binding opens an
         // existential: the caller learns there *is* such an `r` and
         // gives it a name.  The name is static, so it binds nothing at
@@ -125,6 +129,11 @@ impl<'a> ParseCtx<'a> {
             ty,
             value,
             mutable,
+            destructures: None,
+            // Whatever the pattern just read set aside, taken exactly
+            // once: a later binding with no proof half of its own must
+            // not inherit this one's.
+            proof_name: self.last_proof_name.take(),
         })
     }
 
@@ -138,6 +147,7 @@ impl<'a> ParseCtx<'a> {
     pub(crate) fn parse_proof_binding(&mut self) -> Option<LetBind> {
         let save = self.pos;
         self.advance(); // `prval` / `prvar`
+        let mut destructures = None;
         let name = match self.peek().kind.clone() {
             // `prval pf = ...` — a name, unless it is a constructor
             // pattern (`EQINT()`), which binds nothing this compiler has.
@@ -152,7 +162,15 @@ impl<'a> ParseCtx<'a> {
             }
             _ => {
                 // Anything else on the left — `()`, `EQINT()`, a pattern
-                // — is stepped over to reach the `=`.
+                // — is stepped over to reach the `=`.  A *constructor*
+                // pattern is stepped over having first been read: it is
+                // the one thing on this side that carries meaning, and
+                // it is what buys the guard the body then relies on.
+                if let Ok(pattern) = self.parse_pattern() {
+                    if matches!(pattern, Pattern::Ctor(..)) {
+                        destructures = Some(pattern);
+                    }
+                }
                 while !self.at(&TokenKind::Eq) && !self.at(&TokenKind::Eof) {
                     let before = self.pos;
                     self.advance();
@@ -177,6 +195,8 @@ impl<'a> ParseCtx<'a> {
                 ty: None,
                 value,
                 mutable: false,
+                destructures,
+                proof_name: None,
             }),
             Err(_) => {
                 self.pos = save;
@@ -278,8 +298,15 @@ impl<'a> ParseCtx<'a> {
                 // `(pf | v)`, `(pfat, pfgc | p)` — everything left of the
                 // bar is proof, which exists only for the type checker.
                 // The bar may arrive after any number of them, so the
-                // comma loop and the bar are read together and whatever
-                // preceded a bar is dropped.
+                // comma loop and the bar are read together.
+                //
+                // What preceded a bar binds no storage, so it is not a
+                // pattern the value is matched against — but it is not
+                // nothing either: the proof half is where the claim
+                // lives, and a body that later spends it (`prval C () =
+                // pf`) can say nothing about a name that was thrown
+                // away. The last one is remembered for the binding to
+                // pick up; the rest bind no claim this checker reads.
                 let mut items = Vec::new();
                 loop {
                     items.push(self.parse_pattern()?);
@@ -289,6 +316,9 @@ impl<'a> ParseCtx<'a> {
                     }
                     if self.at(&TokenKind::Pipe) {
                         self.advance();
+                        if let Some(Pattern::Var(n)) = items.last() {
+                            self.last_proof_name = Some(n.clone());
+                        }
                         items.clear();
                         continue;
                     }

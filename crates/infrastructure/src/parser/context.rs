@@ -20,6 +20,7 @@ pub(crate) fn is_skippable_directive(word: &str) -> bool {
             | "abstflat"
             | "sortdef"
             | "stadef"
+            | "stavar"
             | "stacst"
             | "assume"
             | "overload"
@@ -313,6 +314,11 @@ pub(crate) fn is_relation(e: &SExp) -> bool {
 /// The static language's spelling of a shared operator.
 pub(crate) fn static_op(op: BinOp) -> Option<&'static str> {
     Some(match op {
+        // The shifts are arithmetic the linear solver cannot read: a
+        // shift by a variable amount is not linear, and one by a
+        // constant is a multiplication it would have to be told about.
+        // Leaving them out costs strength, never soundness.
+        BinOp::Shl | BinOp::Shr => return None,
         BinOp::Add => "+",
         BinOp::Sub => "-",
         BinOp::Mul => "*",
@@ -444,6 +450,23 @@ pub(crate) struct ParseCtx<'a> {
     pub(crate) type_vars: Vec<String>,
     pub(crate) macro_funs: HashMap<String, (Vec<String>, Expr)>,
     pub(crate) macro_depth: usize,
+    /// The name last given to a proof half — `pf` of `(pf | v)`.
+    ///
+    /// Set where the pattern is read and picked up by the binding that
+    /// encloses it, because a pattern has nowhere to put a name that
+    /// binds no storage. Stale between the two only if a binding has no
+    /// proof half at all, which is why the binding clears it first.
+    pub(crate) last_proof_name: Option<String>,
+    /// `overload .len with list0_length` — a method name and the
+    /// function it stands for.
+    ///
+    /// ATS lets a *field* be overloaded as readily as an operator, and
+    /// the corpus declares its interfaces that way: `nx.is_marked()`
+    /// reaches `node_is_marked(nx)` and there is no field of that name
+    /// anywhere. The mapping is applied where the field access is
+    /// built, so everything downstream sees the call it already knew
+    /// how to read.
+    pub(crate) dot_overloads: HashMap<String, String>,
 }
 
 impl<'a> ParseCtx<'a> {
@@ -460,6 +483,8 @@ impl<'a> ParseCtx<'a> {
             type_vars: Vec::new(),
             macro_funs: HashMap::new(),
             macro_depth: 0,
+            last_proof_name: None,
+            dot_overloads: HashMap::new(),
             cons_name: "cons".into(),
             renames: HashMap::new(),
             typedef_families: HashMap::new(),

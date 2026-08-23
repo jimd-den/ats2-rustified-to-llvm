@@ -434,7 +434,25 @@ impl Signature {
                 assumptions.push(claim.substitute(&[(SELF.to_string(), value.clone())]));
                 value
             }),
-            _ => None,
+            // Several indices and no claim is a *proposition*: a proof
+            // is indexed by every number its proposition is about, and
+            // none of them is "the" result.  Several indices *with* a
+            // claim is a two-ended refinement — `intBtwe(lo, hi)` — which
+            // is one value that happens to name both its bounds, and its
+            // promise is lost entirely if the call reports nothing.
+            // `claim_of` is what tells the two apart.
+            _ => claim_of(&self.ret).map(|claim| {
+                let value = fresh.var("res");
+                // Read in the *caller's* terms: the declared claim still
+                // says `lo`/`hi` in the callee's own variables, and a
+                // hypothesis mentioning those proves nothing here.
+                assumptions.push(
+                    claim
+                        .substitute(&result_subst)
+                        .substitute(&[(SELF.to_string(), value.clone())]),
+                );
+                value
+            }),
         };
         let metric = self.metric.iter().map(|m| m.substitute(&subst)).collect();
         let result_ty = Some(substitute_indices(&self.ret, &result_subst));
@@ -629,13 +647,115 @@ impl CtorTable {
                     ),
                 );
             }
+            // A `dataprop`'s constructors reach the checker as *proof
+            // declarations*, not as a datatype: the parser lowers each
+            // arm of `dataprop P (...) = | {q} C (i, j) of (...)` to its
+            // own `FunDecl` (see `parser/toplevel.rs`). They are still
+            // constructors, and taking one apart — `prval C () = pf` —
+            // is how a program spends a proof. Read only from the
+            // declaration's own shape: its quantifiers are the variables
+            // the match introduces, its guards what the match buys, and
+            // its result what the proof being matched must look like.
+            if let Def::Extern(d) = def {
+                if d.proof {
+                    let datatype = match strip_index(&d.ret) {
+                        Ty::App(n, _) | Ty::Name(n) => n.clone(),
+                        _ => continue,
+                    };
+                    let shape = CtorShape {
+                        datatype: datatype.clone(),
+                        params: Vec::new(),
+                        universals: d.universals.clone(),
+                        result: Some(d.ret.clone()),
+                        fields: d.params.iter().map(|p| p.ty.clone()).collect(),
+                    };
+                    table.by_name.insert(d.name.clone(), shape.clone());
+                    table
+                        .by_datatype
+                        .entry(datatype)
+                        .and_modify(|(_, ctors)| ctors.push(shape.clone()))
+                        .or_insert((Vec::new(), vec![shape]));
+                }
+            }
         }
         table
     }
 
+
+    /// `list`, seeded by hand rather than declared.
+    ///
+    /// The prelude gives `list_nil`/`list_cons` *signatures* (in
+    /// `crates/infrastructure/src/prelude/statics.rs`, as `extern fun`)
+    /// so that building a list type-checks. Nothing ever gives them a
+    /// `datatype` declaration, because `list` is not written in any
+    /// `.dats`/`.sats` this compiler parses — it is built in. `of` above
+    /// only ever sees a `datatype` a program itself wrote, so it never
+    /// learns list's shape, and `case+ xs of | list_cons (x, xs) => ...`
+    /// destructures into a tail with no size at all: a fresh variable
+    /// unrelated to `n`, and every recursion over a bare `list` is
+    /// unprovable from the moment it is written. This is the other half
+    /// of that signature, restated as a constructor shape.
+    pub fn prelude_lists() -> Self {
+        let mut table = CtorTable::default();
+        let elem = || Ty::Name("a".into());
+        let list_of = |n: SExp| Ty::Index(Box::new(Ty::App("list".into(), vec![elem()])), vec![n]);
+        let nil = CtorShape {
+            datatype: "list".into(),
+            params: vec!["a".into()],
+            universals: vec![],
+            result: Some(list_of(SExp::IntLit(0))),
+            fields: vec![],
+        };
+        let cons = CtorShape {
+            datatype: "list".into(),
+            params: vec!["a".into()],
+            universals: vec![Quant {
+                vars: vec![("n".into(), Sort::Nat)],
+                guard: None,
+            }],
+            result: Some(list_of(SExp::App(
+                "+".into(),
+                vec![SExp::Var("n".into()), SExp::IntLit(1)],
+            ))),
+            fields: vec![elem(), list_of(SExp::Var("n".into()))],
+        };
+        // `list_cons`/`list_nil` must still resolve by the subject's
+        // `list_cons`/`list_nil` must still resolve by the subject`s
+        // own type (this shape for a sized `list(a,n)`, `list0_cons`
+        // for an unsized `list0(a)`) exactly as every other spelling
+        // does below — claiming `by_name` outright would shadow that
+        // dispatch and misread every `list0` pattern as this one.
+        //
+        // Registered under "list0", not "list": the parser normalizes
+        // every bare `list(...)` type to `Ty::App("list0", ...)` at
+        // parse time (there is no surviving "list" spelling to key on),
+        // and that is the same name the genuinely unsized `list0(a)`
+        // datatype above already occupies. The two are told apart at
+        // match time by whether the *subject* was written with an
+        // index, not by name — see `match_pattern`.
+        table
+            .by_datatype
+            .insert("list0".into(), (vec!["a".into()], vec![nil, cons]));
+        table
+    }
+
+    /// Lay another table over this one.
+    ///
+    /// `by_name` entries are unambiguous by construction, so the later
+    /// table's win outright — a program's own declaration beats the
+    /// prelude's. `by_datatype` is different: two tables can each add
+    /// constructors to the *same* datatype name without meaning the same
+    /// thing by it (`list0` is both the real unsized datatype and, after
+    /// parsing, every sized `list(a,n)` too), so their constructor lists
+    /// are merged rather than one replacing the other outright.
     pub fn extend(&mut self, other: CtorTable) {
         self.by_name.extend(other.by_name);
-        self.by_datatype.extend(other.by_datatype);
+        for (name, (params, ctors)) in other.by_datatype {
+            self.by_datatype
+                .entry(name)
+                .and_modify(|(_, existing)| existing.extend(ctors.clone()))
+                .or_insert((params, ctors));
+        }
     }
 
     /// The types this constructor's fields have, given the type the
@@ -658,21 +778,37 @@ impl CtorTable {
             // spellings ATS gives the same constructor.  What the value
             // is made of is decided by the *datatype*, so if the subject
             // names one and exactly one of its constructors takes this
-            // many fields, that is the one that was written.  Two of the
-            // same arity is a genuine ambiguity and is declined rather
-            // than guessed at.
+            // many fields, that is the one that was written.
+            //
+            // Same arity can still mean two different things under one
+            // name — `list0` carries both the truly unsized datatype and
+            // every sized `list(a,n)`, indistinguishable by name once
+            // `strip_index` has run. Whether the *subject itself* still
+            // wore an index before stripping is what tells them apart:
+            // a sized subject wants the constructor whose own result was
+            // indexed, an unsized one wants the constructor that was not.
+            // Only when that still leaves more than one is it a genuine
+            // ambiguity, declined rather than guessed at.
             None => {
                 let name = match subject.map(strip_index)? {
                     Ty::App(name, _) | Ty::Name(name) => name.clone(),
                     _ => return None,
                 };
                 let (_, ctors) = self.by_datatype.get(&name)?;
-                let mut fits = ctors.iter().filter(|shape| shape.fields.len() == arity);
-                let only = fits.next()?;
-                if fits.next().is_some() {
-                    return None;
+                let mut fits: Vec<&CtorShape> = ctors
+                    .iter()
+                    .filter(|shape| shape.fields.len() == arity)
+                    .collect();
+                if fits.len() > 1 {
+                    let subject_indexed = matches!(subject, Some(Ty::Index(..)));
+                    fits.retain(|shape| {
+                        matches!(shape.result, Some(Ty::Index(..))) == subject_indexed
+                    });
                 }
-                only.clone()
+                let [only] = fits.as_slice() else {
+                    return None;
+                };
+                (*only).clone()
             }
         };
         let args = match subject.map(strip_index) {
@@ -942,6 +1078,18 @@ pub fn claim_of(ty: &Ty) -> Option<SExp> {
         };
         return Some(rel("==", only));
     }
+    // `intBtwe(lo, hi)` and `intBtw(lo, hi)` name *both* ends at once,
+    // which is the one refinement shape carrying two indices rather
+    // than one.  A traversal's result is written this way — `loop`
+    // returning `intBtwe(i, n+i)` says the count it hands back is at
+    // least where it started and at most the end — and read as no claim
+    // at all, the function's whole promise about its result is lost.
+    if let Some((_, upper)) = split_between(name) {
+        let [lo, hi] = indices.as_slice() else {
+            return None;
+        };
+        return Some(SExp::App("&&".into(), vec![rel(">=", lo), rel(upper, hi)]));
+    }
     let (flavour, bound) = split_refinement(name)?;
     let [limit] = indices.as_slice() else {
         return None;
@@ -961,6 +1109,24 @@ pub fn claim_of(ty: &Ty) -> Option<SExp> {
 /// relation has to be read back out of the name.
 fn split_refinement(name: &str) -> Option<(&str, &'static str)> {
     for (suffix, op) in [("Gte", ">="), ("Gt", ">"), ("Lte", "<="), ("Lt", "<")] {
+        if let Some(flavour) = name.strip_suffix(suffix) {
+            if matches!(flavour, "int" | "nat" | "size" | "ssize" | "uint" | "usize") {
+                return Some((flavour, op));
+            }
+        }
+    }
+    None
+}
+
+/// `intBtwe` → `("int", "<=")`, `intBtw` → `("int", "<")`.
+///
+/// The `Btw` family is the two-ended refinement: `intBtwe(lo, hi)` is
+/// `lo <= i <= hi`, and `intBtw(lo, hi)` stops one short of `hi`.  The
+/// lower end is always inclusive; only the upper end is in question, so
+/// only the upper end's relation is returned.  Longest suffix first, or
+/// `Btwe` would be read as a `Btw` with a stray `e`.
+fn split_between(name: &str) -> Option<(&str, &'static str)> {
+    for (suffix, op) in [("Btwe", "<="), ("Btw", "<")] {
         if let Some(flavour) = name.strip_suffix(suffix) {
             if matches!(flavour, "int" | "nat" | "size" | "ssize" | "uint" | "usize") {
                 return Some((flavour, op));

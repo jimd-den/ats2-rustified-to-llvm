@@ -173,6 +173,8 @@ use ats2_domain::statics::{Quant, SExp, Sort};
                 ty: None,
                 value: Expr::IntLit(7),
                 mutable: false,
+                destructures: None,
+                proof_name: None,
             }],
             Box::new(call("needs_nat", vec![var("y")])),
         ));
@@ -195,6 +197,8 @@ use ats2_domain::statics::{Quant, SExp, Sort};
                 ty: Some(int_of(i(3))),
                 value: Expr::IntLit(4),
                 mutable: false,
+                destructures: None,
+                proof_name: None,
             }],
             Box::new(Expr::Unit),
         ));
@@ -251,6 +255,8 @@ use ats2_domain::statics::{Quant, SExp, Sort};
                 ty: None,
                 value: Expr::IntLit(3),
                 mutable: true,
+                destructures: None,
+                proof_name: None,
             }],
             Box::new(Expr::Let(
                 vec![LetBind {
@@ -263,6 +269,8 @@ use ats2_domain::statics::{Quant, SExp, Sort};
                         Box::new(Expr::UnaryNeg(Box::new(Expr::IntLit(1)))),
                     ),
                     mutable: false,
+                    destructures: None,
+                    proof_name: None,
                 }],
                 Box::new(call("needs_nat", vec![var("x")])),
             )),
@@ -290,6 +298,8 @@ use ats2_domain::statics::{Quant, SExp, Sort};
                 ty: None,
                 value: Expr::IntLit(3),
                 mutable: true,
+                destructures: None,
+                proof_name: None,
             }],
             Box::new(Expr::Let(
                 vec![LetBind {
@@ -299,6 +309,8 @@ use ats2_domain::statics::{Quant, SExp, Sort};
                     ty: None,
                     value: Expr::While(Box::new(Expr::BoolLit(true)), Box::new(body)),
                     mutable: false,
+                    destructures: None,
+                    proof_name: None,
                 }],
                 Box::new(call("needs_nat", vec![var("x")])),
             )),
@@ -492,6 +504,58 @@ use ats2_domain::statics::{Quant, SExp, Sort};
         assert_eq!(g, vec!["n + 1 == n + 1".to_string(); 2], "{g:?}");
     }
 
+
+    #[test]
+    fn an_unannotated_branching_call_argument_still_proves_its_demand() {
+        // `needs_nat(if x > 0 then x else 0)` — the argument has no
+        // annotation and is not a `let`, so there is no promise to push
+        // down into the branches (unlike the test above). The join is
+        // an unconstrained fresh variable, and its own guard is the
+        // only fact left that could still prove the call's demand.
+        let cond = Expr::BinOp(BinOp::Gt, Box::new(var("x")), Box::new(Expr::IntLit(0)));
+        let program = Program::new(vec![
+            fun(
+                "needs_nat",
+                vec![nat()],
+                vec![p("x", int_of(v("n")))],
+                Ty::Name("int".into()),
+                Expr::IntLit(0),
+            ),
+            fun(
+                "caller",
+                vec![],
+                vec![p("x", int_of(v("k")))],
+                Ty::Name("int".into()),
+                call(
+                    "needs_nat",
+                    vec![Expr::IfThenElse(
+                        Box::new(cond),
+                        Box::new(var("x")),
+                        Box::new(Expr::IntLit(0)),
+                    )],
+                ),
+            ),
+        ]);
+        let obs = obligations(&program, &Program::new(vec![]));
+        let ob = obs
+            .iter()
+            .find(|o| o.goal.to_string().contains(">= 0"))
+            .expect("a nat demand");
+        assert!(
+            ob.goal.to_string().contains("join%"),
+            "expected the joined argument itself: {}",
+            ob.goal
+        );
+        assert_eq!(
+            crate::constraints::entails(&ob.hyps, &ob.goal),
+            crate::constraints::Verdict::Proved,
+            "goal {} not proved from {:?}",
+            ob.goal,
+            ob.hyps
+        );
+    }
+
+
     #[test]
     fn a_promised_result_is_pushed_through_a_let_to_the_value_it_ends_with() {
         // A body is usually `let ... in <the answer> end`, and a checker
@@ -509,6 +573,8 @@ use ats2_domain::statics::{Quant, SExp, Sort};
                     ty: None,
                     value: Expr::IntLit(1),
                     mutable: false,
+                    destructures: None,
+                    proof_name: None,
                 }],
                 Box::new(Expr::BinOp(
                     BinOp::Add,
@@ -965,6 +1031,8 @@ use ats2_domain::statics::{Quant, SExp, Sort};
                     ty: Some(Ty::Index(Box::new(Ty::Name("intGte".into())), vec![i(0)])),
                     value: annotated,
                     mutable: false,
+                    destructures: None,
+                    proof_name: None,
                 }],
                 Box::new(Expr::Unit),
             ),
@@ -1008,6 +1076,8 @@ use ats2_domain::statics::{Quant, SExp, Sort};
                 ty: None,
                 value: call("g", vec![]),
                 mutable: false,
+                destructures: None,
+                proof_name: None,
             }],
             Box::new(call("needs_nat", vec![var("y")])),
         );
@@ -1057,6 +1127,8 @@ use ats2_domain::statics::{Quant, SExp, Sort};
                     vec![],
                 ),
                 mutable: false,
+                destructures: None,
+                proof_name: None,
             }],
             Box::new(Expr::Unit),
         );
@@ -1132,6 +1204,8 @@ use ats2_domain::statics::{Quant, SExp, Sort};
                 ty: None,
                 value: call("mk", vec![]),
                 mutable: false,
+                destructures: None,
+                proof_name: None,
             }],
             Box::new(Expr::ProofPair(
                 Box::new(var("pf")),
@@ -1248,6 +1322,8 @@ use ats2_domain::statics::{Quant, SExp, Sort};
                         ty: None,
                         value: assertion,
                         mutable: false,
+                        destructures: None,
+                        proof_name: None,
                     }],
                     Box::new(call("needs_nat", vec![var("x")])),
                 ),
@@ -1299,6 +1375,8 @@ use ats2_domain::statics::{Quant, SExp, Sort};
                         ty: None,
                         value: checked,
                         mutable: false,
+                        destructures: None,
+                        proof_name: None,
                     }],
                     Box::new(call("needs_nat", vec![var("x")])),
                 ),
@@ -1355,6 +1433,8 @@ use ats2_domain::statics::{Quant, SExp, Sort};
                         ty: None,
                         value: bounded,
                         mutable: false,
+                        destructures: None,
+                        proof_name: None,
                     }],
                     Box::new(call("needs_nat", vec![var("y")])),
                 ),

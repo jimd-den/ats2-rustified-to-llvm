@@ -24,6 +24,25 @@ impl<'a> ParseCtx<'a> {
                 lhs = Expr::Call(Box::new(Expr::Var(cons)), vec![lhs, rhs]);
                 continue;
             }
+            // `x \intmod y` — any named function used infix.  ATS lets a
+            // backslash turn a name into an operator, and the corpus
+            // reaches for it wherever a module supplies the arithmetic:
+            // `gcd (y, x \intmod y)`.  It is exactly the prefix call
+            // written differently, so that is what it becomes.
+            if self.at(&TokenKind::Backslash) && BACKSLASH_BP >= min_bp {
+                let Some(name) = self
+                    .tokens
+                    .get(self.pos + 1)
+                    .and_then(|t| field_name_of(&t.kind))
+                else {
+                    break;
+                };
+                self.advance(); // `\`
+                self.advance(); // the name
+                let rhs = self.parse_expr(BACKSLASH_BP + 1)?;
+                lhs = Expr::Call(Box::new(Expr::Var(name)), vec![lhs, rhs]);
+                continue;
+            }
             let Some((op, lbp, rbp)) = self.current_binop() else {
                 break;
             };
@@ -31,6 +50,11 @@ impl<'a> ParseCtx<'a> {
                 break;
             }
             self.advance();
+            // A shift is spelled with two tokens, so it takes two steps
+            // to step over; every other operator is one token.
+            if matches!(op, BinOp::Shl | BinOp::Shr) {
+                self.advance();
+            }
             let rhs = self.parse_expr(rbp)?;
             lhs = Expr::BinOp(op, Box::new(lhs), Box::new(rhs));
         }
@@ -69,6 +93,8 @@ impl<'a> ParseCtx<'a> {
                             ty: None,
                             value: lhs.clone(),
                             mutable: false,
+                            destructures: None,
+                            proof_name: None,
                         },
                         LetBind {
                             opened: Vec::new(),
@@ -77,6 +103,8 @@ impl<'a> ParseCtx<'a> {
                             ty: None,
                             value: Expr::Store(Box::new(lhs), Box::new(rhs.clone())),
                             mutable: false,
+                            destructures: None,
+                            proof_name: None,
                         },
                         LetBind {
                             opened: Vec::new(),
@@ -85,6 +113,8 @@ impl<'a> ParseCtx<'a> {
                             ty: None,
                             value: Expr::Store(Box::new(rhs), Box::new(Expr::Var(tmp))),
                             mutable: false,
+                            destructures: None,
+                            proof_name: None,
                         },
                     ],
                     Box::new(Expr::Unit),
@@ -126,21 +156,7 @@ impl<'a> ParseCtx<'a> {
         if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "where") {
             self.advance();
             self.expect(&TokenKind::LBrace, "expected `{` after `where`")?;
-            let (binds, funs, pending) = self.parse_local_decls_and_funs()?;
-            self.expect(
-                &TokenKind::RBrace,
-                "expected `}` to close the `where` block",
-            )?;
-            let inner = if binds.is_empty() {
-                lhs
-            } else {
-                Expr::Let(binds, Box::new(lhs))
-            };
-            let inner = match pending {
-                Some((pattern, value)) => must_match(value, pattern, inner),
-                None => inner,
-            };
-            lhs = wrap_funs(funs, inner);
+            lhs = self.parse_where_rest(lhs)?;
         }
         Ok(lhs)
     }
@@ -235,10 +251,10 @@ impl<'a> ParseCtx<'a> {
                     expr = Expr::Index(Box::new(expr), Box::new(index));
                 }
             } else if self.at(&TokenKind::Dot)
-                && matches!(
-                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
-                    Some(TokenKind::Ident(_))
-                )
+                && self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|t| field_name_of(&t.kind).is_some())
             {
                 // `r.cmp` is a *field*; `str.tail()` is dot notation,
                 // which in ATS is application with the receiver first
@@ -248,11 +264,25 @@ impl<'a> ParseCtx<'a> {
                 // Any arguments are picked up by the `(` case on the
                 // next turn of this loop, exactly as for any other
                 // callee.
+                //
+                // A field's name is an ordinary word, and a few ordinary
+                // words are also operators: `int.mod(x, y)` reaches a
+                // module's `mod` through the same token `%` produces.
+                // After a `.` there is no operator to be had, so the
+                // word is taken for what it reads as.
                 self.advance();
-                let TokenKind::Ident(field) = self.peek().kind.clone() else {
-                    unreachable!()
-                };
+                let field = field_name_of(&self.peek().kind).expect("checked");
                 self.advance();
+                // `overload .is_marked with node_is_marked` — the field
+                // stands for a function, so the function's name is what
+                // is recorded.  Doing it here means everything
+                // downstream sees a dot-call it already knows how to
+                // read, rather than a field nothing declares.
+                let field = self
+                    .dot_overloads
+                    .get(&field)
+                    .cloned()
+                    .unwrap_or(field);
                 expr = Expr::Field(Box::new(expr), field);
             } else if self.at(&TokenKind::Arrow)
                 && matches!(
@@ -502,7 +532,7 @@ impl<'a> ParseCtx<'a> {
                     Ok(splice_macro_args(body, params, &args))
                 }
             }
-            TokenKind::Ident(name) if matches!(name.as_str(), "llam" | "fix" | "fix@") => {
+            TokenKind::Ident(name) if matches!(name.as_str(), "llam" | "llam@" | "lam@" | "fix" | "fix@") => {
                 self.parse_lam()
             }
             // `begin e1; e2 end` — ATS's word for a parenthesized
@@ -598,6 +628,84 @@ impl<'a> ParseCtx<'a> {
             // keyword), so it must be caught before the general
             // identifier arm reads it as a function call.
             TokenKind::Ident(w) if w == "try" => self.parse_try(min_bp),
+            // `,(x)` — a macro splice, wherever an expression may stand.
+            // It was already read as an argument applied to a name
+            // (`f ,(x)`), but a splice is not only ever an argument:
+            // `int.mod (,(x), ,(y))` puts two of them in an ordinary
+            // argument list, and reading the first and then meeting a
+            // comma left the macro unparsable.  Only inside a macro
+            // body, where a leading comma can mean nothing else.
+            TokenKind::Comma
+                if self.macro_depth > 0
+                    && self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|t| t.kind == TokenKind::LParen) =>
+            {
+                self.advance(); // `,`
+                self.advance(); // `(`
+                let inner = self.parse_expr(0)?;
+                self.expect(
+                    &TokenKind::RParen,
+                    "expected `)` after the macro arguments",
+                )?;
+                Ok(inner)
+            }
+            // `$tup(e, f)` and `$rec{a= e}` — the tuple and record
+            // *values*, named the way their types are.  Only the keyword
+            // differs from the bracket spelling, so it is read and the
+            // ordinary literal built.
+            TokenKind::Ident(w)
+                if matches!(w.as_str(), "$tup" | "$tup_t" | "$tup_vt")
+                    && self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|t| t.kind == TokenKind::LParen) =>
+            {
+                self.advance();
+                self.advance();
+                let mut items = Vec::new();
+                while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+                    items.push(self.parse_expr(0)?);
+                    if self.at(&TokenKind::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RParen, "expected `)` after the tuple")?;
+                Ok(Expr::TupleLit(items))
+            }
+            TokenKind::Ident(w)
+                if matches!(w.as_str(), "$rec" | "$rec_t" | "$rec_vt")
+                    && self.tokens.get(self.pos + 1).is_some_and(|t| {
+                        matches!(t.kind, TokenKind::LBrace | TokenKind::RecordOpen)
+                    }) =>
+            {
+                self.advance();
+                self.advance();
+                let mut fields = Vec::new();
+                while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                    let name = self.expect_ident("expected a field name")?;
+                    self.expect(&TokenKind::Eq, "expected `=` after the field name")?;
+                    fields.push((name, self.parse_expr(0)?));
+                    if self.at(&TokenKind::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RBrace, "expected `}` after the record fields")?;
+                Ok(Expr::RecordLit(fields))
+            }
+            // `sif c then e1 else e2` — the *static* conditional, which
+            // chooses between two proofs by a condition on indices
+            // rather than between two values by one on data.  Its shape
+            // is the dynamic form's exactly, and what it chooses
+            // between is erased before anything runs, so it is read the
+            // same way: a proof that took the wrong branch is a proof
+            // the checker will refuse on its own terms.
+            TokenKind::Ident(w) if w == "sif" => self.parse_if(min_bp),
             TokenKind::Ident(name) => {
                 self.advance();
                 // `addr@ x`, `view@ (x)` — the `@` belongs to the name,
@@ -669,11 +777,29 @@ impl<'a> ParseCtx<'a> {
                 // about it.  The proof is erased before anything runs;
                 // it is kept because it is what determines the
                 // existential the function promised.
+                //
+                // There may be several proofs — `(pfat, pfgc | p)` hands
+                // back two — and they are separated by commas exactly as
+                // a tuple's parts are.  Only the last is kept: one proof
+                // is what `ProofPair` can hold, and the rest say nothing
+                // this checker reads.  Reading the commas is the point;
+                // stopping at the first turned the whole form into a
+                // tuple that never found its closing bracket.
                 let mut proof = None;
-                if self.at(&TokenKind::Pipe) {
-                    self.advance();
-                    proof = items.pop();
-                    items = vec![self.parse_expr(0)?];
+                loop {
+                    if self.at(&TokenKind::Comma)
+                        && self.proof_bar_ahead()
+                    {
+                        self.advance();
+                        items.push(self.parse_expr(0)?);
+                        continue;
+                    }
+                    if self.at(&TokenKind::Pipe) {
+                        self.advance();
+                        proof = items.pop();
+                        items = vec![self.parse_expr(0)?];
+                    }
+                    break;
                 }
                 if let (Some(proof), true) = (&proof, self.at(&TokenKind::RParen)) {
                     let value = items.pop().expect("a value half");
@@ -713,6 +839,8 @@ impl<'a> ParseCtx<'a> {
                             ty: None,
                             value: earlier,
                             mutable: false,
+                            destructures: None,
+                            proof_name: None,
                         }],
                         Box::new(expr),
                     );
@@ -858,9 +986,42 @@ impl<'a> ParseCtx<'a> {
         self.parse_block_rest()
     }
 
+    /// As `parse_block_rest`, for a `where` block: the body was written
+    /// *before* the declarations rather than after, so it arrives as an
+    /// argument instead of being parsed here.
+    ///
+    /// A pattern binding scopes over everything that follows it, and in
+    /// a `where` that includes the rest of the run — so the remainder is
+    /// parsed recursively and wrapped in a match with no fallback,
+    /// exactly as `let` and `{ }` do.  Reading only the first run left
+    /// every declaration after a `val-(...)` unparsed, and the closing
+    /// brace then arrived where the parser was still expecting a
+    /// declaration.
+    pub(crate) fn parse_where_rest(&mut self, body: Expr) -> Result<Expr, CompileError> {
+        let (binds, funs, pending) = self.parse_local_decls_and_funs()?;
+        let inner = match pending {
+            Some((pattern, value)) => {
+                let rest = self.parse_where_rest(body)?;
+                must_match(value, pattern, rest)
+            }
+            None => {
+                self.expect(
+                    &TokenKind::RBrace,
+                    "expected `}` to close the `where` block",
+                )?;
+                body
+            }
+        };
+        let inner = if binds.is_empty() {
+            inner
+        } else {
+            Expr::Let(binds, Box::new(inner))
+        };
+        Ok(wrap_funs(funs, inner))
+    }
+
     /// As `parse_let_rest`, for a brace block: the terminator is `}`
     /// and the body needs no `in`.
-
     pub(crate) fn parse_block_rest(&mut self) -> Result<Expr, CompileError> {
         let (binds, funs, pending) = self.parse_local_decls_and_funs()?;
         let inner = match pending {
@@ -990,6 +1151,8 @@ impl<'a> ParseCtx<'a> {
                                 ty: None,
                                 value: c.value,
                                 mutable: false,
+                                destructures: None,
+                                proof_name: None,
                             });
                         }
                     }
@@ -1240,7 +1403,15 @@ impl<'a> ParseCtx<'a> {
     /// and dropped.
 
     pub(crate) fn parse_lam(&mut self) -> Result<Expr, CompileError> {
-        self.advance(); // `lam` / `llam`
+        self.advance(); // `lam` / `llam` / `fix`
+        // `lam@ (x) => e` — the *flat* closure, which keeps no
+        // environment on the heap.  Where it lives is a question of
+        // representation and not of what the function is, and `@` is its
+        // own token, so it is stepped over here rather than being part
+        // of the keyword.
+        if self.at(&TokenKind::At) {
+            self.advance();
+        }
                         // `lam x => e`: a single parameter may drop its parentheses, and
                         // an annotation is optional throughout — a lambda always sits in
                         // a context that says what it is, so inference can finish the job.
@@ -1293,6 +1464,27 @@ impl<'a> ParseCtx<'a> {
     /// powers.  All operators are left-associative (`rbp = lbp + 1`).
 
     pub(crate) fn current_binop(&self) -> Option<(BinOp, u8, u8)> {
+        // `<<` and `>>` are two tokens, not one: `>>` already means "the
+        // view this parameter is left in" inside a type, and is read
+        // there as two `>`s.  In an *expression* no such reading exists,
+        // so the pair is a shift — but only when the two really are one
+        // operator, which is to say written with nothing between them.
+        // `a > > b` is not a shift, and neither is the `>` closing a
+        // type argument list in front of one that starts a comparison.
+        if let Some((op, lbp)) = match self.peek().kind {
+            TokenKind::Lt => Some((BinOp::Shl, 6)),
+            TokenKind::Gt => Some((BinOp::Shr, 6)),
+            _ => None,
+        } {
+            let here = self.peek();
+            if self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|t| t.kind == here.kind && t.span.start.offset == here.span.end.offset)
+            {
+                return Some((op, lbp, lbp + 1));
+            }
+        }
         let (op, lbp) = match self.peek().kind {
             TokenKind::Orelse => (BinOp::Orelse, 1),
             TokenKind::Andalso => (BinOp::Andalso, 3),
@@ -1335,6 +1527,8 @@ pub(crate) fn sequence(items: Vec<Expr>) -> Expr {
                 ty: None,
                 value: earlier,
                 mutable: false,
+                destructures: None,
+                proof_name: None,
             }],
             Box::new(expr),
         );
@@ -1344,3 +1538,43 @@ pub(crate) fn sequence(items: Vec<Expr>) -> Expr {
 
 
 pub(crate) const UNARY_BP: u8 = 10;
+
+/// The field name a token spells, when it spells one.
+///
+/// A field is named by an ordinary word, and a handful of ordinary words
+/// are also operators — `int.mod(x, y)` reaches a module's `mod` through
+/// the very token `%` produces.  After a `.` no operator can stand, so
+/// the word is taken for what it reads as rather than for what it means
+/// elsewhere.
+pub(crate) fn field_name_of(kind: &TokenKind) -> Option<String> {
+    match kind {
+        TokenKind::Ident(n) => Some(n.clone()),
+        TokenKind::Mod => Some("mod".into()),
+        _ => None,
+    }
+}
+
+impl<'a> ParseCtx<'a> {
+    /// Whether a `|` separating proofs from a value lies ahead, before
+    /// this bracketed form closes.
+    ///
+    /// `(a, b | c)` is a value with two proofs; `(a, b, c)` is a tuple.
+    /// Only the bar tells them apart, and it may sit any number of
+    /// commas away, so the run is scanned before the comma is read as
+    /// either.  Nested brackets are skipped: a bar inside one belongs
+    /// to it, not to this.
+    pub(crate) fn proof_bar_ahead(&self) -> bool {
+        let mut depth = 0i32;
+        for t in &self.tokens[self.pos..] {
+            match t.kind {
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+                TokenKind::RParen if depth == 0 => return false,
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => depth -= 1,
+                TokenKind::Pipe if depth == 0 => return true,
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+}

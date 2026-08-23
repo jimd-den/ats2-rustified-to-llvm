@@ -19,11 +19,24 @@ impl<'a> Scanner<'a> {
 
         // `1.5` is a float; `xs.0` is a projection, so the `.` only joins
         // the number when a digit follows it.
+        //
+        // `3.` is a float too — C's spelling, which ATS keeps — but the
+        // dot may only be swallowed when nothing that could *use* it
+        // follows.  A letter or `_` after it would be a field or method
+        // (`x.tail()`), and `<` begins a termination metric, so in those
+        // cases the dot belongs to whatever comes next, not to the
+        // number.
         let mut is_float = false;
-        if !is_hex && self.peek() == Some('.') && self.peek2().is_some_and(|c| c.is_ascii_digit()) {
-            is_float = true;
-            self.bump();
-            self.consume_digits(false);
+        if !is_hex && self.peek() == Some('.') {
+            let after = self.peek2();
+            if after.is_some_and(|c| c.is_ascii_digit()) {
+                is_float = true;
+                self.bump();
+                self.consume_digits(false);
+            } else if !after.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '<') {
+                is_float = true;
+                self.bump();
+            }
         }
 
         // Scientific notation: `1e-3`, `2.0e5`
@@ -39,9 +52,16 @@ impl<'a> Scanner<'a> {
             }
         }
 
-        // Float suffix: `1.0f`, `1f`, `1.0d`
+        // Float suffix: `1.0f`, `1f`, `1.0d`, `0.0l`.
+        //
+        // `l`/`L` is the long-double suffix, and unlike the others it is
+        // only read when the number is already a float.  `3l` in C is a
+        // long *integer*, and reading it as a float would change what
+        // the literal is rather than merely how wide it is.
         let float_num_end = self.pos;
-        let is_float_suffix = !is_hex && matches!(self.peek(), Some('f') | Some('F') | Some('d') | Some('D'));
+        let is_float_suffix = !is_hex
+            && (matches!(self.peek(), Some('f') | Some('F') | Some('d') | Some('D'))
+                || (is_float && matches!(self.peek(), Some('l') | Some('L'))));
         if is_float_suffix {
             is_float = true;
             self.bump();

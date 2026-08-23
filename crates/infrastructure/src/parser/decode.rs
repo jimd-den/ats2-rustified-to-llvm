@@ -67,3 +67,10 @@ pub(crate) fn decode_string(raw: &str, span: Span) -> Result<String, CompileErro
     }
     Ok(out)
 }
+
+/// The binding power of a backslash-infix application, `x \f y`.
+///
+/// Tighter than the comparisons, so `x \intmod y = 0` groups the way it
+/// reads, and looser than ordinary arithmetic, so `a + b \f c` puts the
+/// sum on the left rather than splitting it.
+pub(crate) const BACKSLASH_BP: u8 = 6;

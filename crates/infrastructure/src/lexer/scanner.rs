@@ -113,6 +113,35 @@ impl<'a> Scanner<'a> {
                 self.bump();
                 self.push(TokenKind::Arrow, start);
             }
+            // ATS spells the two short-circuiting connectives both as
+            // words and as symbols, and means the same thing by each —
+            // so `||` and `&&` collapse onto the tokens `orelse` and
+            // `andalso` already produce.  Reading them here is what
+            // stops `pred(x) || rest` being lexed as two arm separators
+            // and failing as an expression.
+            //
+            // Neither doubled form is ambiguous with the single one:
+            // `|` separates arms and never abuts another `|`, and `&`
+            // marks a borrow, which is a *prefix* and so never follows
+            // a value.
+            '|' if self.peek2() == Some('|') => {
+                self.bump();
+                self.bump();
+                self.push(TokenKind::Orelse, start);
+            }
+            '&' if self.peek2() == Some('&') => {
+                self.bump();
+                self.bump();
+                self.push(TokenKind::Andalso, start);
+            }
+            // The shifts are deliberately *not* lexed here.  `>>` already
+            // means something in a type — `&(@[int][m]) >> _`, the view a
+            // parameter is left in — and that is read as two `>` tokens
+            // in several places.  Collapsing them into one token here
+            // fixed the expression `1 >> 2` and broke every one of those.
+            // So the token stream keeps its shape and the *expression*
+            // parser recognises a shift by adjacency instead, where the
+            // question cannot arise: see `current_binop`.
             // `==` is how the static language spells equality: `{n:int |
             // i+j == n-1}`.  It is the same relation `=` already means in
             // an expression, so it collapses to the same token — and it
@@ -181,8 +210,13 @@ impl<'a> Scanner<'a> {
                 self.bump();
                 self.push(TokenKind::LBracket, start);
             }
-            // `'$`
-            '\'' if self.peek2() == Some('$') => {
+            // `'$` — a quoted special form, whose quote is decoration
+            // and is dropped.  The char literal `'$'` is written the
+            // same way for its first two characters, so the literal is
+            // checked for first: without that, the quote was swallowed
+            // and a lexer scanning `'$'` produced a stray `$` where an
+            // expression was expected.
+            '\'' if self.peek2() == Some('$') && !self.at_char_literal() => {
                 self.bump();
             }
             '\'' if !self.at_char_literal() => {

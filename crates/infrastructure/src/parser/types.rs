@@ -355,7 +355,22 @@ impl<'a> ParseCtx<'a> {
         // `f<>` — "work it out".  The lexer reads `<>` as the not-equal
         // token, so the empty argument list arrives as one token and has
         // to be matched on its own.
-        if self.at(&TokenKind::Ne) {
+        //
+        // Both spellings of "not equal" produce that same token, so the
+        // name in front of one is far more often an *operand* than a
+        // template: `c1 != CNUL` and `x <> 0` are the common case and
+        // `f<>(x)` the rare one.  What tells them apart is what comes
+        // after — an instantiation is always applied, so only a `(`
+        // (or another argument group) can follow the brackets, while a
+        // comparison is always followed by its right-hand side.
+        if self.at(&TokenKind::Ne)
+            && self.tokens.get(self.pos + 1).is_some_and(|t| {
+                matches!(
+                    t.kind,
+                    TokenKind::LParen | TokenKind::Lt | TokenKind::Ne | TokenKind::LBrace
+                )
+            })
+        {
             self.advance();
             return Ok((Some(Vec::new()), static_args));
         }
@@ -734,6 +749,7 @@ impl<'a> ParseCtx<'a> {
         // function returns.  Both sides describe the same machine value;
         // the difference is who may then do what with it, which is a
         // fact about the proof, not about the word.
+        //
         if self.at(&TokenKind::Gt)
             && self
                 .tokens
@@ -756,6 +772,45 @@ impl<'a> ParseCtx<'a> {
     /// `name` or `name(args)`, optionally followed by `-> rest`.
     pub(crate) fn parse_named_type(&mut self) -> Result<Ty, CompileError> {
         let mut name = self.expect_ident("expected a type name")?;
+        // `$tup(t, u)` and `$rec{a= t, b= u}` — the anonymous tuple and
+        // record types, which ATS spells with a keyword where it spells
+        // the value forms with brackets alone.  They *are* a tuple and a
+        // record; only the spelling is unusual, so the keyword is read
+        // and the ordinary shape returned.
+        if name == "$tup" || name == "$tup_t" || name == "$tup_vt" {
+            if self.at(&TokenKind::LParen) {
+                self.advance();
+                let mut parts = Vec::new();
+                while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+                    parts.push(self.parse_type()?);
+                    if self.at(&TokenKind::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RParen, "expected `)` after the tuple")?;
+                return self.finish_arrow_type(Ty::Tuple(parts));
+            }
+        }
+        if name == "$rec" || name == "$rec_t" || name == "$rec_vt" {
+            if self.at(&TokenKind::LBrace) || self.at(&TokenKind::RecordOpen) {
+                self.advance();
+                let mut fields = Vec::new();
+                while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                    let field = self.expect_ident("expected a field name")?;
+                    self.expect(&TokenKind::Eq, "expected `=` after the field name")?;
+                    fields.push((field, self.parse_type()?));
+                    if self.at(&TokenKind::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RBrace, "expected `}` after the record fields")?;
+                return self.finish_arrow_type(Ty::Record(fields));
+            }
+        }
         if name == "$extype" || name == "$extype_struct" {
             if let TokenKind::StrLit(c_name) = self.peek().kind.clone() {
                 self.advance();

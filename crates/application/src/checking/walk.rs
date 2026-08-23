@@ -52,6 +52,7 @@ pub fn obligations(program: &Program, ambient: &Program) -> Vec<Obligation> {
     let mut sigs = SigTable::of(ambient);
     sigs.extend(SigTable::of(program));
     let mut ctors = CtorTable::of(ambient);
+    ctors.extend(CtorTable::prelude_lists());
     ctors.extend(CtorTable::of(program));
     // `#define N 1024` is not a variable: every mention of `N` *is* the
     // number, settled before the program runs.  Reading it as an unknown
@@ -656,6 +657,30 @@ impl<'a> Walk<'a> {
         expected: Option<&SExp>,
         env: &mut IndexEnv,
     ) -> Option<SExp> {
+        // `r.f(a, b)` is either the record field `f` applied, or ATS's
+        // dot notation for `f(r, a, b)` — the parser leaves the choice
+        // for later (`parser/expr.rs`), and the emitter decides it from
+        // a type registry the checker does not have. What the checker
+        // does have is its own signature tables, and a name that is not
+        // otherwise a field is not much of an ambiguity: if `f` names a
+        // signature, `r.f(a, b)` is read as that call. Reading a real
+        // field this way instead only loses strength — the call becomes
+        // one to a function that does not exist, which fails toward
+        // "unproven", the same as never having read it as a call at all,
+        // never toward a false proof.
+        if let Expr::Field(base, field) = callee {
+            let known = self
+                .local_sigs
+                .iter()
+                .rev()
+                .any(|scope| scope.contains_key(field))
+                || self.sigs.get(field).is_some();
+            if known {
+                let mut rewritten = vec![(**base).clone()];
+                rewritten.extend(args.iter().cloned());
+                return self.call(&Expr::Var(field.clone()), &rewritten, expected, env);
+            }
+        }
         let supplied: Vec<Arg> = args
             .iter()
             .map(|a| {
@@ -893,7 +918,7 @@ impl<'a> Walk<'a> {
 
     /// A branch: each arm reasons under its own guard, and neither can
     /// see what the other learned.
-    fn conditional(&mut self, c: &Expr, t: &Expr, f: &Expr, env: &mut IndexEnv) -> Option<SExp> {
+fn conditional(&mut self, c: &Expr, t: &Expr, f: &Expr, env: &mut IndexEnv) -> Option<SExp> {
         let guard = self.expr(c, env);
         let mut taken = env.clone();
         let mut untaken = env.clone();
@@ -903,7 +928,7 @@ impl<'a> Walk<'a> {
         }
         let a = self.expr(t, &mut taken);
         let b = self.expr(f, &mut untaken);
-        self.join(a, b, env)
+        self.join(a, b, guard.as_ref(), env)
     }
 
     /// What is known about a value that came from more than one path.
@@ -911,9 +936,37 @@ impl<'a> Walk<'a> {
     /// Only what the paths agree on: anything else would be a claim one
     /// of them never made.  Disagreement is a fresh unknown, not a
     /// disjunction, because the solver holds conjunctions.
-    fn join(&mut self, a: Option<SExp>, b: Option<SExp>, env: &mut IndexEnv) -> Option<SExp> {
+fn join(
+        &mut self,
+        a: Option<SExp>,
+        b: Option<SExp>,
+        guard: Option<&SExp>,
+        env: &mut IndexEnv,
+    ) -> Option<SExp> {
         match (a, b) {
             (Some(a), Some(b)) if a == b => Some(a),
+            (Some(a), Some(b)) => {
+                let joined = env.fresh("join");
+                if let Some(g) = guard {
+                    env.assume(SExp::App(
+                        "||".into(),
+                        vec![
+                            SExp::App(
+                                "&&".into(),
+                                vec![g.clone(), SExp::App("==".into(), vec![joined.clone(), a])],
+                            ),
+                            SExp::App(
+                                "&&".into(),
+                                vec![
+                                    negate(g),
+                                    SExp::App("==".into(), vec![joined.clone(), b]),
+                                ],
+                            ),
+                        ],
+                    ));
+                }
+                Some(joined)
+            }
             _ => Some(env.fresh("join")),
         }
     }
@@ -934,12 +987,26 @@ impl<'a> Walk<'a> {
         }
         let mut produced = results.first().cloned().flatten();
         for r in results.iter().skip(1) {
-            produced = self.join(produced, r.clone(), env);
+            produced = self.join(produced, r.clone(), None, env);
         }
         produced
     }
 
     pub(crate) fn let_bind(&mut self, b: &LetBind, env: &mut IndexEnv) {
+        // `prval C () = pf` — spending a proof rather than naming one.
+        // Matching a proof against one of its proposition's
+        // constructors is an assertion about how it was built, and what
+        // it buys is that constructor's own quantifiers and guards, read
+        // against the type the proof actually has. It refines exactly as
+        // a `case` arm does, because it is one: a match with a single
+        // arm the source insists cannot fail.
+        if let Some(pattern) = &b.destructures {
+            let subject = self.expr(&b.value, env);
+            let subject_ty = type_of_expr(&b.value, env)
+                .or_else(|| self.last_call.as_ref().and_then(|f| f.result_ty.clone()));
+            self.refine(pattern, subject.as_ref(), subject_ty.as_ref(), env);
+            return;
+        }
         // `val y = (e : t)` and `val y: t = e` are the same statement
         // written two ways, so they are read the same way.
         let (value, ascribed) = match &b.value {
@@ -991,6 +1058,17 @@ impl<'a> Walk<'a> {
                     "==".into(),
                     vec![SExp::Var(name.to_string()), witness.clone()],
                 ));
+            }
+        }
+        // `val (pf | v) = f(...)` — the proof half named.  It binds no
+        // storage, and its *type* is the whole of what it is for: the
+        // proposition the call proved, in the caller's own terms.  A
+        // body that later spends it — `prval C () = pf` — matches that
+        // proposition against a constructor, and can match nothing at
+        // all if the name never had a type.
+        if let (Some(name), Some(facts)) = (&b.proof_name, &reported) {
+            if let Some(Ty::Proof(proposition, _)) = &facts.result_ty {
+                env.bind_type(name, (**proposition).clone());
             }
         }
         // A proof is indexed by every number its proposition is about,

@@ -395,6 +395,11 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    /// `<<` and `>>` — the bit shifts.  Arithmetic like any other
+    /// binary operator, and kept apart from multiplication only
+    /// because the emitter has its own instruction for each.
+    Shl,
+    Shr,
     Mod,
     // comparison
     Eq,
@@ -764,6 +769,34 @@ pub struct LetBind {
     /// body goes on to rely on, so it is *marked* rather than dropped,
     /// and each stage does with it what its own job requires.
     pub proof: bool,
+    /// `prval string_index_p_neqz () = pf` — the constructor this proof
+    /// is asserted to have been built by.
+    ///
+    /// A proof binding may destructure rather than name: matching `pf`
+    /// against one of its proposition's constructors is how a program
+    /// spends a proof, and what it buys is that constructor's own
+    /// quantifiers and guards.  `string_index_p_neqz(n, i, c)` is
+    /// declared under `n > i`, so matching a `string_index_p(n, 0, c)`
+    /// against it is precisely the step that establishes `n > 0` — and
+    /// a checker that drops the constructor name has thrown away the
+    /// only line in the file that says so.
+    ///
+    /// `None` for the ordinary `prval pf = ...`, which binds a name.
+    /// The emitter never reads this: a proof binding is skipped whole.
+    pub destructures: Option<Pattern>,
+    /// `val (pf | v) = f(...)` — the name given to the *proof* half.
+    ///
+    /// A function that returns `(P(n, i, c) | char(c))` hands back two
+    /// things, and only the second has any bits.  The proof half is
+    /// still what carries the claim, and naming it is how the body
+    /// reaches the claim later — `prval C () = pf` cannot say anything
+    /// about `pf` if nothing ever said what `pf` was.  Dropping the name
+    /// costs the whole proposition, so it is kept even though it binds
+    /// no storage.
+    ///
+    /// `None` when the binding has no proof half, or did not name it.
+    /// The emitter never reads this: the proof half is erased.
+    pub proof_name: Option<String>,
 }
 
 #[cfg(test)]
@@ -1034,6 +1067,8 @@ mod tests {
             ty: None,
             value: Expr::IntLit(1),
             mutable: false,
+            destructures: None,
+            proof_name: None,
         };
         assert!(!bind.mutable);
     }
@@ -1047,6 +1082,8 @@ mod tests {
             ty: Some(ty("int")),
             value: Expr::IntLit(0),
             mutable: true,
+            destructures: None,
+            proof_name: None,
         };
         assert!(bind.mutable);
         assert_eq!(bind.name.as_deref(), Some("x"));
@@ -1107,6 +1144,8 @@ mod tests {
             ty: None,
             value: Expr::MacroCall("println!".into(), vec![]),
             mutable: false,
+            destructures: None,
+            proof_name: None,
         };
         assert_eq!(bind.name, None);
     }

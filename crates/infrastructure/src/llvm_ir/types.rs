@@ -706,6 +706,8 @@ pub(crate) fn llvm_type_of(ty: &Ty) -> Result<LlvmType, CompileError> {
 /// How an operator is written, for looking it up among the overloads.
 pub(crate) fn operator_symbol(op: BinOp) -> &'static str {
     match op {
+        BinOp::Shl => "<<",
+        BinOp::Shr => ">>",
         BinOp::Add => "+",
         BinOp::Sub => "-",
         BinOp::Mul => "*",

@@ -1871,6 +1871,60 @@ impl<'a> ParseCtx<'a> {
             TokenKind::Eq => "=".to_string(),
             TokenKind::Ne => "<>".to_string(),
             TokenKind::Ident(n) => n,
+            // `overload .is_marked with node_is_marked` — a *field* is
+            // overloaded exactly as an operator is, and the corpus
+            // declares whole interfaces this way. `.is_marked` names no
+            // field anywhere; it names the method `nx.is_marked()`
+            // reaches, and what it reaches is the function on the right.
+            // Recorded rather than returned, because it is answered
+            // where the field access is built and not by the emitter's
+            // operator table.
+            TokenKind::Dot => {
+                self.advance();
+                let Some(field) = field_name_of(&self.peek().kind) else {
+                    self.pos = save;
+                    self.skip_directive();
+                    return None;
+                };
+                self.advance();
+                if !matches!(self.peek().kind, TokenKind::With)
+                    && !matches!(&self.peek().kind, TokenKind::Ident(w) if w == "with")
+                {
+                    self.pos = save;
+                    self.skip_directive();
+                    return None;
+                }
+                self.advance();
+                if self.at(&TokenKind::Dollar) {
+                    self.advance();
+                }
+                let mut target = match self.peek().kind.clone() {
+                    TokenKind::Ident(n) => n,
+                    _ => {
+                        self.pos = save;
+                        self.skip_directive();
+                        return None;
+                    }
+                };
+                self.advance();
+                // `$M.f` — reached through a module alias, which is
+                // dropped here as it is everywhere else.
+                if self.at(&TokenKind::Dot) {
+                    self.advance();
+                    if let TokenKind::Ident(f) = self.peek().kind.clone() {
+                        self.advance();
+                        target = f;
+                    }
+                }
+                if self.at(&TokenKind::Of) {
+                    self.advance();
+                    if matches!(self.peek().kind, TokenKind::IntLit(_)) {
+                        self.advance();
+                    }
+                }
+                self.dot_overloads.insert(field, target);
+                return None;
+            }
             TokenKind::LBracket => {
                 self.advance();
                 if self.at(&TokenKind::RBracket) {

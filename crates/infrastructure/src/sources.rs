@@ -48,6 +48,9 @@ const PATH_MACROS: &[(&str, &str)] = &[
     ("$PATSHOME", "."),
     ("$PATSPRE", "prelude"),
     ("$PATSLIBATS", "libats"),
+    // The same directory under its shorter name, which is how the
+    // distribution's own `.hats` files reach it.
+    ("$LIBATS", "libats"),
     ("$PATSLIBATSLIBC", "libats/libc"),
     ("$LIBATSCC", "contrib/libatscc"),
     ("$LIBATSML", "libats/ML"),
@@ -60,6 +63,12 @@ const PATH_MACROS: &[(&str, &str)] = &[
     ("$LIBATSCC2CLJ", "contrib/libatscc2clj"),
     ("$LIBATSCC2SCM", "contrib/libatscc2scm"),
     ("$ATSCNTRB", "contrib/atscntrb"),
+    // Where ATS keeps *separately installed* packages.  Most are not
+    // in this checkout — they are their own repositories — but the ones
+    // that are should be found, and a request for one that is not
+    // should name the place it would have been.
+    ("$PATSHOMELOCS", "contrib/atscntrb"),
+    ("$HX_GLOBALS", "contrib/atscntrb/atscntrb-hx-globals"),
     ("$CATSPARSEMIT", "contrib/CATS-parsemit"),
     ("$EXTSOLVE", "contrib/ATS-extsolve"),
     ("$PATSOLVE", "contrib/ATS-extsolve"),

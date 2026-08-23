@@ -637,7 +637,43 @@ fn is_unsatisfiable(system: &[Linear]) -> bool {
         if system.iter().any(Linear::is_false_constant) {
             return true;
         }
-        let Some(var) = system.iter().flat_map(|l| l.terms.keys()).next().cloned() else {
+        // Which variable to eliminate next is a question of *cost*, not
+        // of correctness: Fourier–Motzkin reaches the same answer in any
+        // order, but each round replaces `pos * neg` constraints with
+        // their pairwise combinations, and a careless order squares a
+        // system that a careful one would have shrunk. Taking whichever
+        // variable happened to be first meant an extra *true* hypothesis
+        // could push the round past the budget and turn a proof into
+        // `Unknown` — a solver that knows less for having been told
+        // more. Cheapest-first is the standard remedy, and a variable
+        // bounded on only one side costs nothing at all: every
+        // constraint mentioning it is unbounded the other way and simply
+        // drops.
+        let vars: Vec<Mono> = {
+            let mut seen: Vec<Mono> = Vec::new();
+            for l in &system {
+                for m in l.terms.keys() {
+                    if !seen.contains(m) {
+                        seen.push(m.clone());
+                    }
+                }
+            }
+            seen
+        };
+        let Some(var) = vars
+            .into_iter()
+            .min_by_key(|var| {
+                let (mut pos, mut neg) = (0usize, 0usize);
+                for l in &system {
+                    match l.coeff(var) {
+                        0 => {}
+                        c if c > 0 => pos += 1,
+                        _ => neg += 1,
+                    }
+                }
+                pos * neg
+            })
+        else {
             return false;
         };
         let mut zero = Vec::new();
@@ -791,22 +827,35 @@ fn alternatives(e: &SExp) -> Option<Vec<Vec<Linear>>> {
 ///
 /// Returns one system per combination; a claim holds only if it holds in
 /// all of them.
-fn case_systems(hyps: &[SExp]) -> Vec<Vec<Linear>> {
+fn case_systems(hyps: &[SExp], relevant: &[String]) -> Vec<Vec<Linear>> {
     /// Past this many split hypotheses the combinations stop being worth
     /// their time; the rest are dropped, which weakens the answer and
     /// cannot falsify it.
     const MAX_SPLITS: usize = 4;
     let mut shared = Vec::new();
-    let mut splits: Vec<Vec<Vec<Linear>>> = Vec::new();
+    let mut candidates: Vec<Vec<Vec<Linear>>> = Vec::new();
+    // Whether each candidate split shares a variable with what is
+    // actually being proved. A function with several branch merges in
+    // scope leaves several `||` hypotheses lying around; without this,
+    // the budget above is spent on whichever were written first, and a
+    // goal reached later loses the one split it actually needed to an
+    // unrelated split from earlier in the same function.
+    let mut relevance: Vec<bool> = Vec::new();
     for h in hyps {
         if let Some(a) = atoms(h) {
             shared.extend(a);
         } else if let Some(cases) = alternatives(h) {
-            if splits.len() < MAX_SPLITS {
-                splits.push(cases);
-            }
+            candidates.push(cases);
+            relevance.push(!relevant.is_empty() && h.vars().iter().any(|v| relevant.contains(v)));
         }
     }
+    let mut order: Vec<usize> = (0..candidates.len()).collect();
+    order.sort_by_key(|&i| !relevance[i]);
+    let splits: Vec<Vec<Vec<Linear>>> = order
+        .into_iter()
+        .take(MAX_SPLITS)
+        .map(|i| candidates[i].clone())
+        .collect();
     let mut systems = vec![shared];
     for cases in splits {
         systems = systems
@@ -829,8 +878,9 @@ fn case_systems(hyps: &[SExp]) -> Vec<Vec<Linear>> {
 /// branch that cannot run, and reporting that is more useful than
 /// silently proving every claim inside it.
 pub fn is_contradictory(hyps: &[SExp]) -> bool {
-    // Impossible in every case is impossible.
-    case_systems(hyps).iter().all(|s| is_unsatisfiable(s))
+    // Impossible in every case is impossible. No goal is on trial here,
+    // so no split is more relevant than any other.
+    case_systems(hyps, &[]).iter().all(|s| is_unsatisfiable(s))
 }
 
 /// Does `hyps` entail `goal`?
@@ -890,7 +940,8 @@ pub fn entails(hyps: &[SExp], goal: &SExp) -> Verdict {
 
     // One system per case the hypotheses leave open.  A claim holds only
     // if it holds in all of them, and is false only if it fails in all.
-    let systems: Vec<Vec<Linear>> = case_systems(hyps)
+    let relevant = goal.vars();
+    let systems: Vec<Vec<Linear>> = case_systems(hyps, &relevant)
         .into_iter()
         .map(|mut base| {
             // What the hypotheses say about the *functions* they
@@ -1296,5 +1347,38 @@ mod tests {
         // facts; it must not invent a tighter bound than they imply.
         let hyps = vec![app(">=", v("m"), i(2)), app(">=", v("n"), i(3))];
         assert_eq!(entails(&hyps, &app(">=", app("*", v("m"), v("n")), i(10))), Verdict::Unknown);
+    }
+
+    #[test]
+    fn a_true_hypothesis_never_costs_a_proof_that_held_without_it() {
+        // Fourier-Motzkin reaches the same answer whatever order it
+        // eliminates in, but each round replaces `pos * neg` constraints
+        // with their combinations, so a careless order can square a
+        // system that a careful one shrinks — and then the round is
+        // abandoned for budget and the proof is lost.  The shape below
+        // is `strprefix`'s: a length chained to a bound through two
+        // renamings, alongside disequalities about unrelated characters.
+        // Every hypothesis here is true, and the last one used to turn
+        // `Proved` into `Unknown` purely by being present.
+        let all = vec![
+            app(">=", v("n1"), i(0)),
+            app(">=", v("n2"), i(0)),
+            app("==", v("c%5"), v("c%6")),
+            app(">", v("n%7"), v("i%8")),
+            app("!=", v("c%9"), i(0)),
+            app("==", v("n%7"), v("n1")),
+            app("==", v("i%8"), i(0)),
+            app("==", v("c%9"), v("c%5")),
+            app(">", v("n%10"), v("i%11")),
+            app("!=", v("c%12"), i(0)),
+            app("==", v("n%10"), v("n2")),
+            app("==", v("i%11"), i(0)),
+            app("==", v("c%12"), v("c%6")),
+        ];
+        let goal = app(">", v("n1"), i(0));
+        // `n%7 > i%8` with `n%7 == n1` and `i%8 == 0` is already enough.
+        assert_eq!(entails(&all[3..8], &goal), Verdict::Proved);
+        // and stays enough however much else is true alongside it.
+        assert_eq!(entails(&all, &goal), Verdict::Proved);
     }
 }

@@ -9,7 +9,7 @@
 //! - Automatic fallback to cooked/buffered reader when stdin is not a TTY (pipes, tests)
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, IsTerminal, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -53,7 +53,6 @@ impl LineReader {
         output.flush()?;
 
         let _guard = RawModeGuard::enter();
-        let mut stdin = io::stdin();
 
         let mut buffer: Vec<char> = Vec::new();
         let mut cursor_pos = 0usize;
@@ -62,7 +61,7 @@ impl LineReader {
 
         loop {
             let mut byte = [0u8; 1];
-            if stdin.read_exact(&mut byte).is_err() {
+            if input.read_exact(&mut byte).is_err() {
                 return Ok(None);
             }
 
@@ -125,7 +124,7 @@ impl LineReader {
                 // Escape sequence (Arrows, Home, End, Delete)
                 0x1b => {
                     let mut seq = [0u8; 2];
-                    if stdin.read_exact(&mut seq).is_ok() && seq[0] == b'[' {
+                    if input.read_exact(&mut seq).is_ok() && seq[0] == b'[' {
                         match seq[1] {
                             // Up Arrow: History backward
                             b'A' => {
@@ -179,7 +178,7 @@ impl LineReader {
                             // Extended sequences e.g. Delete (3~)
                             b'3' => {
                                 let mut last = [0u8; 1];
-                                if stdin.read_exact(&mut last).is_ok()
+                                if input.read_exact(&mut last).is_ok()
                                     && last[0] == b'~'
                                     && cursor_pos < buffer.len()
                                 {

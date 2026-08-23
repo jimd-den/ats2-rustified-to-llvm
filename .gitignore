@@ -19,3 +19,4 @@ ats2-harness-ir.txt
 target_root/
 crates/harness_root/
 -e target_root/ncrates/harness_root/n
+__pycache__/
